@@ -105,6 +105,22 @@ authority.
 `TypeError: 'NoneType' object is not callable` — an error that points nowhere near the
 cause. Use `.to_dict()`.
 
+**`delete_namespace()` has a different signature than the docs show.** The published
+Pinecone docs give `index.delete_namespace(name="...")`; the method installed in the
+backend venv (pinecone 7.3.0) is `delete_namespace(namespace: str)`. The documented call
+raises `TypeError`. This is the 7.x/8.x split above biting in a new place — the docs
+describe 8.x, the app runs 7.x because `langchain-pinecone` pins `pinecone<8.0.0`.
+`app/rag/delete.py` sidesteps it entirely by going through
+`PineconeVectorStore.delete(delete_all=True)`, which also **batches ids at 1000 per
+request** and **defaults to the namespace the store was constructed with** — so the
+namespace stays structurally underivable from caller input rather than merely
+un-passed.
+
+**`describe_index_stats()` lags writes.** Reading a namespace's vector count immediately
+after an upsert or delete can still return the previous value. Anything asserting on it —
+a test, a UI badge — must poll rather than read once, or it fails in a way that looks
+like a broken delete.
+
 ### Changing something "immutable"
 
 `create_index.py --recreate` refuses to delete a populated index. That guard is not an
@@ -350,6 +366,21 @@ info vanishes with a bare `KeyError`, nowhere near the actual cause. Scope is ex
 **Key on `sub`, never `email`.** Google reassigns emails within a Workspace domain; `sub`
 is never reused.
 
+**`POST /api/auth/dev-login` is an authentication bypass, in a public repo, on a service
+that deploys to production.** It exists because a real Google login cannot be automated —
+it needs a human at a consent screen — so without it nothing downstream of identity can be
+tested end to end. Three gates must *all* pass or it returns 404 (not 403; the route does
+not advertise itself): `DEV_AUTH_ENABLED=true`, `ENVIRONMENT=development`, and a loopback
+client address. It logs a WARNING on every success.
+
+Two properties keep it safe rather than merely discouraged. It stores
+`google_sub = "dev|<email>"`, so a dev identity can never collide with a real Google `sub`
+— signing in for real creates a *separate* user row. And it reaches the same
+`create_session` path as the OAuth callback, so only the identity assertion is stubbed and
+the session machinery under test is the real one. **`ENVIRONMENT` defaults to
+`development`**, so on Render only the flag and the loopback check hold the gate — set
+`ENVIRONMENT=production` there explicitly.
+
 **`SessionMiddleware` defaults to `same_site="lax"`.** That survives the top-level
 redirect back from Google, so login appears to work — then the first XHR from React fails
 because the cookie is not sent. Set `same_site="none", https_only=True` explicitly.
@@ -370,6 +401,18 @@ Configure both explicitly or it fails on a missing `OPENAI_API_KEY`.
 **`context_recall` requires a reference answer.** The other three metrics work from
 question + contexts + answer alone. That is why `golden_questions.reference_answer` is not
 decorative.
+
+**Deleting a document destroys the stored contexts of every past query that cited it.**
+`query_chunks.chunk_id` is `ON DELETE CASCADE` to `chunks`, and `chunks.document_id`
+cascades from `documents` — so removing one source file silently empties the `contexts`
+that `context_precision` and `context_recall` read. A scorecard keeps its *scores* and
+loses its *evidence*, which is worse than losing both, because the numbers still render
+and nothing signals that they are no longer reproducible. Verified 2026-08-15: a query
+with one cited chunk left zero `query_chunks` rows after its document was deleted.
+Re-verified that the write path is correct — a fresh query records rank, similarity and
+rerank score properly — so this is the cascade, not a missing write. Decide before Stage 3
+whether eval history should pin its contexts by copying the text, or whether deleting a
+document that an `eval_run` depends on should be refused.
 
 ---
 

@@ -1,1 +1,20 @@
 @import "tailwindcss";
+
+/*
+  Two base rules, and no more. Everything else is a utility class on the
+  element that needs it -- which keeps the styling next to the markup it
+  applies to and avoids a second place to look when something renders wrong.
+*/
+
+:root {
+  /* Tells the browser to render its own chrome dark: form controls, the
+     scrollbar, and the native file-picker button. Without it the file input in
+     the Documents tab renders as a light-grey control on a near-black panel. */
+  color-scheme: dark;
+}
+
+body {
+  /* Painted here as well as on the app root so the overscroll area past the
+     top or bottom of the page is not white on a dark UI. */
+  background-color: var(--color-slate-950);
+}

@@ -10,6 +10,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 from starlette.middleware.sessions import SessionMiddleware
 
+from app.api.agents import router as agents_router
+from app.api.ask import router as ask_router
+from app.api.documents import router as documents_router
+from app.auth.routes import router as auth_router
 from app.config import settings
 from app.db.session import engine
 
@@ -57,6 +61,17 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# Auth first: everything below it depends on `current_user`, and mounting it
+# last would still work but reads as though the API were the primary surface.
+# `agents` before `documents`/`ask` only for legibility - the paths are
+# distinct segments, so FastAPI's registration order does not disambiguate
+# anything here.
+app.include_router(auth_router)
+app.include_router(agents_router)
+app.include_router(documents_router)
+app.include_router(ask_router)
 
 
 @app.get("/api/health")

@@ -32,6 +32,21 @@ class Settings(BaseSettings):
     oauth_redirect_uri: str = "http://localhost:8000/api/auth/google/callback"
     session_secret_key: str = "dev-only-change-me"
 
+    # Two settings that exist only to gate POST /api/auth/dev-login, the
+    # authentication bypass a browser test needs because a real Google sign-in
+    # ends at a human-only password prompt. Full reasoning in app/auth/routes.py.
+    #
+    # `environment` is informational everywhere else; only the exact string
+    # "development" unlocks the bypass, so an unset or misspelled value fails
+    # closed. Set ENVIRONMENT=production on Render.
+    environment: str = "development"
+
+    # Off unless a local .env turns it on deliberately. This repository is
+    # public and deploys straight to production, so the flag defaults to the
+    # safe value and never inherits one. It is the weakest of the three gates on
+    # its own -- the loopback check is what holds if this one is set by mistake.
+    dev_auth_enabled: bool = False
+
     # --- Frontend ---
     frontend_url: str = "http://localhost:5173"
 

@@ -49,3 +49,10 @@ pypdf
 # MCP tools as LangChain tools. Nothing imports this yet -- it is here so the
 # Stage 2 agent can be given real tools without a dependency change mid-build.
 langchain-mcp-adapters
+
+# Multipart form parsing, required by FastAPI's UploadFile. It was already
+# present in the venv, but only transitively via mcp <- langchain-mcp-adapters --
+# a package the comment above admits nothing imports yet. Removing that package
+# would have killed every upload route at import time with a RuntimeError about
+# a missing dependency, nowhere near the change that caused it. Direct now.
+python-multipart
