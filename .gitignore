@@ -1,0 +1,70 @@
+# ---- Secrets: never commit these ----
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets.toml
+.streamlit/secrets.toml
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.Python
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# ---- Course material ----
+# The NTU workshop PDFs (~17MB) are excluded pending a decision on whether
+# redistributing them in a PUBLIC repo is permitted. See PRD.md open item 6.
+# Large binaries in git are effectively permanent - removing them later means
+# rewriting history. Delete these lines once the licensing question is settled.
+*.pdf
+
+# ---- Node / frontend ----
+node_modules/
+dist/
+dist-ssr/
+.vite/
+*.tsbuildinfo
+*.local
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ---- RAG runtime artifacts ----
+# Chroma's embedded store is a SQLite file that gets rebuilt on ingest.
+chroma_db/
+.chroma/
+*.sqlite3
+
+# Documents uploaded at runtime (may be private; re-ingestable anyway)
+data/uploads/
+
+# Trace + evaluation output
+traces/
+eval_results/
+*.trace.jsonl
+
+# ---- Editors / OS ----
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini

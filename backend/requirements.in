@@ -1,0 +1,25 @@
+# Source of truth for direct dependencies. Resolved versions are pinned in
+# requirements.txt, which is what Render installs.
+#
+# To regenerate:
+#   .venv/Scripts/python.exe -m pip install -r requirements.in
+#   .venv/Scripts/python.exe -m pip freeze > requirements.txt
+
+# Web
+fastapi
+uvicorn[standard]
+
+# Config
+pydantic
+pydantic-settings
+python-dotenv
+
+# Database
+sqlalchemy[asyncio]
+asyncpg
+alembic
+
+# Auth
+authlib
+itsdangerous
+httpx
