@@ -76,15 +76,33 @@ class Settings(BaseSettings):
     def db_connect_args(self) -> dict:
         """asyncpg connect args.
 
-        Render Postgres refuses non-TLS connections with
-        `InvalidAuthorizationSpecificationError: SSL/TLS required`. asyncpg does
-        not read libpq's `sslmode`, so TLS has to be requested here instead --
-        stripping sslmode from the URL (see async_database_url) is only half the
-        fix, and on its own produces exactly that error.
+        Two separate Render quirks meet here.
+
+        1. Render Postgres refuses non-TLS connections with
+           `InvalidAuthorizationSpecificationError: SSL/TLS required`. asyncpg
+           does not read libpq's `sslmode`, so TLS must be requested here --
+           stripping sslmode from the URL (see async_database_url) is only half
+           the fix and on its own produces exactly that error.
+
+        2. The INTERNAL endpoint presents a self-signed certificate, so a
+           verifying context fails with
+           `SSLCertVerificationError: self-signed certificate`. The EXTERNAL
+           endpoint has a normal public certificate and verifies fine.
+
+        Internal hostnames have no dots (`dpg-xxx-a`); external ones are FQDNs
+        (`dpg-xxx-a.singapore-postgres.render.com`). We verify when we can and
+        fall back to encrypted-but-unverified on the private network, where the
+        traffic never leaves Render.
         """
         if not self.database_url:
             return {}
-        return {"ssl": ssl.create_default_context()}
+
+        host = urlsplit(self.database_url).hostname or ""
+        ctx = ssl.create_default_context()
+        if "." not in host:
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+        return {"ssl": ctx}
 
     @property
     def cors_origins(self) -> list[str]:
