@@ -14,7 +14,7 @@ changing anything infrastructural.
 | Backend | FastAPI · SQLAlchemy 2.0 (async) · Alembic |
 | Frontend | React 19 · Vite · Tailwind CSS 4 |
 | Database | Render Postgres 18 (Singapore) |
-| Vector DB | Pinecone serverless, 768d cosine (`us-east-1`) |
+| Vector DB | Pinecone serverless, 768d cosine (`ap-southeast-1`, Singapore) |
 | Embeddings | `gemini-embedding-2` @ 768 dims |
 | Generation | `gemma-4-31b-it` via the Gemini API |
 | Reranker | Cohere `rerank-v3` |

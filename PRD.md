@@ -60,7 +60,7 @@ unless the deployment target or available credentials genuinely force a change.
 | Document loaders | `PyPDFLoader`, `TextLoader` | same | — |
 | Text splitter | `RecursiveCharacterTextSplitter` | same | — |
 | **Embeddings** | **`gemini-embedding-2` @ 768 dims** | Ollama `nomic-embed-text` | 🔄 |
-| **Vector DB** | **Pinecone serverless, 768d, cosine, `us-east-1`** | Chroma embedded (SQLite) | 🔄 |
+| **Vector DB** | **Pinecone serverless, 768d, cosine, `ap-southeast-1`** | Chroma embedded (SQLite) | 🔄 |
 | Retriever | `PineconeVectorStore.as_retriever()` | `Chroma.as_retriever()` | — |
 | **Generation LLM** | **`gemma-4-31b-it`** via Gemini API | Ollama `llama3.2` | 🔄 |
 | Decision LLM | Gemini Flash | — | ➕ |
@@ -173,10 +173,10 @@ meaning.
 Namespace is baked into every vector at upsert time, so this cannot be changed later
 without re-ingesting.
 
-**Capacity.** Pinecone caps namespaces per index by plan: **Starter 100, Builder 1,000,
-Standard 100,000**. That cap is the ceiling on total agents, and it — not storage — is the
-binding constraint. The full 14-corpus document set is only ~1.4 MB of text, roughly
-700–900 chunks, about 2–3 MB of vectors against a 2 GB allowance.
+**Capacity.** Pinecone caps namespaces per index by plan: Starter 100, **Builder 1,000**
+(current), Standard 100,000. That cap is the ceiling on total agents, and it — not
+storage — is the binding constraint. The full 14-corpus document set is only ~1.4 MB of
+text, roughly 700–900 chunks, about 2–3 MB of vectors against a 10 GB allowance.
 
 ### 3.3 Indexing (runs when documents change)
 
@@ -447,11 +447,17 @@ entry.
 | React frontend | Static Site | Free (no paid tiers exist) | Global CDN | $0 |
 | FastAPI backend | Web Service | Lowest paid (`starter`) | **Singapore** | ~$7/mo |
 | PostgreSQL 18 | Render Postgres | Lowest paid (`basic_256mb`) | **Singapore** | ~$6–7/mo |
+| Pinecone | Serverless index | **Builder** | **Singapore** | ~$20/mo |
+| Cohere | Rerank API | Free tier (1,000 calls/mo) | US | $0 |
+| Gemini | AI Studio API | Free tier | Global | $0 |
 
-Estimated total: **~$13–14/mo**, plus Postgres storage at roughly $0.30/GB/month. Render's
+Estimated total: **~$33–34/mo**, plus Postgres storage at roughly $0.30/GB/month. Render's
 pricing page is JavaScript-rendered and could not be read programmatically, so the
-per-service figures are approximate; the Postgres instance is provisioned and its actual
-charge will be visible on the first invoice.
+per-service figures are approximate; actual charges will be visible on the first invoice.
+
+The Pinecone Builder plan buys two things at once: the agent ceiling rises from 100 to
+1,000 namespaces (§3.2), and `ap-southeast-1` becomes available, removing the
+trans-Pacific retrieval hop (§6.2).
 
 Static sites have no paid instance tiers — they are free and CDN-served, with outbound
 bandwidth and build minutes counted against the workspace's monthly allowance.
@@ -472,48 +478,40 @@ mid-login with no feedback. The lowest paid tier buys always-on.
 |---|---|---|
 | Render Postgres | **Singapore** | Data residency; closest to users |
 | Render backend | **Singapore — required** | Render services can only use the private network **within a region** |
-| Pinecone index | AWS **`us-east-1`** | Forced: Pinecone's free plan permits no other region |
+| Pinecone index | AWS **`ap-southeast-1`** (Singapore) | Co-located with the backend; no trans-Pacific hop |
 
 **The backend's region is not optional.** Render states plainly that services in different
 regions cannot communicate over a private network. A Singapore database with an Oregon
 backend would be forced onto the external connection string over the public internet —
 slower, and needlessly exposed.
 
-**Pinecone is in the US, and this is a constraint rather than a choice.** Attempting to
-create the index in `ap-southeast-1` returns:
+**Pinecone was initially forced into `us-east-1`.** On the free Starter plan, creating the
+index in Singapore returns:
 
 > `Your free plan does not support indexes in the ap-southeast-1 region of aws.`
 
-Singapore requires Pinecone's Builder plan (~$20/mo), which would take the monthly total
-from ~$13–14 to ~$33–34. That is also why the pre-existing indexes on this account are all
-`us-east-1` — it is the only region the free plan allows, not a stylistic default.
+That is also why the pre-existing indexes on this account are all `us-east-1` — the only
+region Starter allows, not a stylistic default. The **Builder upgrade (~$20/mo)** removed
+the restriction, and the index was recreated in `ap-southeast-1` while it still held zero
+vectors, so the move cost nothing. Doing it after the first ingest would have required
+re-embedding every document, because region is fixed at index creation.
 
-The accepted cost is a trans-Pacific hop on every vector search, and Stage 2 issues two to
-three of them per question. Two things make this tolerable:
-
-- Cohere's reranker is US-hosted with no Singapore endpoint, so Stage 2 already contains
-  one mandatory trans-Pacific call regardless.
-- Chunk text lives in Postgres in Singapore; Pinecone holds vectors and minimal metadata.
-  Document text therefore does not leave Singapore — though embeddings are not a hard
-  privacy guarantee, so this reduces exposure rather than eliminating it.
-
-If latency or residency later matters more than $20/mo, upgrading and re-creating the
-index in `ap-southeast-1` requires a full re-ingest — cheap at workshop corpus size, which
-is what makes starting on the free plan a low-regret decision.
+Everything except Cohere is now co-located in Singapore.
 
 ### 6.3 Expected latency budget
 
 | Hop | Path | Rough cost |
 |---|---|---|
 | Backend ↔ Postgres | Private network, same region | sub-millisecond |
+| Backend ↔ Pinecone | Singapore ↔ Singapore | low tens of ms |
 | Backend ↔ Gemini | Global endpoint | varies with model and prompt |
-| **Backend ↔ Pinecone** | **Singapore ↔ US** | **~200–250ms RTT, 2–3× per Stage 2 query** |
-| **Backend ↔ Cohere Rerank** | **Singapore ↔ US** | ~100–300ms plus transit, once per query |
+| **Backend ↔ Cohere Rerank** | **Singapore ↔ US** | **~100–300ms plus transit, once per query** |
 
-The two cross-Pacific hops are the dominant network cost. Both are US-side and neither is
-avoidable on the current plans. Measured against multi-second LLM generation they are
-noticeable rather than fatal, but they are the first place to look if answer latency
-disappoints — and the Pinecone one is fixable with a $20/mo plan upgrade.
+Cohere is now the **only** cross-Pacific hop, and it fires once per query in Stage 2 —
+unlike Pinecone, which is called two to three times per question and would have compounded
+the penalty. Cohere has no Singapore endpoint, so this one is not avoidable on any plan.
+Measured against multi-second LLM generation it is noticeable rather than fatal, but it is
+the first place to look if answer latency disappoints.
 
 ### 6.4 Build and start configuration
 
@@ -574,8 +572,11 @@ delete, recreate, re-ingest. We are committed to 768.
 region for an existing service or database" — correcting a mistake means creating a new
 service and migrating data across. A Pinecone index's cloud and region are likewise fixed
 at creation. Together with the dimension above, that makes **three create-time decisions
-with no undo**: Pinecone dimension (768), Pinecone region (`us-east-1`), and Render region
-(Singapore, for every service).
+with no undo**: Pinecone dimension (768), Pinecone region (`ap-southeast-1`), and Render
+region (Singapore, for every service).
+
+A fourth belongs with them: **the Pinecone namespace scheme** (`agent_{id}`, §3.2). It is
+written into every vector at upsert, so changing it means re-ingesting every agent.
 
 **The Render API defaults `region` to `oregon`.** Omitting the field does not inherit the
 workspace's other services — it silently provisions in the wrong hemisphere, and the only
@@ -620,7 +621,7 @@ As of 2026-08-15. Scripts under `scripts/` are idempotent and safe to re-run.
 | Resource | Status | Detail |
 |---|---|---|
 | Render Postgres | ✅ **Live** | `agentic-rag-db` · `dpg-d9vt7v1t0dsc738c8kpg-a` · `basic_256mb` · **singapore** · PG **18** · `available` |
-| Pinecone index | ✅ **Live** | `agentic-rag-ntu` · **768d** · cosine · serverless aws **us-east-1** · `Ready` |
+| Pinecone index | ✅ **Live** | `agentic-rag-ntu` · **768d** · cosine · serverless aws **ap-southeast-1** · Builder plan · `Ready` |
 | Google OAuth client | ✅ **Live** | `Agentic RAG Web` · Web application · `dsai-mod-2-group-project` · **In production** · External |
 | GitHub repo | ✅ **Live** | https://github.com/simonraj79/AgenticRAG (public) |
 | Render web service | ✅ **Live** | `agentic-rag-api` · `srv-d9vtuhpt0dsc738dmgsg` · `starter` · **singapore** · https://agentic-rag-api-6x6b.onrender.com |
@@ -630,24 +631,31 @@ As of 2026-08-15. Scripts under `scripts/` are idempotent and safe to re-run.
 `{"status":"ok","database":"ok"}` from Singapore against the private-network Postgres, and
 the static site serves.
 
-Pinecone host: `agentic-rag-ntu-o3j2ojr.svc.aped-4627-b74a.pinecone.io`
+Pinecone host: `agentic-rag-ntu-o3j2ojr.svc.aps-d9bb-582b.pinecone.io`
 Pinecone tags: `embedding_model=gemini-embedding-2`, `dimension=768`, `project=agentic-rag-ntu`
 
 **Postgres.** Created via `scripts/create_render_db.py`. Connection strings were written
 directly into `.env` without being printed to a terminal. External access may require
 adding your IP to the database's allow-list in the Render dashboard.
 
-**Pinecone.** Created via `scripts/create_index.py`. Provisioning failed twice first, and
-both failures are recorded because they constrain the architecture:
+**Pinecone.** Created via `scripts/create_index.py`, now in Singapore on the Builder plan.
+It took three attempts, and the failures are recorded because they shaped the
+architecture:
 
-1. `ap-southeast-1` was rejected — the free plan permits only `us-east-1` (see §6.2).
-2. Creation was then rejected on quota: the free plan caps a project at 5 serverless
-   indexes and the account held exactly 5.
+1. `ap-southeast-1` was rejected — the free Starter plan permits only `us-east-1` (§6.2).
+2. Creation was then rejected on quota: Starter caps a project at 5 serverless indexes and
+   the account held exactly 5. Resolved by removing two unused indexes (`tbllive`,
+   `localflowise`), leaving `postgrespace`, `pacecoursedemo` and `pace` untouched.
+3. The index was created in `us-east-1` as a result, then **recreated in
+   `ap-southeast-1`** once the Builder upgrade landed.
 
-The quota was resolved by removing two unused indexes (`tbllive`, `localflowise`), leaving
-`postgrespace`, `pacecoursedemo` and `pace` untouched. Re-running the script is safe: it
-detects the existing index, verifies dimension, metric and region against this document,
-and reports drift rather than recreating anything.
+**The recreate was free because the index was still empty.** Region is fixed at creation,
+so moving it after the first ingest would have meant re-embedding every document.
+`scripts/create_index.py --recreate` enforces this: it checks `total_vector_count` and
+**refuses to delete a populated index**, rather than silently discarding vectors.
+
+Re-running the script without `--recreate` is always safe: it detects the existing index,
+verifies dimension, metric and region against this document, and reports drift.
 
 **Web service and static site.** Created via `scripts/create_render_services.py` *after*
 the scaffold was pushed, because `POST /v1/services` triggers a deploy immediately and a
@@ -781,8 +789,8 @@ localhost redirect URI.
 | Decision | Choice | Rationale |
 |---|---|---|
 | Tenancy | **Namespace per agent** | True isolation; a query cannot physically reach another agent's vectors |
-| Pinecone plan | **Builder (~$20/mo)** | Raises the agent ceiling 100 → 1,000 **and** unlocks `ap-southeast-1` |
-| Index region | **Move to Singapore** | Free to do while the index is empty; erases the trans-Pacific hop in §6.2 |
+| Pinecone plan | **Builder (~$20/mo)** ✅ done | Raises the agent ceiling 100 → 1,000 **and** unlocks `ap-southeast-1` |
+| Index region | **Singapore** ✅ done | Recreated while empty, so free; erases the trans-Pacific retrieval hop |
 | Chunking default | **800 tokens / 120 overlap, markdown-aware** | Sized for lecture transcripts, which dominate the corpus |
 | Slide PNGs | **Index the `.md` text; link images for citation display** | The PNGs render text already present in `{n}-slides.md` |
 | Marketplace scope | **Private agents + admin oversight** | Delivers the full flow with no sharing-permission surface |
@@ -806,7 +814,6 @@ Infrastructure is complete. What remains is application code.
 
 | # | Item | Blocking? |
 |---|---|---|
-| 0 | **Upgrade Pinecone to Builder, then recreate the index in `ap-southeast-1`** | **Time-sensitive — free only while the index is empty** |
 | 1 | Seed `agent_templates` (Lecture Q&A, Policy Lookup, From scratch) | Blocks agent creation |
 | 2 | Implement OAuth routes + session middleware (`app/auth/`) | Yes — everything is behind login |
 | 3 | Implement agent CRUD + admin listing | Blocks the marketplace flow |

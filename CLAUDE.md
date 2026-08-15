@@ -57,9 +57,20 @@ not imply a shared vector space. The index is tagged `embedding_model`, and
 `ingestion_runs` records model + dimension per ingest. Changing the model means deleting
 the index and re-ingesting.
 
-**Pinecone free plan: `us-east-1` only, 5 indexes maximum.** `ap-southeast-1` returns
-`Your free plan does not support indexes in the ap-southeast-1 region of aws`, and a sixth
-index returns a quota error. Both need the Builder plan (~$20/mo).
+**Plan limits differ sharply, and this account is on Builder.** On the free Starter plan
+`ap-southeast-1` returns `Your free plan does not support indexes in the ap-southeast-1
+region of aws`, and a sixth index returns a quota error — both bit us before the upgrade.
+
+| | Starter (free) | **Builder (current)** | Standard |
+|---|---|---|---|
+| Regions | `us-east-1` only | all | all |
+| Indexes | 5 | 10 | 20 |
+| Namespaces/index | 100 | **1,000** | 100,000 |
+| Storage/org | 2 GB | 10 GB | unlimited |
+
+**Region is fixed at index creation, so move it while the index is empty.** Recreating
+after ingest means re-embedding everything. `scripts/create_index.py --recreate` checks
+`total_vector_count` and refuses to delete a populated index.
 
 **Namespaces per index are capped by plan: Starter 100, Builder 1,000, Standard
 100,000.** With one namespace per agent, that cap *is* the maximum number of agents. It
