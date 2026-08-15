@@ -75,12 +75,45 @@ class Settings(BaseSettings):
     ingest_in_background: bool = True
 
     # --- Models / vector store (used from the RAG layer) ---
+    # `gemini_api_key` is now the EMBEDDING key, not the generation key. Chat
+    # moved to OpenRouter; embeddings deliberately did not, because the Pinecone
+    # index was written in `gemini-embedding-2`'s space and querying it through
+    # any other embedder returns confident nonsense rather than an error. Full
+    # reasoning in app/rag/llm.py. Both keys are required.
     gemini_api_key: str = ""
     pinecone_api_key: str = ""
     pinecone_index_name: str = "agentic-rag-ntu"
     cohere_api_key: str = ""
 
-    generation_model: str = "gemma-4-31b-it"
+    # --- OpenRouter (every chat model) ---
+    openrouter_api_key: str = ""
+    openrouter_base_url: str = "https://openrouter.ai/api/v1"
+
+    # Only providers that support every parameter in the request are eligible to
+    # serve it. OFF is the OpenRouter default and it is the dangerous one: an
+    # unsupported parameter is silently DROPPED, so a `function_calling` request
+    # routed to a provider without tool support comes back as prose rather than
+    # as an error. Measured from the live endpoint list on 2026-08-15:
+    # `google/gemma-4-31b-it` has 18 endpoints and at least two of them (a
+    # DeepInfra tier and a Together tier) list no `tools`/`tool_choice`.
+    #
+    # The escape hatch exists because the failure this causes -- "no allowed
+    # providers" when nothing satisfies the whole parameter set -- must be
+    # answerable without a code edit.
+    openrouter_require_parameters: bool = True
+
+    # Bounds one HTTP call. Distinct from `METRIC_TIMEOUT_S`, which bounds a
+    # whole judged metric: without this, one hung socket consumes that entire
+    # budget and is then reported as a metric timeout, which CLAUDE.md already
+    # records as ambiguous between a hang and a rate limit.
+    openrouter_timeout_s: float = 120.0
+
+    # Attribution headers. Optional, no user data -- these identify the app to
+    # OpenRouter's leaderboards, nothing more.
+    openrouter_app_url: str = "https://github.com/simonraj79/ClaudeRAGAgent"
+    openrouter_app_title: str = "Groundwork"
+
+    generation_model: str = "google/gemma-4-31b-it"
 
     # Stage 2's rewrite decision must come back as a typed object. The PRD hedged
     # this to Gemini Flash because structured output is undocumented for Gemma,
@@ -102,7 +135,54 @@ class Settings(BaseSettings):
     # Gemma's model card actually documents.
     #
     # So: collapsed to one model. Flash remains one env var away.
-    decision_model: str = "gemma-4-31b-it"
+    #
+    # Those trials ran against the Gemini API directly. The conclusion survives
+    # the move to OpenRouter but the reasoning gains a second half: OpenRouter
+    # drops parameters the routed provider does not support, and
+    # `function_calling` IS two such parameters (`tools`, `tool_choice`). See
+    # `openrouter_require_parameters` above -- structured output is now correct
+    # because of that flag, not only because of this method name.
+    decision_model: str = "google/gemma-4-31b-it"
+
+    # The model that DRAFTS the golden set (§3.6.1). Split out of
+    # `decision_model`, which it used to share by accident rather than by
+    # argument: the rewriter is a mechanical pronoun dereference on every
+    # conversational turn, where cost and latency dominate, while this runs once
+    # per agent and produces the measuring instrument every later scorecard is
+    # read through. Those want different models and now have them.
+    #
+    # Flash, on a head-to-head over the real corpus (10 questions each, same
+    # prompt, same sample). Two differences decided it:
+    #
+    # 1. REFUSAL QUESTIONS. PRD 3.6.1 calls these "the single largest
+    #    determinant of whether the set measures anything" -- they must be
+    #    plausible neighbours of the corpus, not absurdities. Gemma asked which
+    #    launch vehicle was used; Flash asked what propellant the thrusters use
+    #    and what the six modules are individually named. Both of Flash's hinge
+    #    on a detail the corpus RAISES and then does not complete, which is a
+    #    tighter probe of grounding than a fact it never mentions.
+    #
+    # 2. REFERENCE ANSWERS. `LLMContextRecall` decomposes the reference into
+    #    claims and checks each against the retrieved contexts, so a reference
+    #    of "Nineteen" (8 characters, Gemma's) gives it almost nothing to work
+    #    with. Flash's equivalent -- "The permanent crew complement is eleven,
+    #    which expands to nineteen during handover weeks" -- decomposes into
+    #    several attributable claims. Two of the four metrics read this field.
+    #
+    # Flash was also 5.8 s against 11.8 s, which is not why.
+    #
+    # **The honest cost: Flash is also `ragas_judge_model`, so it now grades
+    # against reference answers it wrote.** That touches only context precision
+    # and context recall -- faithfulness and answer relevance never read
+    # `reference`, and faithfulness is the metric that was actually broken. It is
+    # tolerable for two further reasons: PRD 3.6.1 designs these as DRAFTS a
+    # human edits (`source` flips to `edited`), and on the current single-chunk
+    # corpus both context metrics are pinned at 1.0 and therefore "not yet
+    # measured" regardless of who authored the reference. Set this back to
+    # `google/gemma-4-31b-it` to buy independence at the cost of both points
+    # above.
+    golden_set_model: str = "google/gemini-3.7-flash"
+
     structured_output_method: str = "function_calling"
     embedding_model: str = "models/gemini-embedding-2"
     embedding_dimension: int = 768
@@ -135,16 +215,49 @@ class Settings(BaseSettings):
     # number is not meaningless -- it is measured against the retrieved contexts,
     # not against taste -- but it is not independent either.
     #
-    # It stays `gemma-4-31b-it` because that is what was asked for, and three
-    # things keep the choice honest rather than hidden: switching is one env var,
-    # `eval_runs` records `judge_model` and `generation_model` separately per run
-    # (never read back from `agents.generation_model`, which can change after a
-    # run), and the scorecard says so when the two are equal.
-    ragas_judge_model: str = "gemma-4-31b-it"
+    # **It is no longer `gemma-4-31b-it`, and the split was earned by
+    # measurement rather than by principle.** Two runs of the ten-question
+    # golden set were self-judged, and both named faithfulness as the weakest
+    # metric -- the one number the scorecard exists to point at. Replaying
+    # identical turns showed that pointer was substantially judge error:
+    #
+    #   answer copied VERBATIM from its context   gemma 0.000   flash 0.667
+    #   495-char answer                           gemma 165.0s  flash 10.3s
+    #   1551-char answer                          gemma 196.3s  flash 28.9s
+    #
+    # A word-for-word copy of the context scoring zero is the judge failing, not
+    # the generator drifting; and at 165-196 s per call against a 180 s ceiling,
+    # WHICH rows survived was luck rather than a property of the answers. Answer
+    # relevance was stable across both judges (0.813 vs 0.811), so this was
+    # specific to faithfulness and to latency, not general judge quality.
+    #
+    # What stays true regardless of which model is set: `eval_runs` records
+    # `judge_model` and `generation_model` separately per run (never read back
+    # from `agents.generation_model`, which can change after a run), and the
+    # scorecard says so when the two are equal.
+    ragas_judge_model: str = "google/gemini-3.7-flash"
+
+    # Gemini 3.7 Flash has `reasoning.mandatory = true`: thinking cannot be
+    # turned off, only turned down (high / medium / low, default medium), and
+    # reasoning tokens bill at the completion rate.
+    #
+    # `low` because of what the judge actually does. Faithfulness decomposes an
+    # answer into atomic statements and asks whether each follows from the
+    # contexts; context precision and recall are the same shape. That is natural
+    # language inference against text already in the prompt -- not a problem that
+    # rewards a long chain of thought -- and the entire reason for leaving Gemma
+    # was that judged calls were too slow, so buying latency back with reasoning
+    # depth would undo the move. Raise it if a judged score looks wrong in a way
+    # that is not explained by the metric's own denominator.
+    ragas_judge_reasoning_effort: str = "low"
 
     # How many judge calls may be in flight at once, within one question.
     #
-    # This exists because of the Gemini free tier. Each scored question costs
+    # This existed because of the Gemini free tier. The constraint moved with the
+    # provider -- OpenRouter bills credits rather than refusing, and the 429 now
+    # comes from whichever upstream provider was routed to -- but the value did
+    # not, because the shape of the burst is unchanged and the cost of being
+    # wrong is asymmetric in the same direction. Each scored question costs
     # FOUR judged metrics, and three of them are themselves multi-call
     # (faithfulness generates statements then verdicts them; answer relevance
     # generates `strictness` questions from the answer). A ten-question run is

@@ -40,11 +40,12 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, System
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables import Runnable
-from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
 
 from app.config import settings
 from app.db.models import Agent
+from app.rag.llm import build_chat_model
 from app.rag.retriever import META_FILENAME, RERANK_SCORE_KEY, aretrieve
 
 log = logging.getLogger("uvicorn.error")
@@ -180,7 +181,7 @@ class AnswerResult:
         ]
 
 
-def get_chat_model(agent: Agent | None = None, **overrides) -> ChatGoogleGenerativeAI:
+def get_chat_model(agent: Agent | None = None, **overrides) -> ChatOpenAI:
     """The generation model.
 
     Sampling defaults come from the Gemma 4 model card's "standardized sampling
@@ -190,21 +191,28 @@ def get_chat_model(agent: Agent | None = None, **overrides) -> ChatGoogleGenerat
     determinism gain for a real risk of repetition loops. Override per call to
     measure, not by habit.
 
-    `convert_system_message_to_human` stays False: Gemma 4 supports the system
-    role natively. Gemma 3 did not, which is why so much example code still
-    flattens the system message into the user turn -- doing that here would bury
-    the grounding rules mid-prompt where they carry less weight.
+    **`top_k` survives the move to OpenRouter only because `build_chat_model`
+    carries it in `extra_body`.** It is not an OpenAI-API parameter, so the
+    client class has no field for it, and the three values above are one
+    configuration rather than three knobs -- sending two thirds of it would run
+    Gemma outside what it was calibrated for while looking, in the code, like it
+    had been configured correctly.
+
+    `convert_system_message_to_human` is gone with the Google client and needs no
+    replacement: Gemma 4 supports the system role natively, and the OpenAI
+    protocol carries a system message as its own turn. The old comment warned
+    against flattening the grounding rules into the user turn; that flattening is
+    now not expressible.
     """
     params = {
         "model": (agent.generation_model if agent and agent.generation_model else settings.generation_model),
-        "google_api_key": settings.gemini_api_key,
         "temperature": settings.generation_temperature,
         "top_p": settings.generation_top_p,
         "top_k": settings.generation_top_k,
-        "max_output_tokens": settings.generation_max_tokens,
+        "max_tokens": settings.generation_max_tokens,
     }
     params.update(overrides)
-    return ChatGoogleGenerativeAI(**params)
+    return build_chat_model(**params)
 
 
 @lru_cache(maxsize=1)
@@ -237,13 +245,19 @@ def get_contextualizer() -> Runnable:
             ("human", "{question}"),
         ]
     )
-    model = ChatGoogleGenerativeAI(
-        model=settings.decision_model,
-        google_api_key=settings.gemini_api_key,
+    model = build_chat_model(
+        settings.decision_model,
         temperature=settings.generation_temperature,
         top_p=settings.generation_top_p,
         top_k=settings.generation_top_k,
     )
+    # `method="function_calling"` now has a second thing holding it up, and the
+    # second one lives outside this file. It emits `tools` and `tool_choice`, and
+    # OpenRouter DROPS parameters the routed provider does not support rather
+    # than rejecting the request -- two of the eighteen endpoints serving this
+    # model advertise no tool support. `openrouter_require_parameters` is what
+    # keeps the request from silently landing on one of them and coming back as
+    # prose. Turning that flag off breaks this line without touching it.
     return prompt | model.with_structured_output(
         StandaloneQuestion, method=settings.structured_output_method
     )

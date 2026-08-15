@@ -2,7 +2,10 @@
 
 Conventions, insights and hard-won gotchas for this repo. **[PRD.md](PRD.md) is the
 specification**; this file is the operational companion — the things that cost debugging
-time and would cost it again.
+time and would cost it again. **[EVAL.md](EVAL.md) is the operator's guide to Stage 3**:
+every setting and per-agent parameter in tables, how to run an evaluation, and how to read
+a scorecard without being misled by it. What stays here is the *debugging* half — the
+symptoms, and which knob caused them.
 
 ---
 
@@ -23,13 +26,43 @@ time and would cost it again.
 | **Why is the DB unreachable?** | `curl -s https://api.ipify.org` — compare against the allow-list |
 | **Did `pip freeze` break the build?** | `grep -n pywin32 backend/requirements.txt` — the marker must survive |
 | **Which Pinecone namespaces exist?** | see "namespace counts" under *Embeddings and Pinecone* |
+| **Why does every model call 404?** | a parameter no provider advertises, **not** a bad model id — see *OpenRouter* |
 
-Both of the middle two are diagnostics for failures this project has hit **twice each**. Run
-them before reading a traceback, not after.
+Those four are diagnostics for failures this project has hit repeatedly — the first two
+**twice each**, the 404 **three times**, each time via a different parameter. Run them
+before reading a traceback, not after.
 
 **Local dev needs `DEV_AUTH_ENABLED=true` and `ENVIRONMENT=development` in `.env`** to use
 the dev-login shim; both are absent from `.env.example` on purpose. See the Google OAuth
 section for why that route is gated three ways.
+
+---
+
+## Configuration, by the failure it causes
+
+Full reference with every default is in **[EVAL.md §4](EVAL.md)**. This table is the
+reverse index: a symptom, and the setting behind it. Defaults are in
+[`backend/app/config.py`](backend/app/config.py) — every one of them carries the
+measurement that chose it.
+
+| Setting | Default | Get it wrong and… |
+|---|---|---|
+| `OPENROUTER_API_KEY` | — | Every chat model fails. Generation, rewrite, golden set, judge |
+| `GEMINI_API_KEY` | — | **Retrieval** fails, not generation — it is the EMBEDDING key now. Looks nothing like a missing model key |
+| `OPENROUTER_REQUIRE_PARAMETERS` | `true` | Off: a `function_calling` request silently loses `tools` and returns prose. On: an unadvertised parameter 404s the call. **Leave it on** and fix the parameter |
+| `GENERATION_MODEL` etc. | `author/model` | A bare id 404s naming a model that plainly exists — a namespace error that reads like an outage |
+| `GENERATION_TOP_K` | `64` | Sent to the Gemini family: no eligible provider, 404. `build_chat_model` drops it for `_NO_TOP_K_PREFIXES` |
+| `GENERATION_MAX_TOKENS` | `2048` | Passed as `ChatOpenAI(max_tokens=…)` it is renamed to `max_completion_tokens`, which OpenRouter honours but does not advertise → 404. Must go via `extra_body` |
+| `RAGAS_JUDGE_MODEL` | `google/gemini-3.7-flash` | Set to `GENERATION_MODEL` and the run is self-assessment; Gemma scored a verbatim-from-context answer **0.000** |
+| `RAGAS_JUDGE_REASONING_EFFORT` | `low` | Thinking is **mandatory** on Flash — raising this buys latency back, which is what leaving Gemma was for |
+| `GOLDEN_SET_MODEL` | `google/gemini-3.7-flash` | Currently equals the judge, so context precision/recall are graded against references the judge wrote |
+| `RAGAS_MAX_CONCURRENCY` | `2` | Greedy gives a scorecard full of nulls that looks like a broken judge |
+| `EMBEDDING_MODEL` / `_DIMENSION` | `gemini-embedding-2` / `768` | **Part of the index.** Changing either means deleting the index and re-ingesting |
+| `score_threshold` (per agent) | `0.5` | Governs *rewriting*, **not refusing**. Not a safety control |
+
+Per-agent retrieval parameters (`retrieve_k`, `rerank_top_n`, `chunk_size`, …) live on the
+`agents` row, not in the environment — **[EVAL.md §5](EVAL.md)** maps each to the metric it
+moves.
 
 ---
 
@@ -273,7 +306,95 @@ command, not as a thing to remember:
 grep -n 'pywin32' backend/requirements.txt
 ```
 
+### OpenRouter
+
+**Every chat model goes through OpenRouter; embeddings deliberately do not.**
+`app/rag/llm.py` is the only place a chat model is constructed — generation, the rewrite
+decision, the golden-set generator and the Ragas judge all pass through it, the same way
+`retriever.py` is the only place the retriever is built. Embeddings stay on
+`langchain-google-genai` because the Pinecone index was written in `gemini-embedding-2`'s
+space and OpenRouter serves no embedding model at all; moving them would force a full
+re-ingest to gain nothing. **So both `OPENROUTER_API_KEY` and `GEMINI_API_KEY` are
+required**, and Ragas now draws its judge LLM and its embedding model from two different
+providers.
+
+No new dependency. `ChatOpenAI` is an OpenAI-*protocol* client pointed at
+`openrouter.ai`; `langchain-openai` was already installed as a `langchain-pinecone`
+transitive. It finally earns its place — but the note above that "nothing calls OpenAI and
+no `OPENAI_API_KEY` is needed" still holds.
+
+**`provider.require_parameters` must be ON, and turning it on breaks two things that then
+have to be fixed.** OpenRouter's default is to *silently drop* any parameter the routed
+provider does not support. That is fatal for structured output: of the 18 endpoints serving
+`google/gemma-4-31b-it`, a DeepInfra tier and a Together tier advertise no
+`tools`/`tool_choice`, so a `function_calling` request routed there loses both fields and
+comes back as prose — the same failure shape as a Gemma markdown fence, arriving from a
+completely different direction. `{"provider": {"require_parameters": True}}` converts the
+silent drop into a routing constraint.
+
+The cost is that **every** parameter in the request must be one some provider advertises,
+and two of them are injected by langchain-openai without being asked for. Both produce the
+identical, unhelpful error:
+
+```
+404 No endpoints found that can handle the requested parameters
+```
+
+| Injected by | What it sends | Fix |
+|---|---|---|
+| `ChatOpenAI(max_tokens=…)` | renames to `max_completion_tokens` **unconditionally** — no flag | send `max_tokens` via `extra_body` |
+| `with_structured_output(method="function_calling")` | also binds `parallel_tool_calls: False` (base.py:2514) | `disabled_params={"parallel_tool_calls": None}` |
+
+**The `max_completion_tokens` case is the instructive one, and the obvious diagnosis is
+wrong.** OpenRouter *honours* it — verified: `max_completion_tokens=10` stopped at exactly
+10 tokens with `finish_reason=length`. It simply is not *advertised* in any provider's
+`supported_parameters`. So routing and execution consult different sources of truth and
+only the first is strict: a 404 on a working model id, caused by a parameter that works,
+because of the name it was sent under. Do not go looking for a dropped cap.
+
+`disabled_params` is langchain-openai's own answer to the second one — its docstring says a
+disabled parameter "will not be used by default in any methods, e.g. in
+`with_structured_output`". Reaching for `bind_tools` plus a parser instead would work and
+would cost the canonical class.
+
+**`top_k` can only travel in `extra_body`.** It is not an OpenAI-API parameter, so
+`ChatOpenAI` has no field for it. This is load-bearing rather than tidy: Gemma 4's card
+gives `temperature=1.0, top_p=0.95, top_k=64` as *one* configuration, and sending
+two-thirds of it runs the model outside its calibration while looking correctly configured
+in the code. Combined with `require_parameters`, a provider that cannot do `top_k` is now
+routed around rather than quietly handed a partial config.
+
+**And `top_k` must NOT be sent to the Gemini family at all** — it appears nowhere in
+`google/gemini-3.7-flash`'s parameter list, so under `require_parameters` it leaves zero
+eligible providers and 404s. That is not hypothetical: it is how the golden-set generator
+broke the first time it was pointed at Flash, having inherited Gemma's card values from the
+generation defaults. `build_chat_model` drops `top_k` for `_NO_TOP_K_PREFIXES` rather than
+making every caller remember, and dropping it is *correct* rather than merely expedient —
+`top_k` matters because Gemma's card gives it as part of one configuration, and a model
+outside that family has no such configuration to honour.
+
+**`n` is not available on this route, so `ResponseRelevancy(strictness=1)` stays.** The
+earlier note said to raise it against a judge supporting multiple candidates, "which Gemini
+Flash does" — true of the Gemini API, false here: `n` appears in
+`google/gemini-3.7-flash`'s OpenRouter parameter list nowhere, so `candidate_count=3` has
+no eligible provider. Changing the judge did not unlock this; changing the gateway closed
+it.
+
+**Model ids are `author/model`.** A bare `gemma-4-31b-it` returns a 404 naming a model that
+plainly exists, which reads like an outage rather than a namespace. `agents.generation_model`
+is free text an operator can type into, so `openrouter_slug()` maps the known legacy ids and
+**warns** rather than guessing silently.
+
+**Diagnostics.** `mcp__openrouter__list-model-endpoints` is the authority on which providers
+serve a model and what each advertises — the per-model `supported_parameters` is a *union*
+across providers and will tell you a parameter is supported when the endpoint you land on
+does not have it. Check endpoints, not the model.
+
 ### Gemma 4 on the Gemini API
+
+Measured before the move to OpenRouter. The structured-output finding survived it; the
+latency numbers did not, and the judge findings were superseded outright — see the
+OpenRouter and Ragas sections.
 
 **Structured output works, but only through a tolerant parser.** PRD §2 recorded it as
 undocumented and hedged Stage 2's rewrite decision to Gemini Flash. Measured 2026-08-15,
@@ -319,30 +440,50 @@ prompt governs *refusing*, and only the second one was load-bearing in every cas
 Do not treat `score_threshold` as a safety control. Stage 3 exists to turn 0.5 into a
 measured number.
 
-**`refusal_pass = 0 / 2` was HALF a detector bug, and the scorecard blamed the agent for it.**
-Feynman Explainer, 2026-08-15, both runs. The headline reads as two ungrounded answers. Read
-back from the database, the two rows have nothing in common:
+**`refusal_pass = 0 / 2` was THREE-QUARTERS a detector bug, and the scorecard blamed the
+agent for all of it.** Feynman Explainer, 2026-08-15, both runs — four refusal rows in total.
+An earlier version of this note said "half", and described the second row as answer-then-caveat
+*in both runs*. Replaying `_detect_refusal` over the stored answers shows that was a
+conflation: only run 2's second row was. Read back from the database:
 
-| Q | Answer | Verdict |
+| Run | Answer | Verdict |
 |---|---|---|
-| "Which of the fourteen launches took place in 2040?" | *"The provided text does not say which of the fourteen launches took place in 2040 [1]."* | **A perfect refusal, scored as a failure** |
-| "What are the specific duties of the eleven permanent crew members?" | two sentences of real content, *then* "it does not cover their specific duties" | Genuinely an answer — the persona |
+| 1 & 2 | *"The provided text does not say which of the fourteen launches took place in 2040 [1]."* | **A perfect refusal, scored as a failure** |
+| 1 | *"The provided text does not cover the specific duties of the eleven permanent crew members [1]."* | **Also a perfect refusal, also scored as a failure** |
+| 2 | two sentences of real content, *then* "…but it does not cover their specific duties" | Genuinely an answer — the persona |
 
-The first is a false negative in `_detect_refusal`, nothing more: **`"does not say"` is in
-neither `REFUSAL_MARKERS` nor `CAVEAT_MARKERS`.** Adding it makes the row pass. The agent did
-exactly the right thing and the measurement called it wrong — which is the same failure class
-as the `strictness=3` bug below, and worse than a crash for the same reason: **the scorecard
-still renders, and points confidently at the wrong thing.** The marker lists are a heuristic
-over natural language, `ask.py` says so, and this is the calibration it predicted would be
-needed. Expect more of these; the phrase a model reaches for is not guessable in advance.
+Three of the four were false negatives in `_detect_refusal`: **neither `"does not say"` nor
+`"does not cover"` was in either marker tier.** The agent did exactly the right thing and the
+measurement called it wrong — the same failure class as the `strictness=3` bug below, and
+worse than a crash for the same reason: **the scorecard still renders, and points confidently
+at the wrong thing.**
 
-The second is real, and is the tension worth keeping: the Feynman persona is *designed* to
+**Both phrases belong in `CAVEAT_MARKERS`, not `REFUSAL_MARKERS`, and that resolves a
+dilemma this file previously recorded as a real trade-off.** The old note warned that adding
+`"does not cover"` "would score this row as a refusal and quietly delete the finding" — true
+of the hard tier, which matches anywhere in the 200-character lead, and false of the caveat
+tier, which only counts before the model has answered anything. Position separates the two
+turns cleanly, and it was already built to:
+
+```
+run 1   "The provided text does not cover the specific duties…"   consumed=0     -> refusal
+run 2   "…states there are eleven crew [1]. It also mentions…
+         but it does not cover their specific duties."            consumed=198   -> answer
+```
+
+So the fix costs nothing: three rows flip to passing, the persona finding survives untouched,
+and five regression cases (including "answer first, caveat late") still read as answers. Put a
+new phrase in the hard tier only if a model would *never* say it while answering — `"does not
+say"` and `"does not cover"` both fail that test, which is exactly why they go in the soft one.
+
+The fourth row is real, and is the tension worth keeping: the Feynman persona is *designed* to
 **name the gap** rather than decline, which is pedagogically right and structurally an answer.
-Note where the phrase landed — sentence 3, `consumed=198` — so it fails `CAVEAT_MARKERS`'
-40-character preamble window on purpose. Answer-then-caveat is not a refusal, and that tier
-split is doing its job. **Adding `"does not cover"` to the hard tier would score this row as a
-refusal and quietly delete the finding**, so decide which behaviour is wanted before reaching
-for the obvious fix.
+That is PRD open item 16, and it is a finding about the persona, not about the detector.
+
+**Confirmed by run 3**: `refusal_pass` went `0 / 2` → `1 / 2` with no change to the agent.
+The row that flipped is the detector fix; the row that did not is the persona, and it is now
+the only one left. That is what a refusal metric should look like — measuring the agent
+rather than the marker list.
 
 The lesson generalises past this one bug: **a refusal metric measures the detector and the
 agent at once, and the two failures look identical on the card.** Before acting on a low
@@ -600,6 +741,10 @@ binaries in git are permanent — removing them later means rewriting history.
 
 ### Ragas
 
+> Running an evaluation, rather than debugging one? **[EVAL.md](EVAL.md)** has the routes,
+> every setting in a table, the refusal tiers, and the five ways a scorecard misleads. What
+> follows is the packaging and judge-behaviour half — the things that broke.
+
 **Ragas needs a judge LLM *and* an embedding model**, and defaults to OpenAI for both.
 Configure both explicitly or it fails on a missing `OPENAI_API_KEY`. Only `AnswerRelevancy`
 actually uses the embeddings — it generates questions back from the answer and compares them
@@ -651,6 +796,30 @@ the DeprecationWarning **at that import statement only**, not globally, so a dep
 anywhere else still surfaces. This was found by construction, not from docs — the warning is
 confidently wrong for this stack.
 
+**The golden set is drafted by `GOLDEN_SET_MODEL`, which is deliberately not
+`DECISION_MODEL`.** They were the same setting by accident until a head-to-head over the
+same corpus and prompt separated them. What decided it was not fluency but two specific
+properties the metrics actually read:
+
+| | `google/gemma-4-31b-it` | `google/gemini-3.7-flash` |
+|---|---|---|
+| Refusal probe | "Which launch vehicle was used?" — a fact the corpus never raises | "What propellant do the thrusters use?" — the corpus raises thrusters *and* propellant conservation, never the type |
+| Reference answer | `"Nineteen"` (8 chars) | `"The permanent crew complement is eleven, which expands to nineteen during handover weeks."` |
+| Time | 11.8 s | 5.8 s |
+
+The refusal difference is the one PRD §3.6.1 calls "the single largest determinant of
+whether the set measures anything" — Flash's probes hinge on a detail the corpus *starts*
+and does not finish, which is a far tighter test of grounding. The reference difference
+matters because `LLMContextRecall` decomposes that field into claims: a one-word reference
+gives it nothing to attribute.
+
+**The cost, recorded rather than hidden: the drafting model is currently also the judge**,
+so context precision and recall are graded against references the judge wrote. Faithfulness
+and answer relevance never read `reference` — and faithfulness is the metric that was
+actually broken — while both context metrics are pinned at 1.0 by the single-chunk corpus
+regardless. Set `GOLDEN_SET_MODEL=google/gemma-4-31b-it` to buy independence back at the
+cost of both rows above.
+
 **Exclude refusal questions from the metric means.** The golden set deliberately contains
 questions the corpus cannot answer, and `golden_questions.expected_behaviour = 'refuse'` marks
 them. A *correct* refusal retrieves nothing useful and returns an answer that deliberately
@@ -659,12 +828,91 @@ behaving perfectly. Averaging them in penalises correct refusals, and worse, it 
 weakest-metric pointer at whichever metric refusals punish hardest rather than at the real
 weakness. Score them separately as pass/fail on `behaviour_ok`.
 
-**Judge and generator are the same model right now, and that is self-assessment.**
-`RAGAS_JUDGE_MODEL` defaults to `gemma-4-31b-it`, which is also `GENERATION_MODEL`. Asking a
-model "is this answer supported by these contexts?" about its own output is a known
-self-preference bias; PRD §2.1 specifies Gemini Flash Lite as judge for exactly this reason.
-It is one env var to change, `eval_runs` records both models, and the scorecard says so on
-screen — but do not read faithfulness as an independent measurement until they differ.
+**The judge is no longer the generator. `RAGAS_JUDGE_MODEL` is now
+`google/gemini-3.7-flash`** while generation stays on `google/gemma-4-31b-it`, so a run is
+no longer self-assessment and `self_judged` on the scorecard should read False. Everything
+below about Gemma-as-judge is kept as the evidence that forced the split, not as current
+configuration. What still holds regardless of the models: `eval_runs` records
+`judge_model` and `generation_model` separately per run, never reading either back from
+`agents.generation_model`, which can change after a run.
+
+**Verified on the new judge before trusting it** — the same shape Gemma scored 0.000:
+
+| Case | Gemma judge | Gemini 3.7 Flash |
+|---|---|---|
+| Answer copied **verbatim** out of its context | **0.000** | **1.000** |
+| Same answer plus two invented facts | — | **0.250** |
+| Correct refusal | skipped | skipped, `behaviour_ok=True` |
+
+Three turns scored in 14.4 s total, against Gemma's 165–196 s for a *single* faithfulness
+call. The metric now discriminates grounded from ungrounded rather than failing to grade
+its own job.
+
+**Thinking cannot be turned off on Gemini 3.7 Flash** (`reasoning.mandatory = true`), only
+turned down — high / medium / low, default medium, billed at the completion rate.
+`RAGAS_JUDGE_REASONING_EFFORT` defaults to `low` because the judged metrics are natural
+language inference over text already in the prompt, not a problem that rewards a long
+chain of thought, and the whole reason for leaving Gemma was latency. It is not free even
+so: a trivial YES/NO verdict measured **80 reasoning tokens out of 81 output tokens**.
+
+#### Run 3 — the first trustworthy scorecard
+
+Same agent, same corpus, same ten questions. Only the measurement changed: independent
+judge, and the refusal detector fixed.
+
+| | Run 1 | Run 2 | **Run 3** |
+|---|---|---|---|
+| Judge | `gemma-4-31b-it` | `gemma-4-31b-it` | `google/gemini-3.7-flash` |
+| Self-judged | yes | yes | **no** |
+| Duration | 1497 s | 1380 s | **90 s** |
+| `error_count` | 7 | 2 | **0** |
+| faithfulness | 0.562 (n=**7**) | 0.628 (n=**6**) | **0.769 (n=8)** |
+| answer relevance | 0.795 (n=**1**) | 0.938 (n=8) | 0.959 (n=8) |
+| context precision / recall | 1.000 / 1.000 | 1.000 / 1.000 | 1.000 / 1.000 |
+| `refusal_pass` | 0 / 2 | 0 / 2 | **1 / 2** |
+
+**Run 3 is the first run whose footnote is true.** Every metric's `n` equals the
+`scored_count` of 8 that the card prints. Run 1's answer relevance was a mean over a
+single value while the card claimed 8, and run 2's faithfulness over six — always the
+metric most likely to fail, which is the one the weakest-metric pointer selects.
+
+**Do not read 0.628 → 0.769 as the judge delta.** Every run re-asks the questions, and
+generation runs at temperature 1.0, so the answers differ between runs — judge change and
+answer variation are confounded there. The clean evidence is the controlled test above:
+same stored answer, two judges, 0.000 versus 1.000.
+
+**Faithfulness is still the weakest metric, and on a teaching persona it structurally
+cannot be anything else.** This is the finding of the run, and the scorecard's own advice
+is dangerous. The lowest-scoring answer, 0.500:
+
+```
+1. "The collision avoidance threshold ... is a probability of 1 in 10,000 [1]."   grounded
+2. "Please restate this idea in your own words to ensure you have understood it."  not
+```
+
+And the 0.571 row (0.565 in run 2 — stable across judges *and* regenerated answers):
+sentences 1–4 are four correct figures straight from the context; sentence 5 is
+**"**Analogy:** The Ka-band is like a high-speed highway that is closed in several
+sections…"**; sentence 6 asks the learner to paraphrase. Four of seven statements
+supported.
+
+Nothing was hallucinated *about the corpus*. Retrieval was right and every fact was right.
+Faithfulness is counting the analogy and the comprehension check as unsupported claims —
+which is correct, since they are not in the context, and they are the two things
+`feynman-explainer` is explicitly designed to produce (§4.2). **The card then names
+faithfulness as weakest and advises tightening the grounding clause and reducing persona
+verbosity, i.e. deleting the pedagogy.** Same failure class as the refusal detector: the
+measurement penalising correct behaviour and confidently recommending its removal.
+
+One caveat against over-reading it: all eight answers carry a pedagogical tail, including
+the three that scored **1.000**, so the judge does not always extract an imperative as a
+claim. Part of the spread is genuine judge variance on non-claim sentences, not persona
+cost. The analogy, though, is an unsupported statement by construction.
+
+**So faithfulness is not yet a valid measure for a persona that invents explanatory
+material.** Either score personas against a rubric that exempts clearly-marked pedagogy,
+or measure faithfulness on the plain `lecture-qa` template — still never tested here — and
+treat the persona number as a separate thing. Do not act on the pointer as written.
 
 **`ResponseRelevancy(strictness=...)` must be 1 for Gemma. The default of 3 fails every
 call.** `strictness` does not mean three requests — it asks for three *candidates* in one
@@ -677,10 +925,15 @@ failure mode is the dangerous kind — it is per-metric, so the run still report
 `status=completed` with three metrics populated, `answer_relevance` almost entirely null, and
 a confident weakest-metric pointer. **A metric that silently declines to measure is worse
 than one that crashes the run**, because the scorecard still renders. The cost of `1` is a
-noisier score (a mean over one generated question, not three); raise it only for a judge that
-supports multiple candidates, which Gemini Flash does.
+noisier score (a mean over one generated question, not three). **It stays 1 under the new
+judge, for a different reason:** `n` is absent from `google/gemini-3.7-flash`'s OpenRouter
+parameter list, so `candidate_count=3` has no eligible provider at all. The Gemini API
+would allow it; this route does not.
 
-**Gemma is measurably unfit as a *faithfulness* judge, and this is not a theoretical worry.**
+**Gemma was measurably unfit as a *faithfulness* judge, and this is not a theoretical
+worry.** (Resolved by the judge split above; kept because it is the measurement that
+justified it, and because the *method* — re-run under a second judge before acting on a
+weak metric — applies to whatever judge is configured next.)
 Same turn, answer copied **verbatim** out of its context, scored twice:
 
 | Judge | faithfulness |

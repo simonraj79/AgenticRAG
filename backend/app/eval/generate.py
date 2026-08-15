@@ -43,13 +43,13 @@ from typing import Any, Literal
 from langchain_core.messages import SystemMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import Runnable
-from langchain_google_genai import ChatGoogleGenerativeAI
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.db.models import Agent, Chunk, Document
+from app.rag.llm import build_chat_model
 
 log = logging.getLogger("uvicorn.error")
 
@@ -526,12 +526,21 @@ def _sample_corpus(
 # scores, and it scores a question against another question's reference answer.
 #
 # **`json_schema` is not `json_mode`.** json_mode asks for free JSON and
-# describes the schema in the prompt; `json_schema` binds Gemini's native
-# `response_json_schema` and constrains decoding. It does return on the text
-# channel, so CLAUDE.md's markdown-fence hazard applies in principle -- and the
-# mitigation is the one CLAUDE.md already credits for json_mode scoring 5/5
-# where raw `response.parsed` scored 4/5: LangChain's parser strips the fence.
-# The `None`-not-exception shape is still checked for at the call site.
+# describes the schema in the prompt; `json_schema` binds a schema the provider
+# constrains decoding against. It does return on the text channel, so CLAUDE.md's
+# markdown-fence hazard applies in principle -- and the mitigation is the one
+# CLAUDE.md already credits for json_mode scoring 5/5 where raw
+# `response.parsed` scored 4/5: LangChain's parser strips the fence. The
+# `None`-not-exception shape is still checked for at the call site.
+#
+# **What it binds changed with the gateway, and the trials above still stand.**
+# Under `ChatGoogleGenerativeAI` this was Gemini's native `response_json_schema`;
+# through OpenRouter it is OpenAI-shaped `response_format: {"type":
+# "json_schema", ...}`, which providers advertise as `structured_outputs`.
+# Re-verified live on `google/gemma-4-31b-it` via OpenRouter: a two-question
+# nested set came back correctly populated in 2.5 s -- so the array-of-objects
+# failure that ruled out `function_calling` here is still avoided, and this is
+# the one call in the project that deliberately does NOT use function calling.
 STRUCTURED_OUTPUT_METHOD = "json_schema"
 
 
@@ -545,15 +554,25 @@ def _get_suggester() -> Runnable:
     the short version is that Gemma will not fill an array of objects through a
     tool call, and fails at it silently.
 
+    **The model is `golden_set_model`, not `decision_model`.** Those were the
+    same setting until a head-to-head showed they should not be: this call writes
+    the measuring instrument, the rewriter dereferences a pronoun, and the reasons
+    to pick a model differ completely. See `golden_set_model` in app/config.py for
+    the comparison and for the one cost it carries -- the drafting model is also
+    the judge, so it grades against reference answers it wrote.
+
     Sampling stays at the Gemma 4 model card's standard configuration, and here
     that is not merely the default being respected -- ten questions drawn at low
     temperature from one corpus converge on ten phrasings of the same question,
     which is the exact failure `_is_near_duplicate` exists to catch downstream.
+    `top_k` is passed unconditionally and `build_chat_model` drops it for model
+    families that do not accept it; sending Gemma's card value to Gemini 3.7 Flash
+    left no eligible provider and 404'd, which is how that guard was found.
 
-    One call costs 13-15 s on a three-passage corpus. That is generation-bound,
-    consistent with CLAUDE.md's finding that generation dominates every latency
-    budget here, so it is a background job's worth of wait rather than something
-    a form submit should block on.
+    One call costs 6-12 s on a three-passage corpus (Flash 5.8 s, Gemma 11.8 s,
+    measured). That is generation-bound, consistent with CLAUDE.md's finding that
+    generation dominates every latency budget here, so it is a background job's
+    worth of wait rather than something a form submit should block on.
 
     Cached and agent-independent: the prompt is a template and the agent's name,
     corpus and counts all arrive as invocation variables. Nothing agent-specific
@@ -567,13 +586,12 @@ def _get_suggester() -> Runnable:
             ("human", SUGGEST_USER_TEMPLATE),
         ]
     )
-    model = ChatGoogleGenerativeAI(
-        model=settings.decision_model,
-        google_api_key=settings.gemini_api_key,
+    model = build_chat_model(
+        settings.golden_set_model,
         temperature=settings.generation_temperature,
         top_p=settings.generation_top_p,
         top_k=settings.generation_top_k,
-        max_output_tokens=MAX_OUTPUT_TOKENS,
+        max_tokens=MAX_OUTPUT_TOKENS,
     )
     # The model CLASS, not a schema dict. Handed a class, LangChain validates
     # the reply through it and yields a `SuggestedGoldenSet`; handed a dict it

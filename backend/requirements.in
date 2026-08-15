@@ -35,6 +35,16 @@ langchain-google-genai
 langchain-pinecone
 langchain-cohere
 
+# The OpenRouter client. `ChatOpenAI` pointed at openrouter.ai is an
+# OpenAI-PROTOCOL client, not a call to OpenAI -- no OPENAI_API_KEY is needed and
+# nothing here talks to OpenAI. It was already installed as a langchain-pinecone
+# transitive, which is exactly why it is listed now: app/rag/llm.py imports it
+# directly, so a future change to langchain-pinecone's dependencies would
+# otherwise break every chat model in the project with an ImportError nowhere
+# near the cause. `langchain-google-genai` above stays for EMBEDDINGS -- those
+# deliberately did not move (see app/rag/llm.py).
+langchain-openai
+
 # ContextualCompressionRetriever -- the class PRD section 3.5 names as the Stage 1
 # -> Stage 2 wrapper -- moved out of `langchain` in the 1.x split and now lives
 # here. Keeping the canonical class is worth one extra package: the workshop

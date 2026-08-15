@@ -7,7 +7,9 @@
 **GCP project:** `dsai-mod-2-group-project`
 **Last updated:** 2026-08-15
 
-> **This document is the specification; [CLAUDE.md](CLAUDE.md) is the operational companion.**
+> **This document is the specification; [CLAUDE.md](CLAUDE.md) is the operational companion,
+> and [EVAL.md](EVAL.md) is the operator's guide to Stage 3 — every setting and per-agent
+> parameter in tables, plus how to read a scorecard without being misled by it.**
 > Where a section describes something that has since been built and measured, the measurement
 > is recorded inline rather than left to fold back into prose — a spec that quietly disagrees
 > with the code is worse than no spec. Sections carrying post-build measurements:
@@ -79,25 +81,34 @@ unless the deployment target or available credentials genuinely force a change.
 | **Embeddings** | **`gemini-embedding-2` @ 768 dims** | Ollama `nomic-embed-text` | 🔄 |
 | **Vector DB** | **Pinecone serverless, 768d, cosine, `ap-southeast-1`** | Chroma embedded (SQLite) | 🔄 |
 | Retriever | `PineconeVectorStore.as_retriever()` | `Chroma.as_retriever()` | — |
-| **Generation LLM** | **`gemma-4-31b-it`** via Gemini API | Ollama `llama3.2` | 🔄 |
-| Decision LLM | Gemini Flash | — | ➕ |
+| **Model gateway** | **OpenRouter** (all chat models) | Ollama, local | 🔄 |
+| **Generation LLM** | **`google/gemma-4-31b-it`** via OpenRouter | Ollama `llama3.2` | 🔄 |
+| Decision LLM | Gemini Flash | `google/gemma-4-31b-it` — collapsed, §2 open item 11 | ➕ |
 | Reranker | Cohere `rerank-v3` | same | — |
 | Output parsing | `StrOutputParser`, Pydantic parser | same | — |
 | Evaluation | Ragas **0.4.3** | same | — |
-| **Eval judge** | **`gemma-4-31b-it`** (`RAGAS_JUDGE_MODEL`) | Gemini Flash Lite | 🔄 |
+| **Eval judge** | **`google/gemini-3.7-flash`** (`RAGAS_JUDGE_MODEL`) | Gemini Flash Lite | ✅ |
 
-**The eval judge is currently the generation model, and that is a measured problem.**
-Consolidating onto one model was requested deliberately, and `eval_runs` records both
-`judge_model` and `generation_model` so a self-judged scorecard is visible as such. But
-asking a model whether its own answer is supported by its own context is self-assessment,
-and it fails concretely: on a turn whose answer was copied **verbatim** out of the retrieved
-text, `gemma-4-31b-it` scored faithfulness **0.000** where `gemini-flash-latest` scored
-0.667. Answer relevance was stable across both judges (0.813 vs 0.811), so the defect is
-specific to faithfulness rather than a general judge-quality gap.
+**The eval judge is no longer the generation model. That split was earned by measurement,
+and it is the single most consequential change Stage 3 produced.** Consolidating onto one
+model was requested deliberately and `eval_runs` records both `judge_model` and
+`generation_model` so a self-judged scorecard is visible as such — but two full runs showed
+self-assessment failing concretely. On a turn whose answer was copied **verbatim** out of
+the retrieved text, `gemma-4-31b-it` scored faithfulness **0.000**; `google/gemini-3.7-flash`
+scores the same shape **1.000**, and **0.250** for an answer padded with invented facts.
+Answer relevance was stable across judges (0.813 vs 0.811), so the defect was specific to
+faithfulness rather than a general judge-quality gap.
 
-Consequence for anyone reading a scorecard: **a low faithfulness score must be re-run with
-`RAGAS_JUDGE_MODEL=gemini-flash-latest` before it is acted on.** The weakest-metric pointer
-is only as trustworthy as the judge behind it, and Stage 3's whole value is that pointer.
+Latency drove it too: Gemma took 165–196 s per faithfulness call against a 180 s ceiling,
+so *which* questions scored was luck. Three turns now score in 14.4 s in total.
+
+**Chat moved to OpenRouter; embeddings deliberately did not.** Every vector in Pinecone was
+written in `gemini-embedding-2`'s space, matching dimensions do not imply a shared space,
+and OpenRouter serves no embedding model — so moving them would force a full re-ingest to
+gain nothing. Both `OPENROUTER_API_KEY` and `GEMINI_API_KEY` are required, and Ragas now
+draws its judge LLM and its embedding model from two different providers. Every chat model
+is constructed in exactly one place (`app/rag/llm.py`), which is what made this a one-file
+change rather than four.
 
 **Why the three swaps.** Ollama requires model weights in memory and on disk; Render's
 free tier gives limited RAM and an ephemeral filesystem, so a local model runner is
@@ -330,6 +341,18 @@ text gives only a range — probes grounding. "What is the capital of France?" p
 because any model declines it. The generator is instructed accordingly, and this is the
 single largest determinant of whether the set measures anything.
 
+**Which is why the drafting model is its own setting (`GOLDEN_SET_MODEL`), split out of
+`DECISION_MODEL`.** Measured head-to-head over the same corpus and prompt: Gemma's refusal
+probes named facts the corpus never raises, while `google/gemini-3.7-flash` produced
+questions hinging on details the corpus raises and then leaves incomplete — the propellant
+type behind a mentioned thruster, the individual names of six mentioned modules. Its
+reference answers were also several attributable claims rather than a single word
+("Nineteen"), which matters because `context_recall` decomposes that field. The cost is
+recorded rather than hidden: the drafting model is currently also the judge, so context
+precision and recall are graded against references the judge wrote. Faithfulness and
+answer relevance never read `reference`, and both context metrics are pinned at 1.0 by the
+single-chunk corpus anyway.
+
 #### 3.6.2 Scoring rules
 
 **Refusal questions are excluded from all four metric means** and graded pass/fail on
@@ -356,8 +379,17 @@ specific **agent parameter** to change — all four are per-agent editable:
 | Context precision | Junk ranked into the top-n | `rerank_top_n`, `retrieve_k`, chunking |
 | Context recall | Retrieval missed text the answer needed | Raise `retrieve_k`, `chunk_size`/`chunk_overlap`, check embedding model matches the index |
 
-**A run takes 23–25 minutes for ten questions** (measured twice), so it is a background job
-with progress, not a request.
+**A run took 23–25 minutes for ten questions** (measured twice on the direct-Gemini stack),
+and now takes **90 seconds** — same agent, same ten questions, generation and judging both
+via OpenRouter, zero metric failures. It stays a background job with progress regardless:
+the shape that made it one is a slow model or a large golden set, and either can come back
+with one config change. A 90-second job is not an argument for making it a request.
+
+**The weakest metric is not automatically the thing to fix — read the answers first.** Run 3
+named faithfulness (0.769) as weakest, and inspection showed the deductions were the Feynman
+persona's analogy and its "restate this in your own words" prompt: material absent from the
+context by design, in answers whose every corpus fact was correct. Acting on the pointer as
+written would strip the pedagogy. See the open items below.
 
 **Measured caveat, recorded because it inverts a reading:** on a single-chunk corpus,
 context precision and recall both return 1.00 — that is retrieval that *cannot* fail, not
@@ -664,7 +696,8 @@ environment settings. `.env.example` is the committed template.
 
 | Variable | Consumer | Auto-read by SDK |
 |---|---|---|
-| `GEMINI_API_KEY` | Embeddings, generation, Ragas judge | ✅ `langchain-google-genai` |
+| `OPENROUTER_API_KEY` | **Every chat model** — generation, decision, golden-set generator, Ragas judge | ❌ passed explicitly in `app/rag/llm.py` |
+| `GEMINI_API_KEY` | **Embeddings only** — still required; see §2 | ✅ `langchain-google-genai` |
 | `PINECONE_API_KEY` | Vector store | ✅ `pinecone` SDK |
 | `PINECONE_INDEX_NAME` | Vector store | ❌ app convention |
 | `COHERE_API_KEY` | Stage 2 reranker | ✅ `langchain-cohere` |
@@ -680,8 +713,11 @@ environment settings. `.env.example` is the committed template.
 | `DEV_AUTH_ENABLED` | Gates the dev-login route | ❌ defaults to `false` |
 | `MAX_UPLOAD_MB` | Upload cap (§3.3) | ❌ defaults to 50 |
 | `INGEST_IN_BACKGROUND` | Off-request ingest (§3.3) | ❌ defaults to `true` |
-| `RAGAS_JUDGE_MODEL` | Stage 3 judge (§2.1) | ❌ defaults to `gemma-4-31b-it` |
-| `RAGAS_MAX_CONCURRENCY` | Judged calls in flight | ❌ defaults to 2, for free-tier rate limits |
+| `GOLDEN_SET_MODEL` | Drafts the golden set (§3.6.1) | ❌ defaults to `google/gemini-3.7-flash` |
+| `RAGAS_JUDGE_MODEL` | Stage 3 judge (§2.1) | ❌ defaults to `google/gemini-3.7-flash` |
+| `RAGAS_JUDGE_REASONING_EFFORT` | Thinking is **mandatory** on Flash — only turnable down | ❌ defaults to `low` |
+| `RAGAS_MAX_CONCURRENCY` | Judged calls in flight | ❌ defaults to 2, for provider rate limits |
+| `OPENROUTER_REQUIRE_PARAMETERS` | Route only to providers advertising every parameter sent | ❌ defaults to `true` — **leave it on** |
 
 **`ENVIRONMENT` must be set to `production` on Render.** It defaults to `development`, so on
 the deployed service only two of the dev-login route's three gates are doing work. The route
@@ -1117,16 +1153,19 @@ Infrastructure is complete. Stages 1 and 3 are built; Stage 2 is half-built.
 | 10 | Object storage for slide images (R2/S3) | Open — only gates citation images |
 | 11 | Does `gemma-4-31b-it` support structured output? | ✅ **yes**, via `function_calling`; `DECISION_MODEL` collapsed onto it |
 | 12 | Workshop PDFs in a public repo | Open — see below |
-| **13** | **SSE streaming** (§2.2) | Open — **now the largest UX gap**, 30–60 s of blank waiting per persona turn |
+| **13** | **SSE streaming** (§2.2) | Open — **much less urgent since the move to OpenRouter**: a persona turn measured 6.3 s and a full ten-question run 90 s, against 30–60 s per turn before. Still the right shape, no longer the top UX problem |
 | **14** | **OAuth consent brand reads "Bedtime Story"** | Open — console-only fix, and it is the first screen an attendee sees |
-| **15** | **Move the eval judge off the generation model** | Open — measured, not theoretical (§2.1) |
-| **16** | **Coaching personas fail refusals** (`0/2`) | Open — measured twice (§4.2) |
+| ~~15~~ | ~~Move the eval judge off the generation model~~ | ✅ **done** — judge is `google/gemini-3.7-flash` via OpenRouter; verbatim-context faithfulness went 0.000 → 1.000 (§2.1) |
+| **16** | **Coaching personas fail refusals** (`1/2`) | Open — was `0/2` twice; three of those four rows were a detector gap, now fixed. The remaining row is real: the persona names the gap instead of declining (§4.2) |
 | **17** | Multimodal embedding of PDFs and images | Open — deliberately deferred, see §2.3 |
 | **18** | Deleting a document destroys past queries' stored contexts | Open — FK cascade; costs Stage 3 its evidence |
 | **19** | Blocking SDK calls inside `async def` | Open — uniform deferral; fix all call sites together |
+| **20** | **Faithfulness penalises a teaching persona for teaching** | Open — measured run 3. The analogy and the comprehension check are unsupported by construction, so the weakest-metric pointer advises deleting the pedagogy (§3.6.3) |
 
-Items 13–19 were all discovered by building and measuring, not by planning. Items 15 and 16
-are the direct output of Stage 3 and are the strongest argument for having built it.
+Items 13–20 were all discovered by building and measuring, not by planning. Items 15, 16 and
+20 are the direct output of Stage 3 and are the strongest argument for having built it — and
+20 is the sharpest of them, because it is a defect in the measuring instrument that only
+became visible once the instrument was trustworthy enough to be believed.
 
 **Resolved:** the redirect URI has been corrected to the real Render hostname;
 `DATABASE_URL` on the service is the internal URL.

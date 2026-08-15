@@ -40,8 +40,15 @@ NOT BY FOLLOWING A TUTORIAL. All three are load-bearing.
 
    Verified offline against ragas 0.4.3 with a fake model returning fenced JSON:
    all four metrics scored correctly. So wrapping is not ceremony -- passing the
-   `ChatGoogleGenerativeAI` in unwrapped would silently change the parser and
-   turn every Gemma fence into a NaN.
+   chat model in unwrapped would silently change the parser and turn every fence
+   into a NaN.
+
+   **This survived the judge moving to Gemini 3.7 Flash, and the wrapper is kept
+   deliberately rather than by inertia.** The fence was a Gemma habit and Gemini
+   is far less prone to it -- but "less prone" is not "cannot", the wrapper costs
+   nothing, and the failure it prevents is a NaN rather than an exception. The
+   judge model is one env var; the parser it lands on should not silently change
+   with it.
 
 3. **`evaluate()` is not used.** It is deprecated in 0.4.3, it is synchronous,
    and it re-enters the event loop through nest_asyncio -- which is exactly the
@@ -73,10 +80,9 @@ from typing import Any
 # `setdefault`, so an operator who wants it can still turn it back on.
 os.environ.setdefault("RAGAS_DO_NOT_TRACK", "true")
 
-from langchain_google_genai import ChatGoogleGenerativeAI  # noqa: E402
-
 from app.config import settings  # noqa: E402
 from app.eval.metrics_guide import METRIC_KEYS  # noqa: E402
+from app.rag.llm import build_chat_model  # noqa: E402
 from app.rag.retriever import get_embeddings  # noqa: E402
 
 # See point 1 in the module docstring. The warning is suppressed at the import
@@ -139,25 +145,31 @@ def get_judge(model: str) -> LangchainLLMWrapper:
     because `lru_cache` on the model name is what lets `ragas_judge_model` be
     changed by env var without a second construction site appearing.
 
-    Sampling is NOT left at the Gemma model card's defaults, and this is the one
-    place in the project that departs from them. `app/rag/pipeline.py` explains
-    why the card's `temperature=1.0` is right for generation: Gemma is
-    calibrated for it and squeezing it down risks repetition loops. A judge is a
-    different job. It emits a handful of tokens of structured verdict, not
-    prose, so there is no loop to fall into -- and a scorecard that returns
-    different numbers for the same answers on consecutive runs cannot be used to
-    tell whether a prompt change helped, which is the entire point of Stage 3.
-    0.1 rather than 0 keeps it inside a sampling regime the model has seen.
+    Sampling is NOT left at the model card's defaults, and this is the one place
+    in the project that departs from them. `app/rag/pipeline.py` explains why
+    `temperature=1.0` is right for generation: Gemma is calibrated for it and
+    squeezing it down risks repetition loops. A judge is a different job. It
+    emits a handful of tokens of structured verdict, not prose, so there is no
+    loop to fall into -- and a scorecard that returns different numbers for the
+    same answers on consecutive runs cannot be used to tell whether a prompt
+    change helped, which is the entire point of Stage 3. 0.1 rather than 0 keeps
+    it inside a sampling regime the model has seen.
+
+    **`top_k` is not sent, and here that is required rather than merely
+    deliberate.** The judge is `google/gemini-3.7-flash`, whose OpenRouter
+    parameter list does not include `top_k` -- and `build_chat_model` requests
+    providers supporting every parameter in the request, so sending it would
+    leave nothing eligible to serve the call. The old reasoning still holds
+    anyway: pinning temperature already buys the determinism.
     """
     return LangchainLLMWrapper(
-        ChatGoogleGenerativeAI(
-            model=model,
-            google_api_key=settings.gemini_api_key,
+        build_chat_model(
+            model,
             temperature=0.1,
-            # `top_k`/`top_p` left at the model defaults deliberately: pinning
-            # temperature already gets the determinism, and the model card gives
-            # these two as a set, so changing one without measuring the others is
-            # how a repetition loop is invited back in.
+            # Mandatory on Gemini 3.7 Flash -- thinking cannot be switched off,
+            # only turned down. See `ragas_judge_reasoning_effort` in
+            # app/config.py for why `low` is right for an NLI-shaped task.
+            reasoning_effort=settings.ragas_judge_reasoning_effort,
         )
     )
 
@@ -225,8 +237,16 @@ def _metrics_for(turn: EvalTurn, judge: LangchainLLMWrapper) -> dict[str, Any]:
         # renders and still points at a weakest metric.
         #
         # The cost of 1 is a noisier score: the mean is over one generated
-        # question rather than three. Raise it only against a judge model that
-        # supports multiple candidates -- Gemini Flash does.
+        # question rather than three.
+        #
+        # **It stays 1 after the move to Gemini Flash, and the reason changed.**
+        # The earlier note said to raise it against a judge that supports
+        # multiple candidates, "which Gemini Flash does" -- true of the Gemini
+        # API, and NOT true of the route this project now takes. `n` does not
+        # appear in `google/gemini-3.7-flash`'s OpenRouter parameter list, so
+        # under `openrouter_require_parameters` a `candidate_count=3` request
+        # has no eligible provider at all. Changing the judge did not unlock
+        # this; changing the gateway closed it.
         "answer_relevance": ResponseRelevancy(
             llm=judge, embeddings=get_judge_embeddings(), strictness=1
         ),

@@ -171,6 +171,30 @@ REFUSAL_MARKERS = (
     "outside the scope",
 )
 
+# "does not say" / "doesn't say" were added after the first two eval runs, which
+# both reported `refusal_pass = 0 / 2`. Half of that was the detector, not the
+# agent: Gemma answered "Which of the fourteen launches took place in 2040?" with
+#
+#     "The provided text does not say which of the fourteen launches took
+#      place in 2040 [1]."
+#
+# -- a textbook refusal, scored as a failure, because the phrase it reached for
+# was in neither tier. The scorecard blamed the agent for the measurement's gap,
+# which is the same failure class as `strictness=3` and worse than a crash for
+# the same reason: it still renders, and it still points confidently at the wrong
+# thing.
+#
+# **The CAVEAT tier, not the refusal tier, and the distinction is the whole
+# point.** REFUSAL_MARKERS match anywhere in the lead, so putting it there would
+# score "The lesson covers X and Y. The text does not say when it was published."
+# as a refusal of a question it had just answered. "does not say" is an ordinary
+# qualification -- structurally identical to "does not mention" and "does not
+# specify" already here -- and only means refusal when nothing has been answered
+# yet. The failing row's phrase starts at character 0, so it matches; the
+# answer-then-caveat row that CLAUDE.md flags as a REAL persona finding lands at
+# consumed=198, stays outside the 40-character preamble window, and is still
+# correctly counted as an answer. Fixing the detector must not delete that
+# finding.
 CAVEAT_MARKERS = (
     "context does not",
     "does not mention",
@@ -179,6 +203,27 @@ CAVEAT_MARKERS = (
     "doesn't provide",
     "does not include",
     "does not specify",
+    "does not say",
+    "doesn't say",
+    # "does not cover" is here for the same reason, and it settles a question
+    # CLAUDE.md left open. That note warned that adding this phrase would score
+    # the Feynman answer-then-caveat turn as a refusal and "quietly delete the
+    # finding" -- true of the HARD tier, and not true here. Replayed against the
+    # actual stored answers, the two turns separate cleanly by position:
+    #
+    #   run 1  "The provided text does not cover the specific duties..."
+    #          consumed=0    -> inside the window  -> refusal, correctly
+    #   run 2  "...states that there are eleven permanent crew members [1]. It
+    #           also mentions ... but it does not cover their specific duties."
+    #          consumed=198  -> outside the window -> answer, correctly
+    #
+    # The tier split was built for exactly this and needed no adjudication. Worth
+    # noting the record it corrects: CLAUDE.md described the second refusal row
+    # as answer-then-caveat in BOTH runs, but only run 2 was -- run 1's was a
+    # clean leading refusal. Three of the four refusal rows were detector
+    # failures, not two.
+    "does not cover",
+    "doesn't cover",
     "does not appear in",
 )
 

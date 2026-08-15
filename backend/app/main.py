@@ -106,12 +106,19 @@ async def config() -> dict:
     return {
         "generation_model": settings.generation_model,
         "decision_model": settings.decision_model,
+        "judge_model": settings.ragas_judge_model,
         "embedding_model": settings.embedding_model,
         "embedding_dimension": settings.embedding_dimension,
         "pinecone_index": settings.pinecone_index_name,
         "frontend_url": settings.frontend_url,
         "oauth_redirect_uri": settings.oauth_redirect_uri,
         "secrets_present": {
+            # Two model providers, not one, and the split is not arbitrary:
+            # `openrouter` serves every chat model, `gemini` is now the
+            # EMBEDDING key. A deployment missing the second one fails at
+            # retrieval, not at generation -- which looks nothing like a missing
+            # model key, so both are reported separately.
+            "openrouter": bool(settings.openrouter_api_key),
             "gemini": bool(settings.gemini_api_key),
             "pinecone": bool(settings.pinecone_api_key),
             "cohere": bool(settings.cohere_api_key),

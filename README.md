@@ -86,6 +86,7 @@ frontend/   React + Vite + Tailwind SPA
 scripts/    Idempotent cloud provisioning
 PRD.md      The specification
 CLAUDE.md   Working notes: conventions, insights, and hard-won gotchas
+EVAL.md     Stage 3 operator's guide: settings, parameters, reading a scorecard
 ```
 
 ## Notes
