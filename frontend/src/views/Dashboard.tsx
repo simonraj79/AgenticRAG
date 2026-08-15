@@ -14,8 +14,14 @@
  * being chosen is a stance towards the learner, backed by a named piece of
  * learning science. "800 tokens, k=20" is true, was what the old `<select>` led
  * with, and answers a question nobody choosing between eight teaching styles is
- * asking. The parameters are still on the page, one disclosure down, because
+ * asking. The parameters are still in the flow, one step further in, because
  * this is a workshop artifact and they are the thing Build #1 changes.
+ *
+ * **Creation itself moved into `CreateAgentWizard`.** It was a single form in
+ * this file, which is why the persona grid it led with buried the one required
+ * field a thousand pixels down the page; the reasoning is in that component's
+ * header. What stayed here is what this view is actually about -- the list, the
+ * disclosure that opens creation, and what happens after an agent exists.
  *
  * One agent is one corpus, one config and one Pinecone namespace (PRD section
  * 3.2). That is why deleting an agent is a genuinely destructive act, why the
@@ -23,17 +29,15 @@
  */
 
 import { useCallback, useEffect, useState } from "react";
-import type { FormEvent } from "react";
 import { api } from "../lib/api.ts";
 import type { Agent, Template } from "../lib/types.ts";
+import CreateAgentWizard from "../components/CreateAgentWizard.tsx";
 import {
   CategoryBadge,
   ConfirmDeleteButton,
   EmptyState,
   ErrorBanner,
-  Fact,
   PersonaIcon,
-  Reveal,
   Spinner,
   StatusPill,
   errorMessage,
@@ -133,15 +137,18 @@ export default function Dashboard({ onOpenAgent }: { onOpenAgent: (agentId: stri
 
       {createOpen && (
         <div id="create-agent-panel" className="mb-10">
-          <CreateAgentForm
+          <CreateAgentWizard
             templates={templates}
+            // `agents` is unique on (owner, name). Handing the wizard the names
+            // already taken lets it say so on step 1, instead of the server
+            // saying it as a 409 after four steps of work.
+            existingNames={agents.map((agent) => agent.name)}
             onCreated={async (agent) => {
               setError(null);
               setCreateOpen(false);
               await loadAgents();
               onOpenAgent(agent.id);
             }}
-            onError={setError}
           />
         </div>
       )}
@@ -234,224 +241,5 @@ export default function Dashboard({ onOpenAgent }: { onOpenAgent: (agentId: stri
         </ul>
       </section>
     </div>
-  );
-}
-
-/**
- * Create an agent by choosing a persona.
- *
- * The cards carry icon, name, role, and the line naming the learning science
- * the persona rests on, because that line is the actual difference between two
- * templates whose retrieval parameters are identical -- the Feynman explainer
- * and the Socratic tutor differ in nothing a parameter grid can show. The
- * pedagogy is clamped on unselected cards and shown in full on the selected
- * one, so eight cards stay scannable without the chosen one hiding its reason.
- */
-function CreateAgentForm({
-  templates,
-  onCreated,
-  onError,
-}: {
-  templates: Template[];
-  onCreated: (agent: Agent) => void | Promise<void>;
-  onError: (message: string | null) => void;
-}) {
-  const [name, setName] = useState("");
-  const [description, setDescription] = useState("");
-  const [templateId, setTemplateId] = useState("");
-  const [busy, setBusy] = useState(false);
-
-  // Default to the first template once they arrive, so the form is submittable
-  // without touching the picker. The server orders them, and its first entry is
-  // the general-purpose one -- the safe default for someone who has not read
-  // any of the cards yet.
-  useEffect(() => {
-    if (templates.length > 0) {
-      setTemplateId((current) => (current === "" ? templates[0].id : current));
-    }
-  }, [templates]);
-
-  const selected = templates.find((template) => template.id === templateId) ?? null;
-
-  async function submit(event: FormEvent) {
-    event.preventDefault();
-    setBusy(true);
-    onError(null);
-    try {
-      const agent = await api<Agent>("/api/agents", {
-        method: "POST",
-        json: {
-          name: name.trim(),
-          description: description.trim() || null,
-          // Omitted rather than sent as "" -- the column is a nullable FK and
-          // an empty string is not a valid UUID, so it would 422 instead of
-          // meaning "server defaults".
-          template_id: templateId || null,
-        },
-      });
-      setName("");
-      setDescription("");
-      await onCreated(agent);
-    } catch (cause) {
-      // 409 is the interesting one: agent names are unique per owner.
-      onError(errorMessage(cause));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <form onSubmit={submit} className="rounded-xl border border-slate-800 bg-slate-900/50 p-5">
-      <h2 className="text-sm font-medium tracking-wide text-slate-400 uppercase">New agent</h2>
-
-      <fieldset className="mt-5">
-        <legend className="text-sm font-medium text-slate-200">Choose a teaching persona</legend>
-        <p className="mt-1 mb-4 text-xs text-slate-400">
-          The persona decides how the agent answers -- what it asks back, what it withholds,
-          how it refuses. It never changes what the agent may answer <em>from</em>: every
-          persona is bound to this agent&rsquo;s documents alone.
-        </p>
-
-        {templates.length === 0 ? (
-          <p className="text-xs text-slate-400">
-            No templates loaded. The agent will be created with the server&rsquo;s default
-            parameters.
-          </p>
-        ) : (
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-            {templates.map((template) => {
-              const active = template.id === templateId;
-              return (
-                <label
-                  key={template.id}
-                  data-testid="template-card"
-                  data-template-slug={template.slug}
-                  data-selected={active}
-                  className={`flex cursor-pointer flex-col rounded-xl border p-4 transition focus-within:ring-2 focus-within:ring-emerald-500/60 ${
-                    active
-                      ? "border-emerald-500/70 bg-emerald-950/20"
-                      : "border-slate-800 bg-slate-950/50 hover:border-slate-700"
-                  }`}
-                >
-                  {/*
-                    A real radio, visually hidden rather than replaced. Arrow-key
-                    navigation within the group, the required/checked semantics
-                    and the label-click target all come free from the native
-                    control; a div with an onClick would have to reimplement
-                    each one and would still be invisible to a screen reader.
-                  */}
-                  <input
-                    type="radio"
-                    name="agent-template"
-                    className="sr-only"
-                    value={template.id}
-                    checked={active}
-                    onChange={() => setTemplateId(template.id)}
-                  />
-
-                  <div className="flex items-start gap-3">
-                    <PersonaIcon icon={template.icon} fallback={template.name} size="sm" />
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-start justify-between gap-2">
-                        <span className="font-medium text-slate-100">{template.name}</span>
-                        <CategoryBadge category={template.category} />
-                      </div>
-                      {template.persona_role && (
-                        <span className="mt-0.5 block text-xs tracking-wide text-slate-400 uppercase">
-                          {template.persona_role}
-                        </span>
-                      )}
-                    </div>
-                  </div>
-
-                  {template.description && (
-                    <p className="mt-3 text-sm text-slate-400">{template.description}</p>
-                  )}
-
-                  {template.pedagogy && (
-                    <p
-                      className={`mt-3 border-t border-slate-800 pt-3 text-xs leading-relaxed text-slate-400 ${
-                        active ? "" : "line-clamp-3"
-                      }`}
-                    >
-                      <span className="font-medium text-slate-400">Rests on: </span>
-                      {template.pedagogy}
-                    </p>
-                  )}
-                </label>
-              );
-            })}
-          </div>
-        )}
-      </fieldset>
-
-      <div className="mt-6 grid gap-4 sm:grid-cols-2">
-        <div>
-          <label className="block text-xs font-medium text-slate-400" htmlFor="agent-name">
-            Name
-          </label>
-          <input
-            id="agent-name"
-            data-testid="agent-name-input"
-            required
-            value={name}
-            onChange={(event) => setName(event.target.value)}
-            placeholder="Topic 10 Lecture"
-            className="mt-1 min-h-11 w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 outline-none focus:border-slate-500"
-          />
-        </div>
-
-        <div>
-          <label className="block text-xs font-medium text-slate-400" htmlFor="agent-description">
-            Description <span className="text-slate-400">(optional)</span>
-          </label>
-          <input
-            id="agent-description"
-            value={description}
-            onChange={(event) => setDescription(event.target.value)}
-            placeholder="What this agent knows about"
-            className="mt-1 min-h-11 w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 outline-none focus:border-slate-500"
-          />
-        </div>
-      </div>
-
-      {selected && (
-        <div className="mt-5 space-y-3">
-          <Reveal summary="Advanced — retrieval parameters" testId="template-parameters">
-            <dl className="grid grid-cols-2 gap-x-6 gap-y-2 text-xs sm:grid-cols-4">
-              <Fact label="Chunk size" value={selected.chunk_size} />
-              <Fact label="Overlap" value={selected.chunk_overlap} />
-              <Fact label="Splitter" value={selected.splitter} />
-              <Fact label="Retrieve k" value={selected.retrieve_k} />
-              <Fact label="Rerank" value={selected.rerank_enabled ? "on" : "off"} />
-              <Fact label="Rerank top n" value={selected.rerank_top_n} />
-              <Fact label="Score threshold" value={selected.score_threshold} />
-              <Fact label="Max rewrites" value={selected.max_rewrites} />
-            </dl>
-            <p className="mt-3 text-xs text-slate-400">
-              These values are <em>copied</em> onto the agent. Editing the template later
-              will not re-tune an agent you already built.
-            </p>
-          </Reveal>
-
-          {selected.system_prompt && (
-            <Reveal summary="Advanced — system prompt" testId="template-prompt">
-              <pre className="max-h-64 overflow-y-auto text-xs leading-relaxed whitespace-pre-wrap text-slate-400">
-                {selected.system_prompt}
-              </pre>
-            </Reveal>
-          )}
-        </div>
-      )}
-
-      <button
-        type="submit"
-        data-testid="agent-create-submit"
-        disabled={busy}
-        className="mt-5 min-h-11 rounded-md bg-emerald-500 px-4 py-2 text-sm font-semibold text-emerald-950 transition hover:bg-emerald-400 disabled:opacity-50"
-      >
-        {busy ? "Creating…" : "Create agent"}
-      </button>
-    </form>
   );
 }

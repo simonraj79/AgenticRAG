@@ -258,46 +258,23 @@ class AgentOut(BaseModel):
         )
 
 
-class AgentCreate(BaseModel):
-    """Body for POST /api/agents.
+class AgentTunables(BaseModel):
+    """The per-agent knobs, defined once so create and update cannot drift apart.
 
-    Three fields, and deliberately no tunables: parameters come from the
-    template (or from the model defaults), never from the request, which is what
-    makes "create from a template" and "create your own" one code path rather
-    than two. Unknown keys are ignored rather than rejected -- a client that
-    posts `chunk_size` here gets a working agent carrying the template's value
-    and can PATCH it a moment later, which is a far smaller harm than a failed
-    creation. `AgentUpdate` takes the opposite line, and the asymmetry is
-    explained there.
+    Every field is optional and defaults to None, which in both subclasses means
+    "not supplied" rather than "set to null" -- `AgentUpdate` reads that through
+    `exclude_unset`, `AgentCreate` through `exclude_none`, and each route says
+    why it chose the one it did.
+
+    The bounds live here, on the definition, rather than at the two call sites.
+    That is the point of the base class: a knob that a PATCH refuses and a POST
+    accepts is not a bound, it is a bound with a way around it, and two copies of
+    these `Field(...)` declarations is exactly how that happens. The comments
+    travel with the fields for the same reason -- each one records the
+    measurement or the platform limit that chose the number, and a bound whose
+    reason has been left behind in another class is a bound the next person
+    rounds off.
     """
-
-    name: AgentName
-    description: str | None = None
-    # Omitted means "from scratch": model defaults, and `template_id` stays
-    # null. There is a `from-scratch` TEMPLATE too, and picking it is a
-    # different, equally valid route to nearly the same agent -- it supplies the
-    # same values plus a minimal grounding prompt, and records the provenance.
-    template_id: uuid.UUID | None = None
-
-
-class AgentUpdate(BaseModel):
-    """Partial config update. Only the fields actually SENT are applied.
-
-    `extra="forbid"`, unlike `AgentCreate`. The failure modes are not symmetric:
-    an ignored extra field on create costs a PATCH, while an ignored extra field
-    on update is a tuning UI that lies -- the user types `rerank_topn: 5`, gets a
-    200, and then debugs an agent that is still reranking to 3 with nothing
-    anywhere to say the value never landed. A 422 naming the unknown field is the
-    only outcome that cannot mislead.
-
-    The bounds are cheap insurance against configurations that fail somewhere
-    else, later, in a message that points nowhere near this request.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    name: AgentName | None = None
-    description: str | None = None
 
     # Upper bound is gemini-embedding-2's 8,192-token input ceiling: a larger
     # chunk is truncated at embed time and the tail is lost silently, with the
@@ -324,9 +301,103 @@ class AgentUpdate(BaseModel):
     max_rewrites: int | None = Field(default=None, ge=0, le=5)
     system_prompt: str | None = None
 
+
+# Derived from the base class, never typed out. `create_agent` uses this to
+# decide which keys of the request body may be written onto the agent row, and a
+# hand-maintained tuple would be one edit away from sweeping `name`,
+# `description` or `template_id` into that loop -- `template_id` especially,
+# which is a real column and would therefore be written without complaint.
+# Reading the field names off `AgentTunables` makes that structurally impossible:
+# the three fields that must not be overridable are declared on the SUBCLASSES,
+# so they are not in this set and cannot be added to it by accident.
+_TUNABLE_FIELDS: frozenset[str] = frozenset(AgentTunables.model_fields)
+
+
+class AgentCreate(AgentTunables):
+    """Body for POST /api/agents. Name, optional template, optional tunables.
+
+    **The tunables used to be deliberately absent**, on the grounds that
+    parameters came from the template (or from the model defaults) and never
+    from the request, which is what made "create from a template" and "create
+    your own" one code path rather than two.
+
+    That property is preserved rather than abandoned, and preserving it is the
+    reason this reads as an extra step instead of a second path. The template
+    copy still establishes the WHOLE configuration; anything sent explicitly is
+    then applied on top as a uniform override that runs identically whether a
+    template was chosen or not. Defaults, then template, then explicit request --
+    one direction, no branching, and an agent created from a template with no
+    overrides comes out byte-identical to what it was before.
+
+    **Why it changed: the frontend now sets these at creation time, in a
+    wizard.** The alternative it replaces -- create, then immediately PATCH -- is
+    not atomic, and the failure is asymmetric in the worst way. The POST
+    succeeds, the PATCH is rejected for a bound or a chunk pair, and what is left
+    behind is an agent that EXISTS carrying parameters its owner never chose. The
+    only screen in the app that could fix that is the tuning editor on an agent
+    the user was in the middle of deciding they wanted. Rejecting the whole
+    request is the only outcome that leaves nothing to clean up.
+
+    Unknown keys are still ignored rather than rejected -- a client that posts
+    `rerank_topn` here gets a working agent carrying the template's value and can
+    PATCH it a moment later, which is a far smaller harm than a failed creation.
+    `AgentUpdate` takes the opposite line, and the asymmetry is explained there.
+    """
+
+    name: AgentName
+    description: str | None = None
+    # Omitted means "from scratch": model defaults, and `template_id` stays
+    # null. There is a `from-scratch` TEMPLATE too, and picking it is a
+    # different, equally valid route to nearly the same agent -- it supplies the
+    # same values plus a minimal grounding prompt, and records the provenance.
+    template_id: uuid.UUID | None = None
+
+
+class AgentUpdate(AgentTunables):
+    """Partial config update. Only the fields actually SENT are applied.
+
+    `extra="forbid"`, unlike `AgentCreate`. The failure modes are not symmetric:
+    an ignored extra field on create costs a PATCH, while an ignored extra field
+    on update is a tuning UI that lies -- the user types `rerank_topn: 5`, gets a
+    200, and then debugs an agent that is still reranking to 3 with nothing
+    anywhere to say the value never landed. A 422 naming the unknown field is the
+    only outcome that cannot mislead.
+
+    The bounds are cheap insurance against configurations that fail somewhere
+    else, later, in a message that points nowhere near this request. They are
+    inherited rather than declared here, so the create wizard cannot set a value
+    this editor would refuse.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: AgentName | None = None
+    description: str | None = None
+
     # Declared ONLY so it can be refused with an explanation rather than with a
     # generic "extra fields not permitted". See `update_agent`.
     embedding_model: str | None = None
+
+
+# Which patchable fields map to a NOT NULL column, read off the table rather than
+# listed here so a future migration cannot leave this set behind.
+#
+# Every optional field above defaults to None to mean "not sent", which makes an
+# EXPLICIT null indistinguishable from the default at the type level -- Pydantic
+# validates both identically, and only `exclude_unset` can tell them apart. So
+# the refusal has to live in the handler, and without it `{"chunk_size": null}`
+# reached a NOT NULL column and came back a 500: an unhandled server error for a
+# malformed request, which is the wrong half of the 4xx/5xx split and tells the
+# caller nothing about what to send instead.
+#
+# `system_prompt` and `description` are deliberately absent: their columns really
+# are nullable, and clearing a prompt back to the pipeline default is a request
+# somebody legitimately makes.
+_NOT_NULL_FIELDS: frozenset[str] = frozenset(
+    name
+    for name in AgentUpdate.model_fields
+    if name in Agent.__table__.c and not Agent.__table__.c[name].nullable
+)
 
 
 # --------------------------------------------------------------------------
@@ -388,6 +459,53 @@ def _audit(
             audit_metadata=metadata,
         )
     )
+
+
+def _pending_value(agent: Agent, field: str) -> Any:
+    """What `field` will actually hold on the row, read before the INSERT runs.
+
+    SQLAlchemy applies a mapped column's `default=` at FLUSH time, not at
+    construction, so on a freshly-built from-scratch agent `chunk_size` is still
+    None in Python while the row it produces will hold 800. Any check that has to
+    run before `db.add` therefore cannot just read the attribute.
+
+    That is not a tidiness point. `_reject_overlapping_chunks` exists precisely
+    for the half-specified pair -- a request that sends `chunk_overlap` and lets
+    the other half come from somewhere else -- and reading the attribute alone
+    would see None, skip the comparison, and let exactly that case through to
+    fail at ingest instead. The column default IS the other half when nothing
+    else supplied one, so it has to be consulted like any other source.
+    """
+    value = getattr(agent, field)
+    if value is not None:
+        return value
+    return Agent.__table__.c[field].default.arg
+
+
+def _reject_overlapping_chunks(chunk_size: int, chunk_overlap: int) -> None:
+    """422 unless overlap is strictly smaller than size. Create and update share it.
+
+    Callers pass the MERGED configuration, never the request body. On a PATCH,
+    sending only `chunk_overlap` can break a pair whose other half is already on
+    the row; on a POST it can break a pair whose other half came from the
+    template or from the column default. LangChain's splitter raises only when
+    overlap exceeds size, and it raises during the next INGEST -- so without this
+    the error surfaces on somebody's upload, minutes or days after the request
+    that caused it, pointing at the file. Equality is rejected too: it is legal
+    to LangChain and produces chunks that are entirely overlap.
+
+    One helper rather than a copy in each route, because the two now accept the
+    same fields. A pair that PATCH refuses and POST accepts is not a validation
+    rule, it is a validation rule with a documented way around it.
+    """
+    if chunk_overlap >= chunk_size:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                f"chunk_overlap ({chunk_overlap}) must be smaller than "
+                f"chunk_size ({chunk_size})."
+            ),
+        )
 
 
 async def _document_count(db: AsyncSession, agent_id: uuid.UUID) -> int:
@@ -475,6 +593,14 @@ async def create_agent(
 ) -> AgentOut:
     """Create an agent, optionally starting from a template.
 
+    Configuration is resolved in ONE direction and in three layers: model
+    defaults, then the template copy over the top of them, then whatever the
+    request sent explicitly over the top of that. There is no branch in it -- the
+    override step below runs the same way whether a template was chosen or not,
+    which is what keeps "create from a template" and "create your own" one code
+    path even now that the request can carry tunables. See `AgentCreate` for why
+    it can.
+
     Nothing is provisioned in Pinecone here, and nothing needs to be: a
     namespace is created lazily on first upsert and `Agent.namespace` is derived
     from the id, so an agent with no documents simply has no namespace yet. That
@@ -539,6 +665,46 @@ async def create_agent(
     # too, which every consumer already handles because agents created before
     # those columns existed have them.
 
+    # LAYER THREE: the request itself, applied over whatever the two layers
+    # above left behind. Precedence is model defaults, then template, then
+    # explicit request -- one direction, and this loop is the only place the
+    # third layer is written, so a value the client sent always wins and a value
+    # it did not send is never touched.
+    #
+    # `exclude_none`, NOT `exclude_unset`, and the difference is load-bearing in
+    # a way it is not on PATCH. Both agree about a field the client omitted --
+    # neither emits it, so neither can clobber a template value with None -- and
+    # they differ only on an explicit `"chunk_size": null`. `AgentUpdate` needs
+    # that distinction, because `system_prompt: null` legitimately CLEARS a
+    # prompt back to the pipeline default. Here there is nothing yet to clear:
+    # from-scratch already leaves the prompt NULL, and a template's prompt is the
+    # substance of what was picked rather than something to be nulled in the same
+    # breath. What `exclude_unset` would buy instead is a 500 -- a wizard that
+    # serialises its untouched fields as null would send `chunk_size: null` at a
+    # NOT NULL column, and the resulting IntegrityError carries SQLSTATE 23502,
+    # which `_conflict_or_reraise` correctly declines to call a name conflict and
+    # re-raises. So the user gets an unhandled 500 for having left a field alone.
+    #
+    # Restricted to `_TUNABLE_FIELDS` so `name`, `description` and `template_id`
+    # cannot be re-applied here; see the comment on that set.
+    overrides = {
+        field: value
+        for field, value in body.model_dump(exclude_none=True).items()
+        if field in _TUNABLE_FIELDS
+    }
+    for field, value in overrides.items():
+        setattr(agent, field, value)
+
+    # BEFORE `db.add`, deliberately. The instance is still detached, so a 422
+    # here leaves the session exactly as it found it -- nothing pending, nothing
+    # to roll back, and no half-built agent for the next flush in this request to
+    # trip over. Reading through `_pending_value` because the column defaults
+    # have not been applied yet at this point.
+    _reject_overlapping_chunks(
+        _pending_value(agent, "chunk_size"),
+        _pending_value(agent, "chunk_overlap"),
+    )
+
     db.add(agent)
     try:
         await db.flush()
@@ -561,6 +727,16 @@ async def create_agent(
             # the log a year later can actually interpret.
             "template_id": str(template.id) if template else None,
             "template_slug": template.slug if template else None,
+            # WHICH knobs the request overrode, sorted so two identical requests
+            # produce identical log rows. Without this the entry names a template
+            # and nothing else, so a reader concludes the agent carries that
+            # template's configuration -- and since `system_prompt` is overridable
+            # too, an agent whose four persona columns all say "Socratic Tutor"
+            # could be running a prompt the log never mentioned. Field NAMES
+            # only: the values are on the agent, and copying them here would put
+            # a whole system prompt in an audit row and let the two disagree
+            # after the next PATCH.
+            "overrides": sorted(overrides),
         },
     )
     await db.commit()
@@ -639,23 +815,49 @@ async def update_agent(
         )
     fields.pop("embedding_model", None)
 
-    # Checked against the MERGED configuration, not against the body: sending
-    # only `chunk_overlap` can break a pair whose other half is already on the
-    # row. LangChain's splitter raises only when overlap exceeds size, and it
-    # raises during the next INGEST -- so without this check the error surfaces
-    # on somebody's upload, minutes or days after the request that caused it,
-    # pointing at the file. Equality is rejected too: it is legal to LangChain
-    # and produces chunks that are entirely overlap.
-    chunk_size = fields.get("chunk_size", agent.chunk_size)
-    chunk_overlap = fields.get("chunk_overlap", agent.chunk_overlap)
-    if chunk_overlap >= chunk_size:
+    # An explicit null at a NOT NULL column, refused as a 422 here rather than
+    # left to arrive as an IntegrityError that `_conflict_or_reraise` correctly
+    # declines to call a name conflict and re-raises -- which surfaced as a 500,
+    # the wrong half of the 4xx/5xx split for a malformed request, carrying
+    # nothing the caller could act on. Fields are named so the caller knows which
+    # key to drop.
+    nulled = sorted(
+        field for field, value in fields.items() if value is None and field in _NOT_NULL_FIELDS
+    )
+    if nulled:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=(
-                f"chunk_overlap ({chunk_overlap}) must be smaller than "
-                f"chunk_size ({chunk_size})."
+                f"These fields cannot be set to null: {', '.join(nulled)}. "
+                "Omit a field to leave it unchanged."
             ),
         )
+
+    # The MERGED configuration -- the sent value where there is one, the row's
+    # own where there is not -- because sending only `chunk_overlap` can break a
+    # pair whose other half is already on the row. The reasoning, and why
+    # equality is rejected as well, is on `_reject_overlapping_chunks`; it is
+    # shared with `create_agent` rather than duplicated. Unlike there, the column
+    # defaults have long since been applied, so the attributes can be read
+    # directly.
+    #
+    # Tested against None explicitly, not with `or` and not with `.get`'s default.
+    # `.get(key, agent.x)` returns the None that `exclude_unset` keeps for an
+    # EXPLICIT `{"chunk_size": null}`, and `None >= int` is a TypeError -- a 500
+    # on a request that deserved a 422. `or` fixes that and breaks something
+    # else: `chunk_overlap` is `ge=0`, and a perfectly legal `{"chunk_overlap":
+    # 0}` is falsy, so it would silently compare the row's OLD overlap instead of
+    # the zero just sent.
+    #
+    # The null is left in `fields` deliberately. The setattr loop below writes
+    # it, the NOT NULL column rejects it, and that is the error the request has
+    # earned rather than one this line invented on its behalf.
+    sent_size = fields.get("chunk_size")
+    sent_overlap = fields.get("chunk_overlap")
+    _reject_overlapping_chunks(
+        agent.chunk_size if sent_size is None else sent_size,
+        agent.chunk_overlap if sent_overlap is None else sent_overlap,
+    )
 
     for key, value in fields.items():
         setattr(agent, key, value)
