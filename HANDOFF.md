@@ -148,19 +148,35 @@ backend/.venv/Scripts/python.exe scripts/slice_check.py
 
 ## Then, in order
 
-| # | Item | Blocks |
-|---|---|---|
-| 1 | Seed the 3 `agent_templates` (Lecture Q&A, Policy Lookup, From scratch) | Agent creation |
-| 2 | Auth routes + session middleware (`app/auth/`) | Everything — it all sits behind login |
-| 3 | Agent CRUD + admin listing | The marketplace flow |
-| 4 | ~~Ingest pipeline~~ **done** — but `ingest_file()` takes a filesystem `Path`. An upload arrives as bytes; it needs a `(filename, bytes)` entry point before the API can call it | The upload route |
-| 5 | ~~Stage 1 chain~~ **done** (`rag/pipeline.py`) — not yet writing `queries` / `query_chunks` rows | The Trace view, Ragas contexts |
-| 6 | Stage 2 loop + `trace_events` writing (`rag/trace.py`) | Stage 2 |
-| 7 | Golden set + Ragas | Stage 3 |
-| 8 | React views: dashboard, create-agent, agent tabs, admin | Needs the API first |
+Items 1–8 of the original list are **all done**, including Stage 2 (as the agent loop, not
+as the specified score-triggered rewrite — PRD open item 7 explains why the threshold could
+not have worked) and Stage 3. The list below is what is actually left; PRD §10 is the
+authoritative tracker.
 
-Non-blocking: object storage for slide-image citations (PRD open item 10), and the
-workshop-PDF licensing decision (item 12 — currently gitignored, which is the safe default).
+| # | Item | Why it matters |
+|---|---|---|
+| 1 | **SSE streaming** (PRD 13) | The tool loop made a turn longer again — a search adds ~1.6 s and `run_python` adds ~1–3 s. Nothing shows progress between "sent" and the whole answer |
+| 2 | **`eval_runs` does not record `tools_enabled`** (PRD 23) | Two scorecards for one agent are incomparable if tools were toggled between them, and nothing on the card says so |
+| 3 | **Blocking SDK calls inside `async def`** (PRD 19) | Pinecone, Cohere and embeddings are sync at the in-request call sites in `ingest.py`. One uvicorn worker on Render. Fix them together |
+| 4 | **Deleting a document destroys past queries' contexts** (PRD 18) | FK cascade. Costs Stage 3 its evidence while the scores still render |
+| 5 | **Faithfulness penalises a teaching persona** (PRD 20) | The weakest-metric pointer currently advises deleting the pedagogy |
+| 6 | Object storage for handouts and slide images (PRD 10, 25) | Handout bytes are in Postgres, capped at 5 MB and 200 per agent |
+
+Verify anything you change with the three harnesses, lowest layer first — a fix in
+`app/tools/` or `app/rag/` invalidates the layers above it:
+
+```bash
+backend/.venv/Scripts/python.exe scripts/sandbox_check.py    # 16 cases, no DB, seconds
+backend/.venv/Scripts/python.exe scripts/ledger_check.py     # citation markers, no DB
+backend/.venv/Scripts/python.exe scripts/agentic_check.py --setup   # then --run, then --cleanup
+```
+
+`--cleanup` matters more than usual: a leaked Pinecone namespace is a real cost, and the
+Builder plan's 1,000-namespace cap *is* the maximum number of agents this deployment can
+hold.
+
+Non-blocking: the workshop-PDF licensing decision (item 12 — currently gitignored, which is
+the safe default).
 
 ---
 

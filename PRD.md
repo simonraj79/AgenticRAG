@@ -1147,7 +1147,7 @@ Infrastructure is complete. Stages 1 and 3 are built; Stage 2 is half-built.
 | 4 | RAG dependencies | ✅ done, plus `ragas`, `langchain-community<0.4`, `python-multipart` |
 | 5 | Ingest pipeline, namespace-scoped | ✅ done, now 50 MB and off-request (§3.3) |
 | 6 | Retriever seam + Stage 1 chain | ✅ done |
-| 7 | **Stage 2 loop** + trace writing | ◐ trace, rerank and a rewriter all exist; the **score-triggered loop** does not |
+| ~~7~~ | ~~**Stage 2 loop** + trace writing~~ | ✅ **done, and deliberately not as specified.** The score-triggered rewrite loop was **superseded** by the agent loop (§3.5a). A threshold could not have worked: on-topic questions measured 0.61–0.67 and off-topic 0.49–0.58, so 0.5 sits *inside* the overlap and fires late on bad retrievals and early on good ones. The loop now triggers on the model's own admission that something is missing, read off the answer text with the same marker list `queries.refused` uses |
 | 8 | 10-question golden set + Ragas wiring | ✅ done, with authoring and editing (§3.6.1) |
 | 9 | React views | ✅ done — Login · Dashboard · Chat · Documents · Evaluate |
 | 10 | Object storage for slide images (R2/S3) | Open — only gates citation images |
@@ -1161,6 +1161,11 @@ Infrastructure is complete. Stages 1 and 3 are built; Stage 2 is half-built.
 | **18** | Deleting a document destroys past queries' stored contexts | Open — FK cascade; costs Stage 3 its evidence |
 | **19** | Blocking SDK calls inside `async def` | Open — uniform deferral; fix all call sites together |
 | **20** | **Faithfulness penalises a teaching persona for teaching** | Open — measured run 3. The analogy and the comprehension check are unsupported by construction, so the weakest-metric pointer advises deleting the pedagogy (§3.6.3) |
+| **21** | **A refusal-first prompt suppresses tool use** | Open as a *tension*, mitigated not solved. Grounding-first prompting is why this system can be trusted to decline; it is also why the model would rather declare a gap than search for it. Three prompt variants (including an explicit "you MUST call search_corpus") produced zero tool calls. The gap trigger works around it; the underlying competition between the two instructions remains |
+| **22** | **`tool_choice="any"` is silently ignored on OpenRouter** | Open — only a *named* tool forces a call. Same family as the `max_completion_tokens` 404: a parameter accepted and not honoured. Worse than an error, because a dropped "required" is indistinguishable from a model that declined |
+| **23** | **Tool use is unmeasured** | Open. Ragas scores whether an answer is faithful to its context; it has no opinion on whether the right tool was called, and inventing a faithfulness-shaped score for tool choice would be a new instrument of unknown validity — the exact failure items 15 and 16 record. Trajectory evaluation is Stage 4 |
+| **24** | **The sandbox is not a container** | Open, and deliberately so. Hardened subprocess: empty environment, import allowlist plus attribute denylist, no sockets, POSIX rlimits, hard timeout. It defends against a confused or prompt-injected model, not an adversary with arbitrary input. `pathlib` can still read outside the scratch directory. Full contract in `new features/02-code-interpreter.md` §5 |
+| **25** | **Handout bytes live in Postgres** | Open — capped at 5 MB per file and 200 per agent. Correct answer is object storage, which is item 10; doing both at once is why they are one item apart |
 
 Items 13–20 were all discovered by building and measuring, not by planning. Items 15, 16 and
 20 are the direct output of Stage 3 and are the strongest argument for having built it — and

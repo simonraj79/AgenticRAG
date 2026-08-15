@@ -167,9 +167,34 @@ pointer actionable.
 | `retrieve_k` | `20` | context_recall, context_precision |
 | `rerank_enabled` | `true` | context_precision |
 | `rerank_top_n` | `3` | context_precision |
-| `score_threshold` | `0.5` | **rewriting only — not refusal.** See §6 |
+| `score_threshold` | `0.5` | **advisory only.** Governs neither refusing nor, since the agent loop, rewriting. See §6 |
 | `system_prompt` | per template | faithfulness, answer_relevance |
 | `generation_model` | `NULL` → service default | faithfulness |
+| `tools_enabled` | `true` (new agents) / `false` (pre-existing) | **all four, and it is not a tuning knob** |
+| `max_tool_steps` | `3` | context_recall, latency |
+
+**`tools_enabled` is the one row in this table that changes what is being measured, not how
+well it does it.** With it on, the agent can search its corpus again mid-turn and can write
+and run Python, so the answer, the trace and the latency all move. Two consequences for
+anyone comparing scorecards:
+
+- **The migration backfilled every agent that existed before tools shipped to `false`**,
+  precisely so that the runs recorded in §10 stay reproducible. New agents default to `true`.
+  If a run's numbers look unlike its predecessors, check this column before checking the
+  judge.
+- **`eval_runs` does not record it.** `judge_model` and `generation_model` are captured per
+  run; `tools_enabled` is not, so a scorecard cannot currently tell you whether the agent had
+  tools when it was scored. Toggling it between runs makes them incomparable and nothing in
+  the card will say so. That is a real gap, in the same family as PRD open item 23.
+
+**Tool use itself is unmeasured, deliberately.** Ragas scores whether an answer is faithful
+to its context; it has no opinion on whether the right tool was called, or whether calling
+none was correct. Inventing a faithfulness-shaped number for tool choice would be a new
+instrument of unknown validity — which is exactly the failure §11 and PRD items 15/16
+record, where a broken measurement still rendered a confident scorecard. Trajectory
+evaluation is Stage 4. Until then, read the trace: `TOOL_CALL`, `TOOL_RESULT` and
+`TOOL_ERROR` rows say what happened, and `GENERATE.payload.stopped_reason` says whether the
+answer was finished or forced.
 
 Retrieval parameters differ *per persona* rather than being copied — a quiz generator draws
 on more of the corpus than a Socratic tutor.

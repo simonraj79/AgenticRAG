@@ -7,6 +7,17 @@ Ingest → embed → retrieve → rerank → generate → **measure**. The last 
 four Ragas metrics, a per-question breakdown, and a weakest-metric pointer that names the
 next thing to fix.
 
+**The agent has tools.** Generation is a bounded loop rather than a single call: the model
+can search its own corpus again mid-answer when one retrieval did not cover the question,
+and it can write and run Python in a sandbox to produce a chart, a slide deck or a table.
+Every tool call is a row in the same trace as every other decision, including the program it
+wrote — a pipeline that claims to be inspectable should not hide the step that generates
+your files.
+
+**Handouts** is where those files land: charts, `.pptx` decks, `.csv` tables and markdown
+study sheets, produced either as a side effect of a conversation or straight from a recipe
+button. Each one keeps the code that made it.
+
 *Source material for the corpus and the design brief: the "Agentic RAG Harness Engineering"
 workshop (Topics 10–11). See [PRD.md](PRD.md) §8 open item 6 for the licensing question on
 the workshop PDFs.*
@@ -26,10 +37,11 @@ changing anything infrastructural.
 | Frontend | React 19 · Vite · Tailwind CSS 4 |
 | Database | Render Postgres 18 (Singapore) |
 | Vector DB | Pinecone serverless, 768d cosine (`ap-southeast-1`, Singapore) |
-| Embeddings | `gemini-embedding-2` @ 768 dims |
-| Generation | `gemma-4-31b-it` via the Gemini API |
-| Reranker | Cohere `rerank-v3` |
-| Evaluation | Ragas, judged by Gemini Flash Lite |
+| Embeddings | `gemini-embedding-2` @ 768 dims, via Google directly |
+| Generation | `google/gemma-4-31b-it` **via OpenRouter** — every chat model goes through one gateway; embeddings deliberately do not |
+| Agent tools | `search_corpus` (the retriever, model-driven) · `run_python` (sandboxed subprocess: matplotlib, python-pptx, pandas) |
+| Reranker | Cohere `rerank-v3.5` |
+| Evaluation | Ragas, judged by `google/gemini-3.7-flash` — **not** the generation model, so a run is not self-assessment |
 | Auth | Google OAuth 2.0 via Authlib |
 
 ## Getting started
