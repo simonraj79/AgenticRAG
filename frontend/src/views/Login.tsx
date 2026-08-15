@@ -106,7 +106,7 @@ export default function Login({ onAuthenticated }: { onAuthenticated: (user: Use
             aria-hidden precisely because this list exists -- so the stage names
             are announced once, as text, in order.
           */}
-          <ol className="-mt-2 flex flex-wrap items-center gap-x-2 gap-y-2 text-[11px] font-medium uppercase tracking-[0.14em] text-slate-500">
+          <ol className="-mt-2 flex flex-wrap items-center gap-x-2 gap-y-2 text-[11px] font-medium uppercase tracking-[0.14em] text-slate-400">
             {STAGE_NAMES.map((name, index) => (
               <li key={name} className="flex items-center gap-2">
                 <span className={index === STAGE_NAMES.length - 1 ? "text-emerald-300" : ""}>
@@ -125,7 +125,7 @@ export default function Login({ onAuthenticated }: { onAuthenticated: (user: Use
             {PILLARS.map((pillar) => (
               <div key={pillar.title} className="border-t border-slate-800 pt-4">
                 <dt className="text-sm font-medium text-slate-200">{pillar.title}</dt>
-                <dd className="mt-1.5 text-[13px] leading-relaxed text-slate-500">
+                <dd className="mt-1.5 text-[13px] leading-relaxed text-slate-400">
                   {pillar.body}
                 </dd>
               </div>
@@ -137,7 +137,7 @@ export default function Login({ onAuthenticated }: { onAuthenticated: (user: Use
         <section className="gw-rise w-full justify-self-center lg:max-w-md" style={{ animationDelay: "0.12s" }}>
           <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-6 shadow-2xl shadow-emerald-950/30 sm:p-8">
             <h2 className="text-lg font-semibold tracking-tight text-slate-100">Sign in</h2>
-            <p className="mt-1.5 text-sm text-slate-500">
+            <p className="mt-1.5 text-sm text-slate-400">
               Your agents, documents and eval runs are scoped to your account.
             </p>
 
@@ -149,7 +149,7 @@ export default function Login({ onAuthenticated }: { onAuthenticated: (user: Use
               <GoogleMark />
               Sign in with Google
             </a>
-            <p className="mt-4 text-center text-xs leading-relaxed text-slate-500">
+            <p className="mt-4 text-center text-xs leading-relaxed text-slate-400">
               We store your Google account ID, email and name. Google&rsquo;s access and
               refresh tokens are discarded immediately after the identity check.
             </p>

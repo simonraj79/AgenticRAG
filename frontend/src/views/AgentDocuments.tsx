@@ -277,7 +277,7 @@ export default function AgentDocuments({
           className="mt-3 block w-full text-sm text-slate-400 file:mr-3 file:rounded-md file:border-0 file:bg-slate-100 file:px-3 file:py-1.5 file:text-sm file:font-medium file:text-slate-900 hover:file:bg-white"
         />
 
-        <p className="mt-2 text-xs text-slate-500">
+        <p className="mt-2 text-xs text-slate-400">
           Markdown, plain text or PDF, up to {MAX_UPLOAD_BYTES / (1024 * 1024)} MB. Original
           files are not stored — text is chunked into Postgres and embedded into this
           agent&rsquo;s namespace.
@@ -346,7 +346,7 @@ export default function AgentDocuments({
         {documents.length > 0 && (
           <div className="overflow-x-auto rounded-lg border border-slate-800">
             <table className="w-full text-left text-sm">
-              <thead className="bg-slate-900/60 text-xs tracking-wide text-slate-500 uppercase">
+              <thead className="bg-slate-900/60 text-xs tracking-wide text-slate-400 uppercase">
                 <tr>
                   <th className="px-4 py-2 font-medium">Filename</th>
                   <th className="px-4 py-2 font-medium">Status</th>
@@ -388,7 +388,7 @@ export default function AgentDocuments({
                     </td>
                     <td className="px-4 py-3 text-slate-300">{doc.chunk_count}</td>
                     <td className="px-4 py-3 text-slate-400">{formatBytes(doc.byte_size)}</td>
-                    <td className="px-4 py-3 text-xs text-slate-500">
+                    <td className="px-4 py-3 text-xs text-slate-400">
                       {formatTimestamp(doc.created_at)}
                     </td>
                     <td className="px-4 py-3 text-right">

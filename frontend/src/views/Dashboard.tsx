@@ -306,14 +306,14 @@ function CreateAgentForm({
 
       <fieldset className="mt-5">
         <legend className="text-sm font-medium text-slate-200">Choose a teaching persona</legend>
-        <p className="mt-1 mb-4 text-xs text-slate-500">
+        <p className="mt-1 mb-4 text-xs text-slate-400">
           The persona decides how the agent answers -- what it asks back, what it withholds,
           how it refuses. It never changes what the agent may answer <em>from</em>: every
           persona is bound to this agent&rsquo;s documents alone.
         </p>
 
         {templates.length === 0 ? (
-          <p className="text-xs text-slate-500">
+          <p className="text-xs text-slate-400">
             No templates loaded. The agent will be created with the server&rsquo;s default
             parameters.
           </p>
@@ -357,7 +357,7 @@ function CreateAgentForm({
                         <CategoryBadge category={template.category} />
                       </div>
                       {template.persona_role && (
-                        <span className="mt-0.5 block text-xs tracking-wide text-slate-500 uppercase">
+                        <span className="mt-0.5 block text-xs tracking-wide text-slate-400 uppercase">
                           {template.persona_role}
                         </span>
                       )}
@@ -370,7 +370,7 @@ function CreateAgentForm({
 
                   {template.pedagogy && (
                     <p
-                      className={`mt-3 border-t border-slate-800 pt-3 text-xs leading-relaxed text-slate-500 ${
+                      className={`mt-3 border-t border-slate-800 pt-3 text-xs leading-relaxed text-slate-400 ${
                         active ? "" : "line-clamp-3"
                       }`}
                     >
@@ -397,7 +397,7 @@ function CreateAgentForm({
             value={name}
             onChange={(event) => setName(event.target.value)}
             placeholder="Topic 10 Lecture"
-            className="mt-1 w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 outline-none focus:border-slate-500"
+            className="mt-1 min-h-11 w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 outline-none focus:border-slate-500"
           />
         </div>
 
@@ -410,7 +410,7 @@ function CreateAgentForm({
             value={description}
             onChange={(event) => setDescription(event.target.value)}
             placeholder="What this agent knows about"
-            className="mt-1 w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 outline-none focus:border-slate-500"
+            className="mt-1 min-h-11 w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 outline-none focus:border-slate-500"
           />
         </div>
       </div>
@@ -428,7 +428,7 @@ function CreateAgentForm({
               <Fact label="Score threshold" value={selected.score_threshold} />
               <Fact label="Max rewrites" value={selected.max_rewrites} />
             </dl>
-            <p className="mt-3 text-xs text-slate-500">
+            <p className="mt-3 text-xs text-slate-400">
               These values are <em>copied</em> onto the agent. Editing the template later
               will not re-tune an agent you already built.
             </p>

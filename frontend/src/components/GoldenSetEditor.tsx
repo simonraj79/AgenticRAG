@@ -347,7 +347,7 @@ export default function GoldenSetEditor({
           <h3 className="text-sm font-medium tracking-wide text-slate-400 uppercase">
             Golden set ({questions.length})
           </h3>
-          <p className="mt-1 text-xs text-slate-500">
+          <p className="mt-1 text-xs text-slate-400">
             {activeCount} active {activeCount === 1 ? "question" : "questions"} will be run.
           </p>
         </div>
@@ -382,7 +382,7 @@ export default function GoldenSetEditor({
         </div>
       </div>
 
-      <p className="text-xs leading-relaxed text-slate-500">
+      <p className="text-xs leading-relaxed text-slate-400">
         Suggestions are written from this agent&rsquo;s own indexed chunks, so they can only
         ask what its corpus actually contains. That is the point and also the limit: a set
         drawn from the corpus cannot, on its own, test what the corpus is missing. Add a
@@ -458,7 +458,7 @@ export default function GoldenSetEditor({
               >
                 {editing ? (
                   <div className="space-y-3">
-                    <label className="block text-xs text-slate-500">
+                    <label className="block text-xs text-slate-400">
                       Question
                       <textarea
                         autoFocus
@@ -471,7 +471,7 @@ export default function GoldenSetEditor({
                       />
                     </label>
 
-                    <label className="block text-xs text-slate-500">
+                    <label className="block text-xs text-slate-400">
                       Reference answer{" "}
                       {draft.expected_behaviour === "answer" && (
                         <span className="text-amber-400">— needed for context_recall</span>
@@ -492,7 +492,7 @@ export default function GoldenSetEditor({
                     </label>
 
                     <div className="flex flex-wrap items-center gap-4">
-                      <label className="text-xs text-slate-500">
+                      <label className="text-xs text-slate-400">
                         Expected behaviour
                         <select
                           value={draft.expected_behaviour}
@@ -506,7 +506,7 @@ export default function GoldenSetEditor({
                         </select>
                       </label>
 
-                      <label className="flex items-center gap-2 text-xs text-slate-500">
+                      <label className="flex items-center gap-2 text-xs text-slate-400">
                         <input
                           type="checkbox"
                           checked={draft.is_active}
@@ -554,7 +554,7 @@ export default function GoldenSetEditor({
                         <SourceBadge source={row.source} />
                         <BehaviourBadge behaviour={behaviour} />
                         {!row.is_active && (
-                          <span className="rounded-full border border-slate-700 bg-slate-900 px-2 py-0.5 text-[0.65rem] font-medium tracking-wide text-slate-500 uppercase">
+                          <span className="rounded-full border border-slate-700 bg-slate-900 px-2 py-0.5 text-[0.65rem] font-medium tracking-wide text-slate-400 uppercase">
                             inactive
                           </span>
                         )}
@@ -562,7 +562,7 @@ export default function GoldenSetEditor({
 
                       {row.reference_answer && (
                         <p className="mt-2 border-l-2 border-slate-800 pl-3 text-xs leading-relaxed text-slate-400">
-                          <span className="text-slate-500">Reference: </span>
+                          <span className="text-slate-400">Reference: </span>
                           {row.reference_answer}
                         </p>
                       )}
@@ -630,7 +630,7 @@ export default function GoldenSetEditor({
         />
 
         <div className="mt-3 flex flex-wrap items-center gap-4">
-          <label className="text-xs text-slate-500">
+          <label className="text-xs text-slate-400">
             Expected behaviour
             <select
               data-testid="golden-add-behaviour"
@@ -661,7 +661,7 @@ export default function GoldenSetEditor({
         <h4 className="text-xs font-medium tracking-wide text-slate-400 uppercase">
           Import a golden set
         </h4>
-        <p className="mt-1 text-xs text-slate-500">
+        <p className="mt-1 text-xs text-slate-400">
           Paste or load a JSON file. A bare list works, the exported{" "}
           <code className="rounded bg-slate-950 px-1 py-0.5 font-mono text-[0.85em] text-emerald-200">
             {"{ questions: [...] }"}

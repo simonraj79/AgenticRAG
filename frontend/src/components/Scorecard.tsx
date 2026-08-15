@@ -153,19 +153,19 @@ export default function Scorecard({ run }: { run: EvalRunDetail }) {
           <h3 className="text-sm font-medium tracking-wide text-slate-400 uppercase">
             Scorecard
           </h3>
-          <p className="mt-1 text-xs text-slate-500">
+          <p className="mt-1 text-xs text-slate-400">
             {formatTimestamp(run.started_at ?? null)}
             {run.finished_at ? ` — finished ${formatTimestamp(run.finished_at)}` : ""}
           </p>
         </div>
-        <p className="text-xs text-slate-500">
+        <p className="text-xs text-slate-400">
           {run.results.length} {run.results.length === 1 ? "question" : "questions"} in this run
         </p>
       </div>
 
       {run.notes && (
         <p className="rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2 text-xs text-slate-300">
-          <span className="text-slate-500">What changed: </span>
+          <span className="text-slate-400">What changed: </span>
           {run.notes}
         </p>
       )}
@@ -243,18 +243,18 @@ export default function Scorecard({ run }: { run: EvalRunDetail }) {
         <div className="rounded-lg border border-slate-800 bg-slate-900/30 p-4">
           <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
             <span className="text-slate-300">
-              <span className="text-slate-500">Means rest on </span>
+              <span className="text-slate-400">Means rest on </span>
               <span data-testid="scored-count" className="font-medium text-slate-100">
                 {summary.scored_count}
               </span>
-              <span className="text-slate-500">
+              <span className="text-slate-400">
                 {" "}
                 scored {summary.scored_count === 1 ? "question" : "questions"}
               </span>
             </span>
 
             <span className="text-slate-300">
-              <span className="text-slate-500">Refusals </span>
+              <span className="text-slate-400">Refusals </span>
               <span
                 data-testid="refusal-tally"
                 className={`font-medium ${
@@ -265,11 +265,11 @@ export default function Scorecard({ run }: { run: EvalRunDetail }) {
               >
                 {summary.refusal_pass} / {summary.refusal_total}
               </span>
-              <span className="text-slate-500"> correctly declined</span>
+              <span className="text-slate-400"> correctly declined</span>
             </span>
           </div>
 
-          <p className="mt-2 text-xs leading-relaxed text-slate-500">
+          <p className="mt-2 text-xs leading-relaxed text-slate-400">
             Refusal questions are graded pass/fail on behaviour and excluded from all four
             means: a correct refusal has no useful context and an answer that deliberately
             does not follow from it, so scoring it would punish the agent for being right.
@@ -334,13 +334,13 @@ export default function Scorecard({ run }: { run: EvalRunDetail }) {
         </div>
 
         {run.results.length === 0 ? (
-          <p className="rounded-lg border border-dashed border-slate-800 px-4 py-8 text-center text-sm text-slate-500">
+          <p className="rounded-lg border border-dashed border-slate-800 px-4 py-8 text-center text-sm text-slate-400">
             No per-question results yet.
           </p>
         ) : (
           <div className="overflow-x-auto rounded-lg border border-slate-800">
             <table className="w-full text-left text-sm">
-              <thead className="bg-slate-900/60 text-xs tracking-wide text-slate-500 uppercase">
+              <thead className="bg-slate-900/60 text-xs tracking-wide text-slate-400 uppercase">
                 <tr>
                   <th className="px-3 py-2 font-medium">Question</th>
                   <th className="px-3 py-2 font-medium">Expected</th>
@@ -427,7 +427,7 @@ function MetricCard({
             would claim the opposite: that it WAS computed and the answer was
             unsupported.
           */
-          <span className="text-base text-slate-500 italic">not scored</span>
+          <span className="text-base text-slate-400 italic">not scored</span>
         )}
       </p>
 
@@ -442,7 +442,7 @@ function MetricCard({
         )}
       </div>
 
-      <p className="mt-3 text-xs leading-relaxed text-slate-500">{metric.measures}</p>
+      <p className="mt-3 text-xs leading-relaxed text-slate-400">{metric.measures}</p>
     </div>
   );
 }
@@ -492,7 +492,7 @@ function ResultRow({
             Four dashes would read as "the judge failed on this row"; this row
             was never sent to the judge at all, and that is by design.
           */
-          <td colSpan={4} className="px-3 py-3 text-center text-xs text-slate-500 italic">
+          <td colSpan={4} className="px-3 py-3 text-center text-xs text-slate-400 italic">
             graded pass/fail — excluded from the means
           </td>
         ) : (
@@ -519,7 +519,7 @@ function ResultRow({
       {open && (
         <tr className="border-t border-slate-800/60 bg-slate-950/40">
           <td colSpan={8} className="px-3 py-3">
-            <p className="text-xs tracking-wide text-slate-500 uppercase">Answer given</p>
+            <p className="text-xs tracking-wide text-slate-400 uppercase">Answer given</p>
             <p className="mt-1.5 max-w-4xl text-sm leading-relaxed whitespace-pre-wrap text-slate-300">
               {result.answer?.trim() || "(no answer recorded)"}
             </p>
@@ -551,7 +551,7 @@ function ScoreCell({ value }: { value: number | null }) {
 
 function BehaviourResult({ ok, refused }: { ok: boolean | null; refused: boolean }) {
   if (ok === null || ok === undefined) {
-    return <span className="text-xs text-slate-500">unknown</span>;
+    return <span className="text-xs text-slate-400">unknown</span>;
   }
   return (
     <span

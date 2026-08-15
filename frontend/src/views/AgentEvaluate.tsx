@@ -307,7 +307,7 @@ export default function AgentEvaluate({
         </p>
 
         <div className="mt-4 flex flex-wrap items-end gap-3">
-          <label className="min-w-[18rem] flex-1 text-xs text-slate-500">
+          <label className="min-w-[18rem] flex-1 text-xs text-slate-400">
             What changed since the last run?
             <input
               type="text"
@@ -315,7 +315,7 @@ export default function AgentEvaluate({
               value={notes}
               onChange={(event) => setNotes(event.target.value)}
               placeholder="e.g. rerank on, retrieve_k 20 -> 30"
-              className="mt-1 w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 outline-none focus:border-slate-500"
+              className="mt-1 min-h-11 w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 outline-none focus:border-slate-500"
             />
           </label>
 
@@ -340,7 +340,7 @@ export default function AgentEvaluate({
         )}
 
         {activeCount > 0 && !running && (
-          <p className="mt-3 text-xs text-slate-500">
+          <p className="mt-3 text-xs text-slate-400">
             {activeCount} active {activeCount === 1 ? "question" : "questions"} ready to
             score. Notes are how two runs become an experiment rather than two numbers.
           </p>
@@ -412,7 +412,7 @@ export default function AgentEvaluate({
         {loadingRuns && <Spinner label="Loading runs" />}
 
         {!loadingRuns && runs.length === 0 && (
-          <p className="rounded-lg border border-dashed border-slate-800 px-4 py-8 text-center text-sm text-slate-500">
+          <p className="rounded-lg border border-dashed border-slate-800 px-4 py-8 text-center text-sm text-slate-400">
             No runs yet. The first one is the baseline every later run is read against.
           </p>
         )}
@@ -464,7 +464,7 @@ export default function AgentEvaluate({
                     </span>
 
                     {row.notes && (
-                      <span className="mt-1 block truncate text-xs text-slate-500">
+                      <span className="mt-1 block truncate text-xs text-slate-400">
                         {row.notes}
                       </span>
                     )}

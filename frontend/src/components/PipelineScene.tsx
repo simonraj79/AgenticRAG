@@ -117,7 +117,7 @@ export default function PipelineScene() {
               <span className="text-[11px] font-semibold uppercase tracking-[0.18em] text-emerald-300">
                 {stage.label}
               </span>
-              <span className="font-mono text-[10px] text-slate-500">
+              <span className="font-mono text-[10px] text-slate-400">
                 {String(index + 1).padStart(2, "0")}
               </span>
             </div>
