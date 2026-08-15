@@ -576,7 +576,16 @@ with no undo**: Pinecone dimension (768), Pinecone region (`ap-southeast-1`), an
 region (Singapore, for every service).
 
 A fourth belongs with them: **the Pinecone namespace scheme** (`agent_{id}`, §3.2). It is
-written into every vector at upsert, so changing it means re-ingesting every agent.
+written into every vector at upsert.
+
+**None of the Pinecone ones are truly unrecoverable, and the cost varies enormously.**
+Vectors can be fetched and re-upserted bit-identically, so changing index name, region,
+cloud or namespace scheme is a **data copy with no re-embedding**. Only a change to
+*dimension* or *embedding model* invalidates the vectors themselves and forces a rebuild
+from `chunks.text`. `scripts/migrate_index.py` implements the blue/green procedure —
+build alongside, copy, verify, swap, then delete — and CLAUDE.md documents the full cost
+hierarchy. The Render region constraints are the genuinely painful ones, because they
+require recreating a service and migrating the database across.
 
 **The Render API defaults `region` to `oregon`.** Omitting the field does not inherit the
 workspace's other services — it silently provisions in the wrong hemisphere, and the only

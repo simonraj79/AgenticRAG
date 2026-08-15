@@ -87,7 +87,50 @@ Namespace is baked into every vector at upsert, so changing the scheme means re-
 accepts a raw `str`, so pass the string and let the API validate. The enum is not the
 authority.
 
-**Dimension, cloud and region are fixed at index creation.** No in-place change.
+**Dimension, cloud and region are fixed at index creation.** No in-place change — but see
+"Changing something immutable" below, which is cheaper than it sounds.
+
+**`IndexTags` breaks `dict()`.** `describe_index()["tags"]` returns an `IndexTags` whose
+`keys` attribute is `None` rather than a method, so `dict(tags)` raises
+`TypeError: 'NoneType' object is not callable` — an error that points nowhere near the
+cause. Use `.to_dict()`.
+
+### Changing something "immutable"
+
+`create_index.py --recreate` refuses to delete a populated index. That guard is not an
+obstacle to work around — **the destructive path was never the correct procedure.** Use
+`scripts/migrate_index.py`, which builds the replacement alongside the original.
+
+**"Irreversible" is too blunt. There is a cost hierarchy**, and most of it is cheap:
+
+| What changes | Re-embed? | Cost | How |
+|---|---|---|---|
+| Index name | No | data transfer | `migrate_index.py` |
+| **Region / cloud** | **No** | data transfer | `migrate_index.py --to-region` |
+| **Namespace scheme** | **No** | data transfer | `migrate_index.py --namespace-map` |
+| Dimension | **Yes** | embedding API calls | rebuild from `chunks.text` |
+| Embedding model | **Yes** | embedding API calls | rebuild from `chunks.text` |
+
+**The insight: vectors can be fetched and re-upserted verbatim.** `list_paginated` →
+`fetch` → `upsert` copies values and metadata bit-identically (verified: 8 vectors across
+2 namespaces, us-east-1 → ap-southeast-1, values and metadata compared element-wise). Only
+changes that alter what a vector *means* — dimension or model — force re-embedding.
+
+**Blue/green, never delete-then-create:**
+
+1. `python scripts/migrate_index.py --to-region <r> --new-name <n> --dry-run`
+2. Run it for real. The old index stays live and queryable the whole time.
+3. Spot-check queries against the new index.
+4. Point `PINECONE_INDEX_NAME` at it, locally and on Render. Redeploy.
+5. **Only then** delete the old one by hand.
+
+The Builder plan allows 10 indexes, so there is always room to stand one up beside
+another. Nothing is deleted until a human has confirmed the replacement works.
+
+**Even the expensive case is bounded**, because `chunks.text` in Postgres is the source of
+truth. A dimension or model change re-embeds from the database — it never re-parses
+original uploads. That is what makes "we do not store original files" a safe design rather
+than a corner we painted ourselves into.
 
 ### Render
 
