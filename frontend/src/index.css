@@ -29,11 +29,101 @@ summary::-webkit-details-marker {
 }
 
 /*
+  ------------------------------------------------------------------
+  The landing scene: CSS 3D, no dependency.
+
+  Kept here rather than inline because @keyframes and `transform-style` have no
+  utility-class equivalent -- which is the bar this file sets. Nothing below is
+  reachable from a class on an element.
+
+  **No 3D library.** "3D" here is six translucent panes on the Z axis under a
+  single `perspective`, which the compositor animates on the GPU as cheaply as
+  an opacity fade. three.js or Remotion would add megabytes to a static site
+  whose entire config surface is one backend URL, to draw six rectangles.
+
+  **`preserve-3d` is fragile in two specific ways, and both fail silently** --
+  the scene still renders, just flat, with nothing in devtools naming a cause:
+
+  1. An element that carries `transform-style: preserve-3d` AND any of
+     `filter`, `backdrop-filter`, `opacity < 1` or `overflow` other than
+     `visible` is forced back to `flat`. The property wins; the declaration is
+     not an error.
+  2. The 3D rendering context must be CONTIGUOUS. Every element between the
+     `perspective` and the transformed panes has to be `preserve-3d` too; one
+     ordinary div in the chain ends the context and flattens everything below.
+
+  Hence the glow is a SIBLING of the rig rather than a wrapper around it, and
+  the per-pane opacity used for depth cueing sits on the panes (leaves) rather
+  than on the rig (which carries `preserve-3d`). An ancestor further up may
+  safely clip -- the page root's `overflow-hidden` is fine, because it is
+  outside the perspective, not inside the chain.
+*/
+
+.gw-scene {
+  perspective: 1200px;
+  perspective-origin: 50% 45%;
+}
+
+.gw-rig {
+  transform-style: preserve-3d;
+  animation: gw-orbit 28s ease-in-out infinite;
+}
+
+/* Deliberately NOT `preserve-3d`: a pane's contents are flat, and the panes
+   carry the depth-cue `opacity`, which by rule 1 above would force them back to
+   flat anyway. Declaring it would read as intent that the browser then ignores. */
+.gw-pane {
+  /* Set per pane from the component: each one owns its depth. */
+  transform: translateZ(var(--z)) translateY(var(--y, 0px));
+}
+
+/* Backface culling off, deliberately: the rig swings +-22deg and never turns a
+   pane away from the camera, so leaving it visible costs nothing and avoids a
+   pane vanishing mid-swing if the angle is ever widened. */
+@keyframes gw-orbit {
+  0%, 100% { transform: rotateY(-22deg) rotateX(8deg); }
+  50%      { transform: rotateY(22deg) rotateX(3deg); }
+}
+
+/* The query, travelling the pipeline. Starts behind the last pane and arrives
+   in front of the first, so it reads as one pass through the stages. */
+@keyframes gw-pulse {
+  0%   { transform: translateZ(-620px) scale(0.82); opacity: 0; }
+  12%  { opacity: 0.85; }
+  78%  { opacity: 0.55; }
+  100% { transform: translateZ(90px) scale(1.06); opacity: 0; }
+}
+
+/* Chunks in the vector space. Three variants so 18 dots do not pulse in unison. */
+@keyframes gw-drift {
+  0%, 100% { transform: translate3d(0, 0, 0); opacity: 0.25; }
+  50%      { transform: translate3d(6px, -14px, 40px); opacity: 0.85; }
+}
+
+@keyframes gw-glow {
+  0%, 100% { opacity: 0.35; transform: scale(1); }
+  50%      { opacity: 0.6; transform: scale(1.12); }
+}
+
+@keyframes gw-rise {
+  from { opacity: 0; transform: translateY(14px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.gw-rise {
+  animation: gw-rise 0.7s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/*
   Motion is decorative everywhere in this app -- a spinner, a rotating caret, a
   colour transition. None of it conveys state that is not also in text, so
   honouring the OS setting costs nothing and removes a genuine accessibility
   problem for users with vestibular disorders. `!important` because the
   animation is applied by a utility class of equal specificity.
+
+  The landing scene above is covered by this too, and that is the reason it
+  carries no state: every stage name in it is also a text label under the hero,
+  so a reader who stops the animation loses nothing but the motion.
 */
 @media (prefers-reduced-motion: reduce) {
   *,

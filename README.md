@@ -1,7 +1,15 @@
-# Agentic RAG
+# Groundwork
 
-Multi-user agentic RAG over private documents, built for the NTU "Agentic RAG Harness
-Engineering" workshop and deployed on Render.
+**An agentic RAG harness.** Retrieval over your own documents that tells you when it is
+wrong — multi-user, deployed on Render, and scored on a golden set rather than on vibes.
+
+Ingest → embed → retrieve → rerank → generate → **measure**. The last stage is the point:
+four Ragas metrics, a per-question breakdown, and a weakest-metric pointer that names the
+next thing to fix.
+
+*Source material for the corpus and the design brief: the "Agentic RAG Harness Engineering"
+workshop (Topics 10–11). See [PRD.md](PRD.md) §8 open item 6 for the licensing question on
+the workshop PDFs.*
 
 **New here, or resuming work? Start with [HANDOFF.md](HANDOFF.md)** — current state, what
 exists, and what to do next.

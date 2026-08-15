@@ -319,23 +319,35 @@ prompt governs *refusing*, and only the second one was load-bearing in every cas
 Do not treat `score_threshold` as a safety control. Stage 3 exists to turn 0.5 into a
 measured number.
 
-**And now Stage 3 has measured something the prompt alone did not fix: the coaching personas
-weaken refusal.** First real golden-set run, Feynman Explainer, 2026-08-15:
-**`refusal_pass = 0 / 2`.** Both questions the corpus cannot answer were answered anyway.
+**`refusal_pass = 0 / 2` was HALF a detector bug, and the scorecard blamed the agent for it.**
+Feynman Explainer, 2026-08-15, both runs. The headline reads as two ungrounded answers. Read
+back from the database, the two rows have nothing in common:
 
-The cause is not a missing rule — the persona prompts all carry the grounding clause. It is
-that the Feynman persona is *designed* to **name the gap** rather than decline: it says "the
-material does not cover X, but here is what it does say", which is pedagogically right and is
-also, structurally, an answer rather than a refusal. The behaviour the persona rewards and
-the behaviour the golden set measures are in direct tension.
+| Q | Answer | Verdict |
+|---|---|---|
+| "Which of the fourteen launches took place in 2040?" | *"The provided text does not say which of the fourteen launches took place in 2040 [1]."* | **A perfect refusal, scored as a failure** |
+| "What are the specific duties of the eleven permanent crew members?" | two sentences of real content, *then* "it does not cover their specific duties" | Genuinely an answer — the persona |
 
-This is the concrete instance of the risk written into every persona prompt — that a warm,
-confident teaching voice makes an ungrounded answer read better than a blunt refusal. It was
-a prediction; it is now a measurement, and it is the strongest argument in this codebase for
-having built Stage 3 at all. Note that the plain `lecture-qa` template was **not** tested
-here, so this is a finding about coaching personas specifically, not about the system prompt
-in general. Retesting the same golden set against a non-persona agent is the obvious next
-experiment, and it costs one run.
+The first is a false negative in `_detect_refusal`, nothing more: **`"does not say"` is in
+neither `REFUSAL_MARKERS` nor `CAVEAT_MARKERS`.** Adding it makes the row pass. The agent did
+exactly the right thing and the measurement called it wrong — which is the same failure class
+as the `strictness=3` bug below, and worse than a crash for the same reason: **the scorecard
+still renders, and points confidently at the wrong thing.** The marker lists are a heuristic
+over natural language, `ask.py` says so, and this is the calibration it predicted would be
+needed. Expect more of these; the phrase a model reaches for is not guessable in advance.
+
+The second is real, and is the tension worth keeping: the Feynman persona is *designed* to
+**name the gap** rather than decline, which is pedagogically right and structurally an answer.
+Note where the phrase landed — sentence 3, `consumed=198` — so it fails `CAVEAT_MARKERS`'
+40-character preamble window on purpose. Answer-then-caveat is not a refusal, and that tier
+split is doing its job. **Adding `"does not cover"` to the hard tier would score this row as a
+refusal and quietly delete the finding**, so decide which behaviour is wanted before reaching
+for the obvious fix.
+
+The lesson generalises past this one bug: **a refusal metric measures the detector and the
+agent at once, and the two failures look identical on the card.** Before acting on a low
+`refusal_pass`, read the answers. The plain `lecture-qa` template still has **not** been
+tested here, so nothing above is a finding about the system prompt in general.
 
 **Latency is dominated by generation, not by the cross-Pacific hop.** PRD §6 flags Cohere
 as the only Singapore → US round trip. Measured: embed 365 ms, Pinecone k=20 394 ms,
@@ -559,6 +571,30 @@ because the cookie is not sent. Set `same_site="none", https_only=True` explicit
 **This repository is public.** Anything in a `VITE_*` variable is compiled into the bundle
 and readable in devtools. The frontend gets exactly one config value: the backend URL.
 
+**The product is called Groundwork.** The landing page said "NTU Harness Engineering" until
+2026-08-15, which was wrong twice over: nothing in the app is NTU-specific, and a course name
+is not a product name. NTU still appears in `PRD.md` and once in `README.md`, deliberately —
+those are **provenance and the copyright question on the workshop PDFs** (PRD §8 open item 6),
+not branding. Do not sweep them with a global find-and-replace.
+
+**`transform-style: preserve-3d` fails SILENTLY, and the landing scene depends on it.**
+The page renders perfectly, just flat, and nothing in devtools names a cause. Two ways to
+break it, both easy to reintroduce:
+
+1. The element carrying `preserve-3d` must not also carry `filter`, `backdrop-filter`,
+   `opacity < 1`, or `overflow` other than `visible`. The property silently wins.
+2. The 3D context must be **contiguous** — every element between the `perspective` and the
+   transformed children needs `preserve-3d` too. One ordinary wrapper div ends it.
+
+So in `PipelineScene.tsx` the blur glows are *siblings* of `.gw-rig`, never wrappers, and the
+depth-cue `opacity` sits on the leaf panes rather than on the rig. **Verify by measurement,
+not by eye**: with perspective live the six panes foreshorten monotonically
+(277.1 → 203.8 px at desktop, 237.1 → 174.3 px at 375 px wide). Flattened, all six report an
+identical width — which is the one-line check worth running after touching that subtree.
+
+No 3D library was added. `three.js` or Remotion would be megabytes on a static site whose
+whole config surface is one backend URL, to draw six rectangles.
+
 **The workshop PDFs are gitignored** pending a licensing decision (PRD open item 6). Large
 binaries in git are permanent — removing them later means rewriting history.
 
@@ -659,6 +695,48 @@ tightening the system prompt, when a large part of that number was judge error. 
 acting on a low faithfulness score, re-run with `RAGAS_JUDGE_MODEL=gemini-flash-latest` and
 see whether the finding survives.** Answer relevance was stable across both judges
 (0.813 vs 0.811), so this is specific to faithfulness, not a general judge-quality problem.
+
+**Gemma is also too SLOW to be a judge, and `METRIC_TIMEOUT_S = 180` is not the problem.**
+The second run reported `faithfulness: timed out after 180s` on 2 of 8 scored questions. The
+intuitive cause — long answers produce more atomic statements — is **wrong**, and the data
+kills it directly: the 1551-character answer scored fine while the 495-character one timed
+out. Replayed with every judge call instrumented, same turns, same contexts:
+
+| Answer | `gemma-4-31b-it` | `gemini-flash-latest` |
+|---|---|---|
+| 495 chars | 165.0 s → 0.50 | **10.3 s** → 0.67 |
+| 1551 chars | 196.3 s → 0.565 | **28.9 s** → 0.611 |
+| 933 chars | >240 s, 0 calls returned | quota-failed, see below |
+
+**Flash is 7–16× faster on identical payloads.** Faithfulness is only ever two LLM calls
+(`_create_statements`, then `_create_verdicts`), so this is raw per-call latency, not call
+count — and Gemma's is wildly variable: single calls measured between 39.8 s and 124.9 s,
+roughly 6 to 54 output chars/second, a 10× spread on one model. Note the middle row: on
+replay the *control* question needed 196.3 s and would have timed out too. **This never was a
+2-question problem — half the set sits at the ceiling and which rows fail is luck.**
+
+Two things this replay ruled out, both worth not re-investigating. **Zero repair calls
+fired.** Gemma fenced every single output (`fenced=True`, all six calls) and Ragas'
+`extract_json` absorbed all of it — the `LangchainLLMWrapper` decision above is doing exactly
+its job, and the parse-repair recursion in `RagasOutputParser.parse_output_string` never ran.
+
+**`METRIC_TIMEOUT_S` silently doubles as the quota-retry ceiling, and that conflation is the
+real trap.** It is documented as a *hang* ceiling. But when Flash hit
+`RESOURCE_EXHAUSTED` (429) on the third question, LangChain retried with backoff inside the
+budget and the metric died reporting `timed out after 180s` — the same string a hang produces.
+**A rate limit and a hang are indistinguishable on the card, and they need opposite fixes**
+(wait vs. raise the ceiling). Widen that error before trusting either. The 429 above may well
+have been self-inflicted — two full replays inside twenty minutes on a free tier — which is
+itself the warning: one run is 10 questions × 4 metrics × 2+ calls, and back-to-back runs
+while iterating are exactly the workload that exhausts a free-tier quota.
+
+**Each metric's mean has its OWN denominator, and the scorecard's footnote does not.**
+`summarise` appends to `collected[key]` only when a value is non-null, so the reported
+faithfulness of 0.63 was a mean over **6** values while the card said "Means rest on 8 scored
+questions" — `scored_count` counts a row if *any* metric survived. The metric most likely to
+fail is therefore the one with the smallest sample, and it is the one the weakest-metric
+pointer selects and sends you to act on. Read `scored_count` as an upper bound, not as the
+denominator of the number next to it.
 
 **Context precision and recall both scoring exactly 1.0 usually means the corpus is too
 small to measure.** The first run returned 1.0 and 0.9999999999 — not excellent retrieval,
