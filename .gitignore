@@ -61,6 +61,10 @@ traces/
 eval_results/
 *.trace.jsonl
 
+# Playwright MCP session artifacts: page snapshots, console logs, screenshots.
+# Written into the repo root by the browser tooling, none of it is source.
+.playwright-mcp/
+
 # ---- Editors / OS ----
 .vscode/
 .idea/
