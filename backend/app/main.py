@@ -15,6 +15,7 @@ from app.api.ask import router as ask_router
 from app.api.conversations import router as conversations_router
 from app.api.documents import router as documents_router
 from app.api.eval import router as eval_router
+from app.api.handouts import router as handouts_router
 from app.auth.routes import router as auth_router
 from app.config import settings
 from app.db.session import engine
@@ -76,6 +77,7 @@ app.include_router(documents_router)
 app.include_router(ask_router)
 app.include_router(conversations_router)
 app.include_router(eval_router)
+app.include_router(handouts_router)
 
 
 @app.get("/api/health")

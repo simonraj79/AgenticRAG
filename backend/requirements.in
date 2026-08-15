@@ -71,6 +71,32 @@ python-multipart
 # precision and context recall against the golden set.
 ragas
 
+# The `run_python` sandbox's toolkit -- the four libraries the generated code is
+# allowed to import, and therefore the four the sandbox subprocess must be able
+# to resolve. They are listed here rather than left to chance because the model
+# is told in its tool description that it may import them: an absent one is not
+# an ImportError the developer sees, it is a tool call that fails at runtime
+# inside a subprocess, surfacing as a handout stuck at "failed" with a traceback
+# nobody reads.
+#
+# matplotlib and python-pptx are genuinely new (~55 MB on the Render build).
+# matplotlib runs on the `Agg` backend -- no GUI toolkit, no display -- which is
+# what keeps that number to 55 MB rather than to a desktop stack.
+matplotlib
+python-pptx
+
+# pandas and numpy are ALREADY INSTALLED, as transitive dependencies of ragas.
+# They are promoted to DIRECT dependencies here anyway, and that is the whole
+# point of the two lines: the sandbox imports them BY NAME, so a future change to
+# ragas' dependency tree -- a version that drops pandas, or swaps it for polars --
+# would silently remove them from this project. Nothing at build time would
+# complain, because nothing this repo wrote imports them at module scope; the
+# failure would appear later, as generated code raising ModuleNotFoundError
+# inside a subprocess, nowhere near the ragas bump that caused it. Exactly the
+# argument that promoted `python-multipart` and `langchain-openai` above.
+pandas
+numpy
+
 # NOT optional, and NOT a stale pin to bump. `ragas/llms/base.py` imports
 # `langchain_community.chat_models.vertexai` at module scope, and
 # langchain-community 0.4.x DELETED that module -- so the newest ragas and the

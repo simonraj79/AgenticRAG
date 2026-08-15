@@ -25,6 +25,16 @@ rewrite off the text channel, which CLAUDE.md measured as the one path Gemma
 breaks by wrapping JSON in a markdown fence; and its output is a bare
 `list[Document]`, which is the very score-shaped hole `aretrieve` exists to
 close. The pattern is kept; the helper is not.
+
+**The generation step now has two shapes, and the first one is unchanged.** With
+tools off (`_tools_active` -> False) it is the chain above, invoked once, with
+`format_context` producing exactly the string it always has -- that is a hard
+requirement rather than a courtesy, because every number in EVAL.md was measured
+against it. With tools on, the single `chain.ainvoke` becomes
+`app/rag/agent_loop.run_agent_loop`: the model is handed `search_corpus` and
+`run_python` and decides for itself whether a second lookup or a chart is worth
+its latency. Retrieval still runs first in both cases and is not replaced by the
+tool; the loop is the *generation* step, not the retrieval one.
 """
 
 from __future__ import annotations
@@ -45,8 +55,15 @@ from pydantic import BaseModel, Field
 
 from app.config import settings
 from app.db.models import Agent
+from app.rag.agent_loop import ContextLedger, ToolInvocation, run_agent_loop
 from app.rag.llm import build_chat_model
-from app.rag.retriever import META_FILENAME, RERANK_SCORE_KEY, aretrieve
+from app.rag.retriever import (
+    META_CHUNK_INDEX,
+    META_FILENAME,
+    RERANK_SCORE_KEY,
+    aretrieve,
+)
+from app.tools.registry import ToolArtifact
 
 log = logging.getLogger("uvicorn.error")
 
@@ -155,6 +172,28 @@ class AnswerResult:
     contextualize_ms: int = 0
     retrieval_ms: int = 0
     generation_ms: int = 0
+
+    # ---- the agent loop's output. All default-empty, so every caller that
+    # predates it is unaffected and an agent with tools off returns exactly the
+    # object it returned before.
+    #
+    # `tool_calls` is plain data rather than trace rows because this module never
+    # touches the database -- `TraceRecorder` is constructed in `ask.run_turn`
+    # and is not reachable from here. The loop accumulates, `run_turn` writes,
+    # and every row of a turn still lands in one transaction.
+    tool_calls: list[ToolInvocation] = field(default_factory=list)
+    # Files `run_python` produced, with the source and title a Handout row needs.
+    # Bytes, held in memory for the length of the turn; `run_turn` persists them.
+    artifacts: list[ToolArtifact] = field(default_factory=list)
+    # **`generation_ms` stops meaning "the whole model call" once a loop runs.**
+    # `tool_ms` is time spent inside tools and `generation_ms` is summed model
+    # time, so `contextualize_ms + retrieval_ms + tool_ms + generation_ms` adds
+    # up to the turn instead of overlapping. One combined field would make the
+    # trace's own arithmetic wrong, which is worse than an unrecorded number.
+    tool_ms: int = 0
+    tool_steps: int = 0
+    # "max_steps" | "tool_error" | None
+    stopped_reason: str | None = None
 
     @property
     def search_query(self) -> str:
@@ -342,12 +381,55 @@ async def contextualize_question(
     return rewritten
 
 
-def format_context(documents: list[Document]) -> str:
-    """Render retrieved chunks for the prompt, tagged with their filename."""
+def format_context(
+    documents: list[Document], *, markers: Sequence[int] | None = None
+) -> str:
+    """Render retrieved chunks for the prompt, tagged with their filename.
+
+    **One renderer, two forms, and the default is byte-identical to what this
+    function has always produced.** Omitting `markers` gives the filename-tagged
+    blocks the chain has used since Stage 1, which is what keeps an agent with
+    tools off reproducible against every measurement already in EVAL.md.
+
+    `markers` is passed only by `ContextLedger.format_context`, which owns the
+    `[n]` numbering for a turn in which the model may retrieve again. Numbering
+    the blocks is what lets a marker inside a tool result be the SAME marker the
+    user later sees in the citation list -- and `agent_loop.TOOL_GUIDANCE` asks
+    the model to cite with `[n]` accordingly. `ask.normalise_citation_markers`
+    already resolves both a bare number and a filename, so neither form leaves a
+    dangling citation.
+
+    `strict=True` on the zip: a marker list of a different length from the
+    document list is a ledger bug, and silently truncating it would attribute
+    text to the wrong source while looking perfectly well-formed.
+    """
+    if markers is None:
+        return "\n\n---\n\n".join(
+            f"[{doc.metadata.get(META_FILENAME, 'unknown')}]\n{doc.page_content}"
+            for doc in documents
+        )
+
     return "\n\n---\n\n".join(
-        f"[{doc.metadata.get(META_FILENAME, 'unknown')}]\n{doc.page_content}"
-        for doc in documents
+        f"[{marker}] {doc.metadata.get(META_FILENAME, 'unknown')}"
+        f"#{doc.metadata.get(META_CHUNK_INDEX, '?')}\n{doc.page_content}"
+        for marker, doc in zip(markers, documents, strict=True)
     )
+
+
+def _tools_active(agent: Agent) -> bool:
+    """Both gates must pass, and they are gates on different things.
+
+    `settings.agent_tools_enabled` is an operator kill switch -- one environment
+    variable that returns every agent on a deployment to the classic path without
+    a code change or a migration. `agents.tools_enabled` is the per-agent choice,
+    and its migration deliberately backfills existing rows to false: an agent
+    whose eval runs are already recorded in EVAL.md keeps behaving exactly as it
+    was measured, while anything created after this ships is agentic out of the
+    box.
+
+    Either one off means the classic path, byte for byte.
+    """
+    return bool(settings.agent_tools_enabled and agent.tools_enabled)
 
 
 async def answer_question(
@@ -405,29 +487,93 @@ async def answer_question(
     # USER_TEMPLATE, which this module owns, is a template -- and values
     # substituted into it are not re-parsed, so braces in retrieved chunks or in
     # the question are already safe.
-    chain = (
-        ChatPromptTemplate.from_messages(
-            [
-                SystemMessage(content=agent.system_prompt or DEFAULT_SYSTEM_PROMPT),
-                ("human", USER_TEMPLATE),
-            ]
+    system_prompt = agent.system_prompt or DEFAULT_SYSTEM_PROMPT
+    model = get_chat_model(agent, **model_overrides)
+
+    tool_calls: list[ToolInvocation] = []
+    artifacts: list[ToolArtifact] = []
+    tool_ms = 0
+    tool_steps = 0
+    stopped_reason: str | None = None
+    documents = retrieval.documents
+
+    if _tools_active(agent):
+        # **The branch, and it is the only structural change to this function.**
+        # Retrieval above still ran unconditionally and is not replaced by the
+        # search tool: the first search is wanted in every real turn, so making
+        # the model ask for it would waste a round trip, and RETRIEVE /
+        # SCORE_CHECK keep working unchanged. The tool is for the second search
+        # onward.
+        #
+        # `agent.max_tool_steps` is used directly rather than being clamped by
+        # `settings.agent_max_tool_steps`. The setting is the DEFAULT for the
+        # column (the migration's server default), not a ceiling -- clamping
+        # would make an operator's per-agent value silently not apply, which is
+        # the failure mode where a knob looks set and does nothing.
+        #
+        # The ledger is constructed INSIDE this branch, not above it. Feature
+        # 1's sketch seeds it before the branch, which reads well and would put
+        # a dedupe pass on the classic path for a result that path never uses --
+        # and "the classic path is byte-identical when tools are off" is a hard
+        # requirement here, easiest to keep by making it structurally true.
+        ledger = ContextLedger.seed(retrieval)
+        loop = await run_agent_loop(
+            agent=agent,
+            question=search_query,
+            ledger=ledger,
+            system_prompt=system_prompt,
+            model=model,
+            max_steps=(
+                agent.max_tool_steps
+                if agent.max_tool_steps is not None
+                else settings.agent_max_tool_steps
+            ),
         )
-        | get_chat_model(agent, **model_overrides)
-        | StrOutputParser()
-    )
-    t0 = time.perf_counter()
-    text = await chain.ainvoke(
-        {
-            "context": format_context(retrieval.documents),
-            "question": search_query,
-        }
-    )
-    generation_ms = int((time.perf_counter() - t0) * 1000)
+        text = loop.text
+        tool_calls, artifacts = loop.tool_calls, loop.artifacts
+        tool_ms, tool_steps, stopped_reason = (
+            loop.tool_ms,
+            loop.steps,
+            loop.stopped_reason,
+        )
+        generation_ms = loop.generation_ms
+        # **The ledger, not the retrieval.** A search the model ran mid-turn adds
+        # entries here, and `ask.run_turn` enumerates this list from 1 to build
+        # `AskOut.citations` -- so a chunk the tool found is only citable if it
+        # is in the list the pipeline returns. Marker order is list order, which
+        # is the invariant the whole ledger exists to hold.
+        documents = ledger.documents
+    else:
+        chain = (
+            ChatPromptTemplate.from_messages(
+                [
+                    SystemMessage(content=system_prompt),
+                    ("human", USER_TEMPLATE),
+                ]
+            )
+            | model
+            | StrOutputParser()
+        )
+        t0 = time.perf_counter()
+        text = await chain.ainvoke(
+            {
+                "context": format_context(retrieval.documents),
+                "question": search_query,
+            }
+        )
+        generation_ms = int((time.perf_counter() - t0) * 1000)
 
     return AnswerResult(
         question=question,
         answer=text,
-        documents=retrieval.documents,
+        documents=documents,
+        # The FIRST retrieval's candidates, deliberately, even when tools ran.
+        # `ask.run_turn` builds the RETRIEVE event out of this list, and that
+        # event describes the unconditional retrieval that happened before the
+        # loop -- its `top_score` is what SCORE_CHECK compares and what Stage 3
+        # will calibrate. Appending the model's own searches here would make one
+        # trace event describe several retrievals at once, and `top_score` would
+        # silently become "the best score of any search this turn".
         scored=retrieval.scored,
         rewritten_question=rewritten,
         model=(agent.generation_model or settings.generation_model),
@@ -436,4 +582,9 @@ async def answer_question(
         contextualize_ms=contextualize_ms,
         retrieval_ms=retrieval_ms,
         generation_ms=generation_ms,
+        tool_calls=tool_calls,
+        artifacts=artifacts,
+        tool_ms=tool_ms,
+        tool_steps=tool_steps,
+        stopped_reason=stopped_reason,
     )

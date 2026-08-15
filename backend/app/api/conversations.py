@@ -45,7 +45,7 @@ from datetime import datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, ConfigDict, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -59,17 +59,19 @@ from app.api.ask import (
     run_turn,
 )
 from app.api.deps import CurrentUser, DbSession, OwnedAgent
+from app.api.handouts import HandoutOut
 from app.db.models import (
     Agent,
     Chunk,
     Conversation,
     Document,
+    Handout,
     Query,
     QueryChunk,
     TraceEvent,
     User,
 )
-from app.rag.trace import REWRITE
+from app.rag.trace import GENERATE, REWRITE
 
 router = APIRouter(prefix="/api", tags=["conversations"])
 
@@ -196,6 +198,16 @@ class MessageOut(BaseModel):
     `rewritten_question` is read back out of the REWRITE trace event, not off a
     column -- there is no `queries.rewritten_question`. Null means
     contextualisation did not run at all.
+
+    `tool_steps` is read back the same way, out of the GENERATE payload, and for
+    the same reason: it is a fact about how the turn ran rather than a property
+    of the query, and `trace_events` is where those live. A replayed message must
+    carry it because the chat view renders "searched twice, made 1 handout" from
+    it -- an indicator that vanished on reload would be worse than one that never
+    existed, since it would read as the tools having done nothing.
+
+    `handouts` is a real join, not a trace read, because the files outlive the
+    trace and are the one thing here a user might come back for.
     """
 
     query_id: uuid.UUID
@@ -207,6 +219,8 @@ class MessageOut(BaseModel):
     rewritten_question: str | None = None
     created_at: datetime
     citations: list[CitationOut]
+    tool_steps: int = 0
+    handouts: list[HandoutOut] = Field(default_factory=list)
 
 
 class ConversationDetail(ConversationOut):
@@ -249,13 +263,18 @@ class ConversationPatch(BaseModel):
 # --------------------------------------------------------------------------
 
 async def _load_messages(db: AsyncSession, conversation_id: uuid.UUID) -> list[MessageOut]:
-    """Every turn in one thread, oldest first, with its citations.
+    """Every turn in one thread, oldest first, with its citations and handouts.
 
-    Three statements, not one per message. The obvious shape -- load the queries,
-    then walk them asking for citations -- is an N+1 that grows with the length of
-    the conversation, and on an async session each of those follow-ups is a
-    separate awaited round trip rather than the cheap attribute access it looks
-    like in the source.
+    Four statements, not one per message: the queries, their citations, the two
+    trace reads together, and the handouts. The obvious shape -- load the
+    queries, then walk them asking for citations -- is an N+1 that grows with the
+    length of the conversation, and on an async session each of those follow-ups
+    is a separate awaited round trip rather than the cheap attribute access it
+    looks like in the source.
+
+    The count is bounded by the number of THINGS a message has, never by the
+    number of messages, which is the property worth preserving. Adding a fifth
+    source means adding a fifth `WHERE ... IN (query_ids)`, not a loop.
 
     **`marker` comes back as `query_chunks.rank`.** There is no marker column,
     and there does not need to be: `run_turn` writes the rank as the position the
@@ -329,10 +348,19 @@ async def _load_messages(db: AsyncSession, conversation_id: uuid.UUID) -> list[M
             )
         )
 
+    # One statement for both trace reads, not two. REWRITE gives the rewritten
+    # question and GENERATE gives the tool-step count; they are the same table,
+    # the same key set and the same index, so splitting them would buy nothing
+    # but a second round trip on a read path that already justifies its statement
+    # count in the docstring above.
     rewrites: dict[uuid.UUID, str] = {}
+    tool_steps: dict[uuid.UUID, int] = {}
     events = await db.execute(
-        select(TraceEvent.query_id, TraceEvent.payload)
-        .where(TraceEvent.query_id.in_(query_ids), TraceEvent.event_type == REWRITE)
+        select(TraceEvent.query_id, TraceEvent.event_type, TraceEvent.payload)
+        .where(
+            TraceEvent.query_id.in_(query_ids),
+            TraceEvent.event_type.in_((REWRITE, GENERATE)),
+        )
         # First REWRITE per query wins. One turn produces one today; Stage 2's
         # score-triggered loop will add more, and the contract's
         # `rewritten_question` is the string that was searched, so the earliest
@@ -341,9 +369,41 @@ async def _load_messages(db: AsyncSession, conversation_id: uuid.UUID) -> list[M
         .order_by(TraceEvent.query_id, TraceEvent.step_index)
     )
     for row in events:
-        after = (row.payload or {}).get("after")
-        if isinstance(after, str) and after:
-            rewrites.setdefault(row.query_id, after)
+        payload = row.payload or {}
+        if row.event_type == REWRITE:
+            after = payload.get("after")
+            if isinstance(after, str) and after:
+                rewrites.setdefault(row.query_id, after)
+        else:
+            # `tool_steps` is absent from every GENERATE payload written before
+            # the loop existed, so `.get` with a default is the migration: old
+            # turns replay as zero, which is exactly what they were.
+            steps = payload.get("tool_steps")
+            if isinstance(steps, int):
+                tool_steps.setdefault(row.query_id, steps)
+
+    # A fourth statement, and it earns itself the same way the other three do:
+    # the alternative is a lazy load per message, which on an async session
+    # raises MissingGreenlet rather than merely being slow.
+    #
+    # `Handout.content` is `deferred()`, so selecting the ORM object here does
+    # NOT drag the bytea along -- which is the whole reason that column is
+    # deferred. Ordered by creation so a turn that produced several files
+    # replays them in the order they were made.
+    handouts: dict[uuid.UUID, list[HandoutOut]] = {}
+    handout_rows = (
+        await db.scalars(
+            select(Handout)
+            .where(Handout.query_id.in_(query_ids))
+            .order_by(Handout.query_id, Handout.created_at.asc())
+        )
+    ).all()
+    for handout in handout_rows:
+        if handout.query_id is None:
+            continue
+        handouts.setdefault(handout.query_id, []).append(
+            HandoutOut.model_validate(handout)
+        )
 
     return [
         MessageOut(
@@ -356,6 +416,8 @@ async def _load_messages(db: AsyncSession, conversation_id: uuid.UUID) -> list[M
             rewritten_question=rewrites.get(row.id),
             created_at=row.created_at,
             citations=citations.get(row.id, []),
+            tool_steps=tool_steps.get(row.id, 0),
+            handouts=handouts.get(row.id, []),
         )
         for row in rows
     ]

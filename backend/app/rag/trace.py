@@ -49,7 +49,38 @@ RERANK = "RERANK"
 GENERATE = "GENERATE"
 REFUSE = "REFUSE"
 
-EVENT_TYPES = frozenset({RETRIEVE, SCORE_CHECK, REWRITE, RERANK, GENERATE, REFUSE})
+# Three more for the agent loop. The six above describe a fixed pipeline, where
+# the only question a trace answers is "what did each stage do?". Once the model
+# chooses its own actions there is a prior question -- "why did it do that at
+# all?" -- and TOOL_CALL is the row that answers it: the arguments the model
+# picked are the decision, and the result is merely the consequence.
+#
+# TOOL_ERROR is separate from TOOL_RESULT rather than a flag on it, because a
+# failed tool call is not a failed turn. The loop hands the error back to the
+# model, which usually fixes its own code and succeeds on the next step, and a
+# trace that renders those two identically hides the single most interesting
+# thing an agentic system does.
+#
+# No migration: `event_type` is String(32) with no CHECK constraint and `payload`
+# is JSONB. The only gate is this frozenset -- `record()` raises on anything
+# outside it, which is why extending it has to happen before the first write.
+TOOL_CALL = "TOOL_CALL"
+TOOL_RESULT = "TOOL_RESULT"
+TOOL_ERROR = "TOOL_ERROR"
+
+EVENT_TYPES = frozenset(
+    {
+        RETRIEVE,
+        SCORE_CHECK,
+        REWRITE,
+        RERANK,
+        GENERATE,
+        REFUSE,
+        TOOL_CALL,
+        TOOL_RESULT,
+        TOOL_ERROR,
+    }
+)
 
 
 def _jsonable(value: Any) -> Any:

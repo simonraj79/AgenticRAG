@@ -268,6 +268,60 @@ class Settings(BaseSettings):
     # being greedy is a scorecard full of nulls that looks like a broken judge.
     ragas_max_concurrency: int = 2
 
+    # --- Agentic tools (Stage 4) ---
+    #
+    # Two gates, not one. This setting is an OPERATOR kill switch that turns the
+    # loop off everywhere without touching data; `agents.tools_enabled` is the
+    # per-agent choice. Both must be true. That split matters because the column
+    # is backfilled to false for every agent that existed before tools shipped,
+    # so an agent whose scorecard is already recorded in EVAL.md keeps behaving
+    # exactly as it was measured -- and a single global flag could not express
+    # "on for new agents, off for measured ones".
+    agent_tools_enabled: bool = True
+
+    # Tool round trips per turn before the loop is closed and an answer is
+    # forced. Three, not eight, and the number comes from the latency budget
+    # rather than from taste: a search costs roughly 1.6 s with reranking on
+    # (embed 365 ms + Pinecone 394 ms + Cohere ~830 ms, measured), against a
+    # persona turn of about 6.3 s since the move to OpenRouter. Three steps is
+    # enough room for a genuinely multi-part question and not enough to explore.
+    # The loop always returns an answer when it runs out; `stopped_reason`
+    # records that it did.
+    agent_max_tool_steps: int = 3
+
+    # --- Code interpreter sandbox ---
+    #
+    # See new features/02-code-interpreter.md section 5 for what these do and do
+    # NOT protect against. The short version: this is a hardened subprocess, not
+    # a container, and the strongest control is not a limit here at all -- it is
+    # that the child is spawned with an environment stripped of every secret.
+    sandbox_timeout_s: float = 30.0
+
+    # stdout + stderr returned to the MODEL, each capped separately. A runaway
+    # print loop is a real failure mode, and an untruncated one is worse than the
+    # bug: it lands in the next request's context and can cost more than the turn.
+    sandbox_max_output_chars: int = 8_000
+
+    # Per-file and per-run artifact ceilings. Exceeding either fails the whole
+    # run and returns ZERO artifacts rather than a partial set -- half a deck
+    # would be reported to the model as a success.
+    sandbox_max_artifact_bytes: int = 5_242_880  # 5 MB
+    sandbox_max_total_bytes: int = 15_728_640  # 15 MB
+
+    # RLIMIT_AS for the child, POSIX only. Render is Linux so production gets it;
+    # Windows development does not, and the sandbox logs that rather than
+    # pretending otherwise. 768 MB is matplotlib plus a figure with headroom.
+    sandbox_memory_mb: int = 768
+
+    # --- Handouts ---
+    #
+    # Bytes live in Postgres (no object storage is provisioned -- PRD open item
+    # 10), so this quota is a storage bound, not a policy. Reaching it REFUSES
+    # the new handout; nothing is ever evicted. A panel that silently deletes the
+    # deck you downloaded last week to make room for a chart is worse than one
+    # that says no.
+    handout_max_per_agent: int = 200
+
     @property
     def async_database_url(self) -> str:
         """SQLAlchemy async URL.

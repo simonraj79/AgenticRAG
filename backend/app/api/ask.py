@@ -71,13 +71,16 @@ from app.db.models import (
     Chunk,
     Conversation,
     Document,
+    Handout,
     Query,
     QueryChunk,
     Session,
     TraceEvent,
     User,
 )
+from app.api.handouts import HandoutOut
 from app.rag.pipeline import HISTORY_TURNS, ChatTurn, answer_question
+from app.rag.refusal import detect_refusal
 from app.rag.retriever import META_CHUNK_ID, RERANK_SCORE_KEY
 from app.rag.trace import (
     GENERATE,
@@ -86,6 +89,9 @@ from app.rag.trace import (
     RETRIEVE,
     REWRITE,
     SCORE_CHECK,
+    TOOL_CALL,
+    TOOL_ERROR,
+    TOOL_RESULT,
     TraceRecorder,
 )
 
@@ -107,125 +113,13 @@ PREVIEW_CHARS = 240
 # words in front of it.
 TITLE_MAX_CHARS = 80
 
-# How much of an answer may go by before a refusal phrase stops counting as a
-# refusal.
-#
-# A model that declines says so before it says anything else. A model that
-# answers and *then* notes a gap -- "...the lesson covers X, Y and Z. The context
-# does not say when the method was first published." -- is qualifying an answer,
-# not refusing, and counting that turn as a refusal corrupts the one metric
-# Stage 3 uses to check that grounding works.
-#
-# Position alone does not separate the two, because a real answer's first
-# sentence can run past any fixed character window. What separates them is how
-# much substance precedes the phrase: scanning stops once the model has produced
-# ~200 characters of actual content, so a marker in the opening (however
-# long-winded the refusal that follows) counts and a marker after two sentences
-# of real answer does not. The budget is charged per sentence and only after that
-# sentence has been checked, so a leading apology barely dents it and a single
-# long opening sentence is still examined in full.
-REFUSAL_LEAD_CHARS = 200
+# Refusal markers and the two detection functions now live in
+# `app/rag/refusal.py`. They moved when the agent loop needed the same
+# phrases: `agent_loop` cannot import from `app.api`, and a second copy of a
+# list that has already been wrong three times is the one outcome worth
+# ruling out structurally. That module's docstring explains why there are two
+# functions and why only one of them may write `queries.refused`.
 
-# How much preamble may precede a CAVEAT_MARKERS phrase and still count. Room
-# for an apology or a hedge ("I'm sorry.", "Let me check the context.") and
-# nothing more.
-REFUSAL_PREAMBLE_CHARS = 40
-
-# Substring markers, lowercased and whitespace-normalised before matching, in
-# two tiers -- because the phrases split cleanly into two kinds and treating
-# them alike is what produces false positives.
-#
-# REFUSAL_MARKERS are phrasings a model reaches for only when declining. They
-# count anywhere in the lead.
-#
-# CAVEAT_MARKERS are ordinary qualifications. "The material does not include a
-# glossary" is a perfectly good sentence inside a real answer, and a flat
-# substring test over the opening would score that turn as a refusal. They count
-# only when said before the model has answered anything -- a refusal leads with
-# the reason it is refusing; an answer earns its caveats first.
-#
-# This is still a heuristic over natural language and it is still fallible in
-# both directions. It is spelled out rather than inferred because
-# `queries.refused` is a Stage 3 success metric (PRD section 4.4: a correct
-# refusal is a correct outcome), and `golden_questions.expected_behaviour =
-# 'refuse'` is what will actually calibrate these lists -- ten questions whose
-# right answer is "I don't know" will show which phrasings Gemma really reaches
-# for and which entries here never fire once.
-REFUSAL_MARKERS = (
-    "does not contain",
-    "doesn't contain",
-    "do not contain",
-    "don't contain",
-    "no information",
-    "not enough information",
-    "insufficient information",
-    "no relevant information",
-    "cannot answer",
-    "can't answer",
-    "cannot be answered",
-    "unable to answer",
-    "i do not know",
-    "i don't know",
-    "not found in the",
-    "not covered in the",
-    "outside the scope",
-)
-
-# "does not say" / "doesn't say" were added after the first two eval runs, which
-# both reported `refusal_pass = 0 / 2`. Half of that was the detector, not the
-# agent: Gemma answered "Which of the fourteen launches took place in 2040?" with
-#
-#     "The provided text does not say which of the fourteen launches took
-#      place in 2040 [1]."
-#
-# -- a textbook refusal, scored as a failure, because the phrase it reached for
-# was in neither tier. The scorecard blamed the agent for the measurement's gap,
-# which is the same failure class as `strictness=3` and worse than a crash for
-# the same reason: it still renders, and it still points confidently at the wrong
-# thing.
-#
-# **The CAVEAT tier, not the refusal tier, and the distinction is the whole
-# point.** REFUSAL_MARKERS match anywhere in the lead, so putting it there would
-# score "The lesson covers X and Y. The text does not say when it was published."
-# as a refusal of a question it had just answered. "does not say" is an ordinary
-# qualification -- structurally identical to "does not mention" and "does not
-# specify" already here -- and only means refusal when nothing has been answered
-# yet. The failing row's phrase starts at character 0, so it matches; the
-# answer-then-caveat row that CLAUDE.md flags as a REAL persona finding lands at
-# consumed=198, stays outside the 40-character preamble window, and is still
-# correctly counted as an answer. Fixing the detector must not delete that
-# finding.
-CAVEAT_MARKERS = (
-    "context does not",
-    "does not mention",
-    "doesn't mention",
-    "does not provide",
-    "doesn't provide",
-    "does not include",
-    "does not specify",
-    "does not say",
-    "doesn't say",
-    # "does not cover" is here for the same reason, and it settles a question
-    # CLAUDE.md left open. That note warned that adding this phrase would score
-    # the Feynman answer-then-caveat turn as a refusal and "quietly delete the
-    # finding" -- true of the HARD tier, and not true here. Replayed against the
-    # actual stored answers, the two turns separate cleanly by position:
-    #
-    #   run 1  "The provided text does not cover the specific duties..."
-    #          consumed=0    -> inside the window  -> refusal, correctly
-    #   run 2  "...states that there are eleven permanent crew members [1]. It
-    #           also mentions ... but it does not cover their specific duties."
-    #          consumed=198  -> outside the window -> answer, correctly
-    #
-    # The tier split was built for exactly this and needed no adjudication. Worth
-    # noting the record it corrects: CLAUDE.md described the second refusal row
-    # as answer-then-caveat in BOTH runs, but only run 2 was -- run 1's was a
-    # clean leading refusal. Three of the four refusal rows were detector
-    # failures, not two.
-    "does not cover",
-    "doesn't cover",
-    "does not appear in",
-)
 
 # Anything in square brackets on one line, captured so the contents can be
 # judged. Newlines are excluded so an unbalanced `[` cannot swallow a paragraph
@@ -291,6 +185,15 @@ class AskOut(BaseModel):
     are different facts (`pipeline.contextualize_question` explains why), and a
     client showing "searched for: ..." must be able to tell "the model read this
     and left it alone" from "the model was never asked".
+
+    `tool_steps` and `handouts` both default to empty, so an agent with tools off
+    serialises exactly as it did before the loop existed. That is not tidiness:
+    it is what lets an agent whose scorecard is already recorded in EVAL.md stay
+    reproducible, and it is asserted by scenario S1 of `scripts/agentic_check.py`.
+
+    `handouts` carries the files THIS turn produced, so the panel can show them
+    without waiting for its poll. It is not the agent's full list -- that is
+    `GET /api/agents/{id}/handouts`.
     """
 
     query_id: uuid.UUID
@@ -301,6 +204,8 @@ class AskOut(BaseModel):
     model_used: str
     rewritten_question: str | None = None
     citations: list[CitationOut]
+    tool_steps: int = 0
+    handouts: list[HandoutOut] = Field(default_factory=list)
 
 
 class QueryOut(BaseModel):
@@ -397,53 +302,29 @@ def _chunk_uuid(doc: LCDocument) -> uuid.UUID | None:
         return None
 
 
-def _sentences(text: str) -> list[str]:
-    """Split into sentences, for the refusal scan only.
+def _handout_kind(mime_type: str) -> str:
+    """Map a produced file's MIME type onto the panel's four kinds.
 
-    Splits on a terminator followed by whitespace, and on blank lines. It does
-    NOT split on a lone newline, which is the case that matters: generated text
-    soft-wraps mid-sentence, so treating every newline as a boundary would cut
-    "does not\\ncontain" into two fragments and the marker would match neither.
+    `handouts.kind` drives how a row renders -- a chart gets a thumbnail, a sheet
+    gets its markdown inline -- so it is a presentation choice, not a second copy
+    of the MIME type. Keeping it as a small explicit mapping rather than a suffix
+    split means a `.svg` chart and a `.png` chart land in the same bucket, which
+    is what a reader of the panel expects.
+
+    The fallback is `"file"` rather than a guess. A kind the panel does not
+    recognise renders as a plain downloadable row, which is a worse experience
+    than a thumbnail and a much better one than a mislabelled thumbnail that
+    fails to load.
     """
-    return [s for s in re.split(r"(?<=[.!?])\s+|\n{2,}", text) if s.strip()]
-
-
-def _detect_refusal(answer: str) -> str | None:
-    """The matched refusal phrase, or None. See REFUSAL_MARKERS.
-
-    **Refusal is detected from the answer, never from the score.** CLAUDE.md
-    records the measurement that settles this: on `3.1-lesson-gist.md`,
-    on-topic questions scored 0.61-0.67 and off-topic ones 0.49-0.58 -- an
-    overlapping band, not a separation -- and the plainly off-topic "What is the
-    refund policy for this course?" scored **0.5765**, comfortably *above* the
-    0.5 threshold. It was refused anyway, correctly, because the system prompt
-    forbids answering outside the context. The threshold governs *rewriting*;
-    the prompt governs *refusing*. Wiring `refused` to the threshold would have
-    marked that turn as answered.
-
-    Sentence by sentence until the content budget runs out -- see
-    REFUSAL_LEAD_CHARS for why a fixed character window is not enough, and
-    CAVEAT_MARKERS for why the markers are in two tiers. Whitespace is normalised
-    inside each sentence because generated text wraps, and "does not  contain" is
-    the same refusal as "does not contain".
-    """
-    consumed = 0
-    for sentence in _sentences(answer):
-        lowered = " ".join(sentence.lower().split())
-        for marker in REFUSAL_MARKERS:
-            if marker in lowered:
-                return marker
-        if consumed <= REFUSAL_PREAMBLE_CHARS:
-            for marker in CAVEAT_MARKERS:
-                if marker in lowered:
-                    return marker
-        # Charged after the checks, so the sentence that blows the budget is
-        # still examined. A single long opening sentence that refuses is a
-        # refusal.
-        consumed += len(lowered)
-        if consumed >= REFUSAL_LEAD_CHARS:
-            return None
-    return None
+    if mime_type in ("image/png", "image/svg+xml"):
+        return "chart"
+    if mime_type.endswith("presentationml.presentation"):
+        return "deck"
+    if mime_type in ("text/csv", "application/json"):
+        return "table"
+    if mime_type in ("text/markdown", "text/plain"):
+        return "sheet"
+    return "file"
 
 
 def normalise_citation_markers(answer: str, citations: Sequence[CitationOut]) -> str:
@@ -769,6 +650,22 @@ async def run_turn(
     # and that measurement needs the comparison logged on every turn including
     # the ones where nothing happened as a result.
     below_threshold = top_score is not None and top_score < agent.score_threshold
+
+    # What this number DOES depends on whether the agent has tools, and saying so
+    # is not decoration. A trace string asserting a feature does not exist, after
+    # it does, is a documentation bug sitting in the most-read part of the
+    # product -- and this particular string said "not built yet" for long enough
+    # that it would be believed.
+    #
+    # Neither branch makes the threshold a branch in the code. With tools off,
+    # nothing consumes it. With tools on, the model is shown the retrieved text
+    # and decides for itself whether to search again, which is a strictly better
+    # judge than this number: on-topic questions measured 0.61-0.67 here and
+    # off-topic ones 0.49-0.58, so 0.5 sits INSIDE the overlap rather than
+    # between the two populations.
+    tools_on = result.tool_steps > 0 or (
+        settings.agent_tools_enabled and bool(agent.tools_enabled)
+    )
     trace.record(
         SCORE_CHECK,
         payload={
@@ -777,9 +674,11 @@ async def run_turn(
             "below_threshold": below_threshold,
             "max_rewrites": agent.max_rewrites,
             "governs": "rewrite",
-            # The contextualisation rewrite above is triggered by history, not by
-            # this number. Stage 2's score-triggered loop is still unbuilt.
-            "action": "none -- no score-triggered rewrite loop yet",
+            "action": (
+                "advisory -- the agent loop decides whether to search again"
+                if tools_on
+                else "none -- tools are off for this agent"
+            ),
         },
         score=top_score,
     )
@@ -815,6 +714,65 @@ async def run_turn(
             # Singapore to US, if a rough number is wanted.
             duration_ms=None,
         )
+
+    # ------------------------------------------------------------------
+    # 5b. The tool loop, if one ran
+    # ------------------------------------------------------------------
+    # `pipeline.py` does not know this session exists and `TraceRecorder` is not
+    # reachable from it, so the loop accumulates its activity as plain data on
+    # `AnswerResult` and it becomes rows here. That is the same split the rest of
+    # this function relies on -- the pipeline decides, the route records -- and
+    # keeping it means a tool can be added without either module learning about
+    # the other's concerns.
+    #
+    # Position matters. These sit after RETRIEVE and before GENERATE because that
+    # is the order they happened in: the first retrieval seeded the context, the
+    # tools amended it, and generation read the result. `step_index` is a plain
+    # counter on the recorder, so inserting here needs no renumbering.
+    #
+    # TOOL_CALL is recorded for a FAILED call too, and separately from its error.
+    # The arguments the model chose are the decision worth keeping whether or not
+    # the call worked -- a program that raised is exactly the one someone reading
+    # the trace wants to see.
+    for invocation in result.tool_calls:
+        trace.record(
+            TOOL_CALL,
+            payload={
+                "step": invocation.step,
+                "tool": invocation.tool,
+                "call_id": invocation.call_id,
+                # `_jsonable` stringifies anything it cannot serialise and never
+                # raises, so a 4 KB Python program in `args["code"]` survives
+                # intact -- which is what the Trace view renders on its own.
+                "args": invocation.args,
+            },
+        )
+        if invocation.ok:
+            trace.record(
+                TOOL_RESULT,
+                payload={
+                    "step": invocation.step,
+                    "tool": invocation.tool,
+                    "call_id": invocation.call_id,
+                    "ok": True,
+                    "summary": invocation.summary,
+                    **invocation.detail,
+                },
+                duration_ms=invocation.duration_ms,
+            )
+        else:
+            trace.record(
+                TOOL_ERROR,
+                payload={
+                    "step": invocation.step,
+                    "tool": invocation.tool,
+                    "call_id": invocation.call_id,
+                    "ok": False,
+                    "error": invocation.error,
+                    **invocation.detail,
+                },
+                duration_ms=invocation.duration_ms,
+            )
 
     # ------------------------------------------------------------------
     # 6. query_chunks -- citations now, Ragas `contexts` in Stage 3
@@ -886,6 +844,51 @@ async def run_turn(
     answer = normalise_citation_markers(result.answer, citations)
 
     # ------------------------------------------------------------------
+    # 6b. Handouts produced by the tool loop
+    # ------------------------------------------------------------------
+    # Written into THIS transaction, alongside the query and the trace. If the
+    # turn rolls back so do its handouts, which is the only correct outcome: an
+    # artefact attributed to an answer that was never stored is orphaned, and it
+    # would be orphaned holding megabytes.
+    #
+    # Bytes go in Postgres rather than object storage. No bucket is provisioned
+    # (PRD open item 10) and `handouts.content` is `deferred()`, so a list query
+    # never pulls them. The sandbox has already refused anything over 5 MB per
+    # file, so the ceiling is enforced before a row is ever built.
+    handout_rows: list[Handout] = []
+    for produced in result.artifacts:
+        artifact = produced.artifact
+        handout_rows.append(
+            Handout(
+                id=uuid.uuid4(),
+                agent_id=agent.id,
+                conversation_id=conversation.id,
+                query_id=query.id,
+                created_by_user_id=user.id,
+                kind=_handout_kind(artifact.mime_type),
+                # The model's own statement of what it was making. Asking for it
+                # is why `run_python` takes a `purpose` argument at all -- a tool
+                # that has to say what it is for writes better code, and the
+                # answer doubles as the title a human reads in the panel.
+                title=produced.title[:200] or "Generated file",
+                filename=artifact.filename[:255],
+                mime_type=artifact.mime_type[:128],
+                byte_size=artifact.byte_size,
+                content=artifact.content,
+                # Stored and shown. For a product whose whole purpose is making a
+                # pipeline inspectable, hiding the step that produced the output
+                # would be the one place it stopped doing that -- and it is the
+                # fastest way for a user to see why a chart is wrong.
+                source_code=produced.source_code,
+                origin="tool",
+                status="ready",
+                meta={"tool": "run_python", "step": produced.step},
+            )
+        )
+    for row in handout_rows:
+        db.add(row)
+
+    # ------------------------------------------------------------------
     # 7. GENERATE
     # ------------------------------------------------------------------
     trace.record(
@@ -897,6 +900,14 @@ async def run_turn(
             "answer_chars": len(answer),
             "citations": len(citations),
             "pipeline_latency_ms": result.latency_ms,
+            # How much of the turn the model drove itself. `stopped_reason` is
+            # null on a normal exit and "max_steps" when the budget ran out --
+            # the second is the one worth seeing, because it means the answer was
+            # forced rather than finished.
+            "tool_steps": result.tool_steps,
+            "stopped_reason": result.stopped_reason,
+            "tool_ms": result.tool_ms,
+            "handouts": len(handout_rows),
         },
         # Generation alone, now that the pipeline times its own phases. The
         # RETRIEVE and REWRITE events above carry the rest, so the three add up
@@ -910,7 +921,7 @@ async def run_turn(
     # Scanned on the normalised text, because that is what is stored and what a
     # reader will later compare against `refused`. Marker rewriting only touches
     # brackets, so it cannot create or destroy a refusal phrase.
-    marker = _detect_refusal(answer)
+    marker = detect_refusal(answer)
     refused = marker is not None
     if refused:
         trace.record(
@@ -966,9 +977,18 @@ async def run_turn(
         conversation.title = derive_conversation_title(question)
     conversation.updated_at = func.now()
 
-    # The single commit. Query, chunks, trace and conversation land together or
-    # not at all.
+    # The single commit. Query, chunks, trace, handouts and conversation land
+    # together or not at all.
     await db.commit()
+
+    # `handouts.created_at` is a server_default, and `expire_on_commit=False`
+    # does not conjure a value that was never sent -- reading it during Pydantic
+    # serialisation raises MissingGreenlet from inside the validator, which is a
+    # traceback that names neither this line nor the column. Refresh only the
+    # rows about to be serialised, and only when there are any; the common turn
+    # produces none and pays nothing.
+    for row in handout_rows:
+        await db.refresh(row)
 
     return AskOut(
         query_id=query.id,
@@ -979,6 +999,12 @@ async def run_turn(
         model_used=result.model,
         rewritten_question=result.rewritten_question,
         citations=citations,
+        tool_steps=result.tool_steps,
+        # Built from the pending objects rather than re-read after the commit.
+        # `expire_on_commit=False` keeps them readable, and every field
+        # `HandoutOut` wants was set in Python -- `created_at` is the one
+        # server_default here, so it is the one that needs the refresh below.
+        handouts=[HandoutOut.model_validate(row) for row in handout_rows],
     )
 
 

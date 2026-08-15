@@ -13,14 +13,16 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    LargeBinary,
     String,
     Text,
     UniqueConstraint,
     desc,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy.orm import DeclarativeBase, Mapped, deferred, mapped_column, relationship
 
 
 class Base(DeclarativeBase):
@@ -177,6 +179,35 @@ class Agent(Base):
     max_rewrites: Mapped[int] = mapped_column(Integer, default=2, nullable=False)
     system_prompt: Mapped[str | None] = mapped_column(Text)
     generation_model: Mapped[str | None] = mapped_column(String(128))
+
+    # Whether generation runs as a bounded tool loop rather than as one model
+    # call. A per-agent column and not only a setting, because turning the loop
+    # on changes what an agent IS: it can search its own corpus a second time and
+    # it can write and run Python, so the same question can produce a different
+    # answer, a different trace and a different latency. An eval run is recorded
+    # against an agent, so that switch has to be part of the agent's stored
+    # configuration for the same PRD 4.2 reason every tuning parameter is - a
+    # scorecard whose agent could have silently become agentic underneath it is a
+    # scorecard that no longer describes anything.
+    #
+    # `server_default` true so a NEW agent is agentic without the API having to
+    # say so. The migration that adds this column then backfills every EXISTING
+    # row to false, and that asymmetry is deliberate rather than an oversight:
+    # agents whose runs are already written up in EVAL.md keep behaving exactly
+    # as they were measured. `settings.agent_tools_enabled` is a separate global
+    # kill switch above this, not a duplicate of it.
+    tools_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=text("true"), nullable=False
+    )
+    # How many tool round-trips one turn may make before the loop is closed and
+    # an answer is forced. The workshop names cost blowout as one of four agentic
+    # failure modes, and an unbounded tool loop is the textbook way to reach it -
+    # every step is a fresh model call carrying the whole accumulated transcript,
+    # so cost per step grows while the value of another step falls. Same argument
+    # as `max_rewrites`, one loop further out.
+    max_tool_steps: Mapped[int] = mapped_column(
+        Integer, default=3, server_default=text("3"), nullable=False
+    )
 
     # Reserved for later sharing models; only "private" is honoured today.
     visibility: Mapped[str] = mapped_column(String(16), default="private", nullable=False)
@@ -626,3 +657,142 @@ class AuditLog(Base):
     resource_type: Mapped[str | None] = mapped_column(String(64))
     resource_id: Mapped[str | None] = mapped_column(String(128))
     audit_metadata: Mapped[dict | None] = mapped_column("metadata", JSONB)
+
+
+# --------------------------------------------------------------------------
+# 4.6 Handouts
+# --------------------------------------------------------------------------
+
+class Handout(Base):
+    """A generated asset - a chart, a slide deck, a table or a study sheet.
+
+    PRD section 11 does not describe this table for the same reason it does not
+    describe `conversations`: the feature was specified after that section was
+    written. It is the durable half of the tool loop. A `run_python` call
+    produces bytes inside a temporary directory that is deleted moments later,
+    so without a row here the one thing the agent can now make that it could not
+    make before would exist only for the length of an HTTP response.
+
+    A handout arrives one of two ways and `origin` is the only thing that
+    distinguishes them: "tool", where the agent wrote Python mid-conversation
+    and a file fell out of it, and "recipe", where the user pressed a button and
+    described what they wanted. They are one table rather than two because
+    everything downstream - listing, downloading, deleting, the quota - treats
+    them identically, and a user thinking about a chart they were given does not
+    think about which of the two ways they asked for it.
+
+    **The bytes live in Postgres.** Object storage is the right long-term answer
+    (PRD open item 10) and is deliberately not built here; instead the column is
+    capped per file and per agent, and `content` is deferred so the cost of
+    keeping it in the row is paid only by the one request that actually wants
+    the file.
+    """
+
+    __tablename__ = "handouts"
+
+    id: Mapped[uuid.UUID] = _pk()
+    created_at: Mapped[datetime] = _created_at()
+
+    # Scoping key, and the reason every handout route can be nested under
+    # `/api/agents/{agent_id}/...` and authorised by `OwnedAgent` alone. A
+    # handout is made out of one agent's corpus, so it belongs to that agent the
+    # way a document does; `created_by_user_id` below is audit, not access
+    # control.
+    agent_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("agents.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    # NULL for a handout made from the panel with no thread open. CASCADE rather
+    # than SET NULL, and the asymmetry with `query_id` below is the decision
+    # worth reading: deleting a thread is an explicit user action on something
+    # they can see, and a handout still pointing at a conversation that no longer
+    # exists would be filed under a heading the UI cannot render.
+    #
+    # No `index=True` here - the index this column needs is declared in
+    # `__table_args__` instead, because it has to be dropped by name in the
+    # migration's downgrade. Setting both would build two identical indexes.
+    conversation_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("conversations.id", ondelete="CASCADE")
+    )
+    # SET NULL, NOT CASCADE, and this is the one FK on the table that would be
+    # actively wrong the other way. A handout OUTLIVES the turn that produced it:
+    # the user downloaded a slide deck a week ago and still has it listed, and
+    # the query row is only ever provenance - "this came out of that answer".
+    # Under CASCADE, anything that removes a query would silently destroy files
+    # the user never asked to lose, which is the same class of quiet data loss
+    # as the `query_chunks` cascade recorded in CLAUDE.md. NULL here reads as
+    # "made outside any turn", which is exactly what a recipe handout is.
+    query_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("queries.id", ondelete="SET NULL")
+    )
+    created_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+
+    # chart / deck / sheet / table. A plain String rather than an enum, for the
+    # reason `agent_templates.category` is one: adding a recipe must not need a
+    # migration, and an unrecognised kind degrades to a generic card rather than
+    # to an error.
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    # What the file is called on download. Model-written, therefore sanitised at
+    # the route before it reaches a Content-Disposition header - a filename
+    # derived from a generated string is header injection if it is trusted.
+    filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    mime_type: Mapped[str] = mapped_column(String(128), nullable=False)
+    # Stored rather than derived with `length(content)`, precisely so that the
+    # list query can show a size without touching the deferred column below.
+    byte_size: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    # pending / ready / failed. A recipe handout is inserted "pending" and
+    # finished by a background job, so the row exists before its bytes do and the
+    # panel has something to poll. The job writes a terminal status in a
+    # `finally`: a task that dies silently leaves a row at "pending" forever,
+    # which reads as progress and never gets investigated.
+    status: Mapped[str] = mapped_column(String(16), default="ready", nullable=False)
+    # tool / recipe. See the class docstring.
+    origin: Mapped[str] = mapped_column(String(16), default="tool", nullable=False)
+
+    # DEFERRED, and not as an optimisation. The panel lists up to
+    # `settings.handout_max_per_agent` rows at a time; a `SELECT *` that eagerly
+    # loads bytea returns tens of megabytes for a list that renders filenames and
+    # sizes, and the symptom is a slow network rather than anything that points
+    # at this column. Deferring means the bytes are fetched only when something
+    # actually reads `.content` - which is the download route, and nothing else.
+    # `HandoutOut` has no `content` field either, so there are two independent
+    # guards, because this is a mistake that only shows up under real data.
+    content: Mapped[bytes | None] = deferred(mapped_column(LargeBinary))
+    # The markdown body for a study sheet, a caption for everything else. Held
+    # beside `content` rather than decoded from it so the panel can render a
+    # preview inline without a second request and without guessing an encoding.
+    preview_text: Mapped[str | None] = mapped_column(Text)
+    # The Python that produced the file, kept and shown. NotebookLM does not do
+    # this; for a product whose whole purpose is making a pipeline inspectable,
+    # hiding the generation step would be the one place it stopped practising
+    # what it teaches - and it is the fastest way for a user to see why a chart
+    # is wrong. Both attempts are stored when a failed run is retried, so the
+    # correction is visible too.
+    source_code: Mapped[str | None] = mapped_column(Text)
+    # `{"chunk_ids": [...], "recipe": ..., "brief": ..., "model": ...}` - what a
+    # handout was made from, so it can be traced back to the chunks that produced
+    # it the way an answer can.
+    #
+    # The attribute is `meta` and so is the column. `metadata` is reserved on a
+    # declarative Base (it is the MetaData registry), which is why `AuditLog`
+    # above maps `audit_metadata` onto a column literally named "metadata" - that
+    # rename exists to preserve a column name that already shipped. There is no
+    # such history here, so the column is simply called `meta` and the Python
+    # name matches it. Do not "fix" this into the AuditLog shape: it would buy a
+    # reserved-word collision and a name mismatch for nothing.
+    meta: Mapped[dict | None] = mapped_column(JSONB)
+    # Why THIS handout failed, so a failed row can explain itself in the panel
+    # and offer a retry. `documents` has no such column, which is why ingest
+    # failures have to be dug out of `audit_log`.
+    error: Mapped[str | None] = mapped_column(Text)
+
+    # The panel reads exactly these two lists: one agent's handouts newest first,
+    # and one conversation's. DESC in the first index rather than at the call
+    # site, so the newest-first read - which is every read - is a forward scan,
+    # the same reasoning as `ix_eval_runs_agent_created`.
+    __table_args__ = (
+        Index("ix_handouts_agent_created", "agent_id", desc("created_at")),
+        Index("ix_handouts_conversation", "conversation_id"),
+    )

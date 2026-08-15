@@ -244,6 +244,17 @@ class AgentOut(BaseModel):
     score_threshold: float
     max_rewrites: int
     system_prompt: str | None = None
+    # Whether this agent's turn runs as a bounded tool loop, and how many tool
+    # round-trips it may take. Both are NOT NULL columns, so neither carries a
+    # default here: an agent that somehow reached this serialiser without them
+    # should fail loudly rather than be reported as agentic when it is not.
+    #
+    # These reach the response through `model_validate` in `from_agent` like
+    # every other column -- there is nothing to add to that classmethod, and
+    # `document_count` below is the only field that needs it precisely because it
+    # is the only one that is not a column.
+    tools_enabled: bool
+    max_tool_steps: int
     # Not a column on `agents`: an aggregate over `documents`, supplied by the
     # route. It carries a default so `model_validate` against the ORM object
     # succeeds, and `from_agent` is the only sanctioned way to fill it -- a
@@ -264,7 +275,8 @@ class AgentTunables(BaseModel):
     Every field is optional and defaults to None, which in both subclasses means
     "not supplied" rather than "set to null" -- `AgentUpdate` reads that through
     `exclude_unset`, `AgentCreate` through `exclude_none`, and each route says
-    why it chose the one it did.
+    why it chose the one it did. That property has no exceptions, and the note on
+    `tools_enabled` below records why the one candidate exception was rejected.
 
     The bounds live here, on the definition, rather than at the two call sites.
     That is the point of the base class: a knob that a PATCH refuses and a POST
@@ -300,6 +312,34 @@ class AgentTunables(BaseModel):
     # ceiling is here so no config can turn the loop into a spiral.
     max_rewrites: int | None = Field(default=None, ge=0, le=5)
     system_prompt: str | None = None
+
+    # --- The tool loop ------------------------------------------------------
+    #
+    # `tools_enabled` is per-agent because turning the loop on changes what the
+    # agent IS -- it can search its corpus again and it can run Python, so the
+    # answer, the trace and the latency all move. `settings.agent_tools_enabled`
+    # is a global kill switch ABOVE this, not a duplicate of it.
+    #
+    # Both default to None like everything else here, and that is worth one
+    # sentence because the obvious alternative is tempting and wrong. Giving
+    # these `True` and `3` as Pydantic defaults would let the create wizard read
+    # a starting value out of the OpenAPI schema -- a real benefit in a codebase
+    # with client generation, and this one has none: `frontend/src/lib/types.ts`
+    # is hand-maintained on purpose. So the benefit would not be collected, while
+    # the cost would be: `AgentCreate` uses `exclude_none`, so a non-None default
+    # travels in EVERY create request, lands in every audit row's `overrides`
+    # list, and states the default in two places that can silently disagree once
+    # a migration moves the column. None keeps `models.py` the single source of
+    # truth for what a new agent starts as.
+    tools_enabled: bool | None = None
+
+    # Tool round-trips per turn before the loop is closed and an answer is
+    # forced. Exactly the `max_rewrites` argument one loop further out: every
+    # step is a fresh model call carrying the whole accumulated transcript, so
+    # cost per step rises while the value of another step falls. 0 is legal and
+    # means "bind the tools, take no round-trip" -- a useful way to measure what
+    # the tool descriptions alone cost. 8 is a ceiling no config can spiral past.
+    max_tool_steps: int | None = Field(default=None, ge=0, le=8)
 
 
 # Derived from the base class, never typed out. `create_agent` uses this to
