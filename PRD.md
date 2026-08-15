@@ -157,15 +157,26 @@ identity, not Google API access, so there is nothing to store and nothing to lea
 Key on `sub`, never on `email`. Google's own guidance is explicit that email addresses can
 be reassigned within a Workspace domain, while `sub` is unique and never reused.
 
-### 3.2 Multi-tenancy
+### 3.2 Multi-tenancy — one namespace per **agent**
 
-Every user's documents are isolated by **Pinecone namespace**, one namespace per user
-(`user_{id}`). All retrieval is namespace-scoped, and the namespace is derived from the
-session on the server — never accepted from the client.
+Each agent owns a **Pinecone namespace** (`agent_{id}`). All retrieval is
+namespace-scoped, and the namespace is derived from the session-authorised agent on the
+server — never accepted from the client.
 
-This is the difference between real access control and a login page that only looks like
-one. Without namespace scoping, every authenticated user queries one shared index and
-reads everyone else's documents.
+**Keyed on the agent, not the user.** A single user owns several agents, and each must
+retrieve only its own corpus. Namespacing per user would let someone's "ML Lecture" agent
+return chunks from their "HR Policy" agent — isolation between users, none between a
+user's own agents. `documents.agent_id` is therefore the scoping key;
+`documents.uploaded_by_user_id` is kept separately for audit and carries no access
+meaning.
+
+Namespace is baked into every vector at upsert time, so this cannot be changed later
+without re-ingesting.
+
+**Capacity.** Pinecone caps namespaces per index by plan: **Starter 100, Builder 1,000,
+Standard 100,000**. That cap is the ceiling on total agents, and it — not storage — is the
+binding constraint. The full 14-corpus document set is only ~1.4 MB of text, roughly
+700–900 chunks, about 2–3 MB of vectors against a 2 GB allowance.
 
 ### 3.3 Indexing (runs when documents change)
 
@@ -259,12 +270,39 @@ unless noted.
 | `expires_at`, `revoked_at` | Enables real logout and "sign out everywhere" |
 | `user_agent`, `ip_address` | Optional; see §7 on PII |
 
-### 4.2 Corpus
+### 4.2 Agents
+
+**`agent_templates`** — named parameter presets, the "premade" starting points
+| Column | Notes |
+|---|---|
+| `slug`, `name`, `description` | |
+| `chunk_size`, `chunk_overlap`, `splitter` | Indexing defaults |
+| `retrieve_k`, `rerank_enabled`, `rerank_top_n` | Retrieval defaults |
+| `score_threshold`, `max_rewrites` | Stage 2 loop bounds |
+| `system_prompt`, `is_active` | |
+
+**`agents`** — one user-created RAG agent: one corpus, one config, one namespace
+| Column | Notes |
+|---|---|
+| `owner_user_id` → users | Unique per owner + name |
+| `template_id` → agent_templates | Nullable — "from scratch" leaves it null |
+| *(all template parameter columns)* | **Copied** at creation, then independently editable |
+| `visibility` | `private` only today; the column exists for later sharing models |
+| `status` | `empty` / `indexing` / `ready` |
+| `embedding_model` | Which model built this namespace; a mismatch means re-ingest |
+
+**"Create from a template" and "create your own" are the same code path** — a template
+only supplies starting values. Parameters are **copied onto the agent** rather than read
+through the template, so editing a template never silently re-tunes agents somebody
+already built and evaluated.
+
+### 4.3 Corpus
 
 **`documents`** — one row per uploaded file
 | Column | Notes |
 |---|---|
-| `user_id` → users | Ownership; drives namespace scoping |
+| `agent_id` → agents | **The scoping key.** Drives namespace selection |
+| `uploaded_by_user_id` → users | Audit only — carries no access meaning |
 | `filename`, `mime_type`, `byte_size` | |
 | `content_hash` | SHA-256. Detects re-uploads of identical files |
 | `status` | `pending` / `processing` / `indexed` / `failed` |
@@ -738,19 +776,49 @@ localhost redirect URI.
 
 ## 10. Open items
 
+### Design decisions — 2026-08-15
+
+| Decision | Choice | Rationale |
+|---|---|---|
+| Tenancy | **Namespace per agent** | True isolation; a query cannot physically reach another agent's vectors |
+| Pinecone plan | **Builder (~$20/mo)** | Raises the agent ceiling 100 → 1,000 **and** unlocks `ap-southeast-1` |
+| Index region | **Move to Singapore** | Free to do while the index is empty; erases the trans-Pacific hop in §6.2 |
+| Chunking default | **800 tokens / 120 overlap, markdown-aware** | Sized for lecture transcripts, which dominate the corpus |
+| Slide PNGs | **Index the `.md` text; link images for citation display** | The PNGs render text already present in `{n}-slides.md` |
+| Marketplace scope | **Private agents + admin oversight** | Delivers the full flow with no sharing-permission surface |
+
+**Chunking rationale in full.** The corpus is dominated by lecture transcripts (24–71 KB
+each), which are conversational and spread an answer across several turns of dialogue —
+small chunks decapitate them. 800 tokens keeps that context together while using only 10%
+of `gemini-embedding-2`'s 8,192-token ceiling, so nothing truncates. 15% overlap is the
+standard insurance against answers straddling a boundary. Markdown-aware separators keep a
+slide's heading attached to its body instead of cutting across it. Retrieval parameters
+follow the workshop unchanged: top-20 → rerank → top-3, rewrite below 0.5, max 2 rewrites.
+
+**The slide images need object storage to actually display.** `chunks.asset_uri` is in the
+schema, but Render's filesystem is ephemeral and the PNGs are ~124 MB of NTU material that
+cannot go in a public repo. Serving them requires R2/S3, which is not provisioned. The
+text pipeline is unaffected — this only gates the citation-image feature.
+
+---
+
 Infrastructure is complete. What remains is application code.
 
 | # | Item | Blocking? |
 |---|---|---|
-| 1 | Implement OAuth routes + session middleware (`app/auth/`) | Yes — everything is behind login |
-| 2 | Implement ingest pipeline (`app/rag/ingest.py`) | Blocks Stage 1 |
-| 3 | Implement retriever seam + Stage 1 chain (`app/rag/`) | Blocks Stage 1 |
+| 0 | **Upgrade Pinecone to Builder, then recreate the index in `ap-southeast-1`** | **Time-sensitive — free only while the index is empty** |
+| 1 | Seed `agent_templates` (Lecture Q&A, Policy Lookup, From scratch) | Blocks agent creation |
+| 2 | Implement OAuth routes + session middleware (`app/auth/`) | Yes — everything is behind login |
+| 3 | Implement agent CRUD + admin listing | Blocks the marketplace flow |
 | 4 | Add RAG dependencies (langchain, langchain-google-genai, langchain-pinecone, langchain-cohere, pypdf) | Yes |
-| 5 | Implement Stage 2 loop + trace writing | Blocks Stage 2 |
-| 6 | Build the 10-question golden set + Ragas wiring | Blocks Stage 3 |
-| 7 | Build the five React views | Yes — UI is a scaffold only |
-| 8 | Test whether `gemma-4-31b-it` supports structured output; if so, drop `DECISION_MODEL` | No |
-| 9 | Decide whether the workshop PDFs belong in a public repo | No — see below |
+| 5 | Implement ingest pipeline, namespace-scoped (`app/rag/ingest.py`) | Blocks Stage 1 |
+| 6 | Implement retriever seam + Stage 1 chain (`app/rag/`) | Blocks Stage 1 |
+| 7 | Implement Stage 2 loop + trace writing | Blocks Stage 2 |
+| 8 | Build the 10-question golden set + Ragas wiring | Blocks Stage 3 |
+| 9 | Build the React views (dashboard, create, agent tabs, admin) | Yes — UI is a scaffold only |
+| 10 | Object storage for slide images (R2/S3) | Only gates citation images |
+| 11 | Test whether `gemma-4-31b-it` supports structured output; if so, drop `DECISION_MODEL` | No |
+| 12 | Decide whether the workshop PDFs belong in a public repo | No — see below |
 
 **Resolved:** the local IP `155.69.165.66/32` is on the Postgres allow-list; the redirect
 URI has been corrected to the real Render hostname; `DATABASE_URL` on the service is the

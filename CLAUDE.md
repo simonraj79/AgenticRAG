@@ -61,6 +61,16 @@ the index and re-ingesting.
 `Your free plan does not support indexes in the ap-southeast-1 region of aws`, and a sixth
 index returns a quota error. Both need the Builder plan (~$20/mo).
 
+**Namespaces per index are capped by plan: Starter 100, Builder 1,000, Standard
+100,000.** With one namespace per agent, that cap *is* the maximum number of agents. It
+binds long before storage does — the whole 14-corpus document set is ~1.4 MB of text,
+roughly 700–900 chunks, against a 2 GB allowance.
+
+**The namespace is keyed on the AGENT, not the user.** A user owns several agents and each
+must retrieve only its own corpus. `Agent.namespace` returns `agent_{id}`;
+`documents.agent_id` is the scoping key and `documents.uploaded_by_user_id` is audit only.
+Namespace is baked into every vector at upsert, so changing the scheme means re-ingesting.
+
 **The SDK's `AwsRegion` enum is stale.** pinecone 8.0.0 lists only `us-east-1`,
 `us-west-2`, `eu-west-1` — no `ap-southeast-1`, despite the region existing. The signature
 accepts a raw `str`, so pass the string and let the API validate. The enum is not the

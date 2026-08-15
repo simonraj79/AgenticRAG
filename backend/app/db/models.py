@@ -55,11 +55,7 @@ class User(Base):
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     sessions: Mapped[list["Session"]] = relationship(back_populates="user")
-
-    @property
-    def namespace(self) -> str:
-        """Pinecone namespace. Derived server-side, never client-supplied."""
-        return f"user_{self.id}"
+    agents: Mapped[list["Agent"]] = relationship(back_populates="owner")
 
 
 class Session(Base):
@@ -85,7 +81,101 @@ class Session(Base):
 
 
 # --------------------------------------------------------------------------
-# 4.2 Corpus
+# 4.2 Agents
+# --------------------------------------------------------------------------
+
+class AgentTemplate(Base):
+    """A named preset of RAG parameters.
+
+    'Create from a template' and 'create your own' are the same code path -
+    a template just supplies the starting values.
+    """
+
+    __tablename__ = "agent_templates"
+
+    id: Mapped[uuid.UUID] = _pk()
+    created_at: Mapped[datetime] = _created_at()
+
+    slug: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text)
+
+    # Indexing parameters
+    chunk_size: Mapped[int] = mapped_column(Integer, default=800, nullable=False)
+    chunk_overlap: Mapped[int] = mapped_column(Integer, default=120, nullable=False)
+    splitter: Mapped[str] = mapped_column(String(32), default="markdown", nullable=False)
+
+    # Retrieval parameters
+    retrieve_k: Mapped[int] = mapped_column(Integer, default=20, nullable=False)
+    rerank_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    rerank_top_n: Mapped[int] = mapped_column(Integer, default=3, nullable=False)
+    score_threshold: Mapped[float] = mapped_column(Float, default=0.5, nullable=False)
+    max_rewrites: Mapped[int] = mapped_column(Integer, default=2, nullable=False)
+
+    system_prompt: Mapped[str | None] = mapped_column(Text)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+    agents: Mapped[list["Agent"]] = relationship(back_populates="template")
+
+
+class Agent(Base):
+    """A user-created RAG agent: one corpus, one config, one namespace."""
+
+    __tablename__ = "agents"
+
+    id: Mapped[uuid.UUID] = _pk()
+    created_at: Mapped[datetime] = _created_at()
+
+    owner_user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    template_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("agent_templates.id", ondelete="SET NULL")
+    )
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text)
+
+    # Effective config, copied from the template at creation then editable.
+    # Stored per-agent rather than read through the template so that editing a
+    # template never silently re-tunes agents someone already built.
+    chunk_size: Mapped[int] = mapped_column(Integer, default=800, nullable=False)
+    chunk_overlap: Mapped[int] = mapped_column(Integer, default=120, nullable=False)
+    splitter: Mapped[str] = mapped_column(String(32), default="markdown", nullable=False)
+    retrieve_k: Mapped[int] = mapped_column(Integer, default=20, nullable=False)
+    rerank_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    rerank_top_n: Mapped[int] = mapped_column(Integer, default=3, nullable=False)
+    score_threshold: Mapped[float] = mapped_column(Float, default=0.5, nullable=False)
+    max_rewrites: Mapped[int] = mapped_column(Integer, default=2, nullable=False)
+    system_prompt: Mapped[str | None] = mapped_column(Text)
+    generation_model: Mapped[str | None] = mapped_column(String(128))
+
+    # Reserved for later sharing models; only "private" is honoured today.
+    visibility: Mapped[str] = mapped_column(String(16), default="private", nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default="empty", nullable=False)
+
+    # The embedding model this agent's vectors were built with. A mismatch
+    # against the current setting means the namespace must be re-ingested.
+    embedding_model: Mapped[str | None] = mapped_column(String(128))
+
+    owner: Mapped[User] = relationship(back_populates="agents")
+    template: Mapped[AgentTemplate | None] = relationship(back_populates="agents")
+    documents: Mapped[list["Document"]] = relationship(back_populates="agent")
+
+    __table_args__ = (UniqueConstraint("owner_user_id", "name"),)
+
+    @property
+    def namespace(self) -> str:
+        """Pinecone namespace - one per AGENT, not per user.
+
+        A user owns several agents and each must retrieve only its own corpus,
+        so the namespace cannot be keyed on the user. Always derived server-side
+        from the session-authorised agent, never accepted from the client.
+        """
+        return f"agent_{self.id}"
+
+
+# --------------------------------------------------------------------------
+# 4.3 Corpus
 # --------------------------------------------------------------------------
 
 class Document(Base):
@@ -94,8 +184,13 @@ class Document(Base):
     id: Mapped[uuid.UUID] = _pk()
     created_at: Mapped[datetime] = _created_at()
 
-    user_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
+    # Scoping key: documents belong to an AGENT. The uploader is kept
+    # separately for audit, not for access control.
+    agent_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("agents.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    uploaded_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
     )
     filename: Mapped[str] = mapped_column(Text, nullable=False)
     mime_type: Mapped[str | None] = mapped_column(String(128))
@@ -103,6 +198,7 @@ class Document(Base):
     content_hash: Mapped[str | None] = mapped_column(String(64))
     status: Mapped[str] = mapped_column(String(32), default="pending", nullable=False)
 
+    agent: Mapped[Agent] = relationship(back_populates="documents")
     chunks: Mapped[list["Chunk"]] = relationship(back_populates="document")
 
 
@@ -122,6 +218,10 @@ class Chunk(Base):
     text: Mapped[str] = mapped_column(Text, nullable=False)
     token_count: Mapped[int | None] = mapped_column(Integer)
     pinecone_id: Mapped[str | None] = mapped_column(String(128), index=True)
+    # Optional pointer to a rendered image of this chunk's source (e.g. the
+    # slide PNG behind a slides.md section), for citation display. Requires
+    # object storage to actually serve - see PRD open items.
+    asset_uri: Mapped[str | None] = mapped_column(Text)
 
     document: Mapped[Document] = relationship(back_populates="chunks")
 
@@ -161,6 +261,10 @@ class Query(Base):
 
     user_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    # Which agent answered. Needed to scope trace and eval history per agent.
+    agent_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("agents.id", ondelete="CASCADE"), index=True
     )
     session_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("sessions.id", ondelete="SET NULL")
