@@ -97,23 +97,48 @@ looks like a network fault rather than a firewall. Add a `/32` entry to connect 
 code to build produces a failed deploy, and Render does not document whether a
 permanently-failing service still bills.
 
+**Render appends a random suffix to service hostnames.** A service named
+`agentic-rag-api` is served at `agentic-rag-api-6x6b.onrender.com`. **No URL can be
+predicted before creation** — anything that needs the hostname (OAuth redirect URIs,
+`VITE_API_URL`, CORS origins) must be wired *after* the service exists.
+`scripts/create_render_services.py --wire` does this by reading the URLs back.
+
+**Migrations belong in the START command, not the build command.** The internal database
+hostname does not resolve from Render's build environment. `alembic upgrade head` is
+idempotent, so running it on every start is harmless.
+
+**`npm ci` needs a committed `package-lock.json`**, or the static site build fails.
+
 **Bind `$PORT` on `0.0.0.0`.** Binding localhost passes local tests and fails Render's
 health check.
 
+**Updating env vars: use `PUT /services/{id}/env-vars/{key}`.** The keyless
+`PUT /services/{id}/env-vars` *replaces the entire set* and will silently drop every other
+variable.
+
 ### Database driver
 
-These two are a **pair**, and fixing only one produces a misleading error:
+Three separate traps, each producing a different misleading error. All are handled in
+`backend/app/config.py` (`async_database_url` and `db_connect_args`), which is used by the
+app engine *and* `alembic/env.py` — migrations fail without them too.
 
 1. **Render hands out `postgresql://`,** which SQLAlchemy maps to psycopg2. We use
    asyncpg, so the URL must be rewritten to `postgresql+asyncpg://`.
-2. **asyncpg does not understand libpq's `sslmode`** and errors if it appears in the
-   query string — but Render *requires* TLS. Strip `sslmode` from the URL **and** pass
-   `connect_args={"ssl": ssl.create_default_context()}`.
 
-Do only the stripping and you get
-`InvalidAuthorizationSpecificationError: SSL/TLS required`. Both halves live in
-`backend/app/config.py` (`async_database_url` and `db_connect_args`) and are used by the
-app engine *and* `alembic/env.py` — a migration run will fail without them.
+2. **asyncpg does not understand libpq's `sslmode`** and errors if it appears in the query
+   string — but Render *requires* TLS. Strip `sslmode` from the URL **and** pass TLS via
+   `connect_args`. Do only the stripping and you get
+   `InvalidAuthorizationSpecificationError: SSL/TLS required`.
+
+3. **The INTERNAL endpoint presents a self-signed certificate.** A verifying context
+   raises `SSLCertVerificationError: certificate verify failed: self-signed certificate`.
+   The EXTERNAL endpoint has a valid public cert and verifies fine — so this passes every
+   local test and fails only once deployed. Internal hostnames have no dots
+   (`dpg-xxx-a`); external ones are FQDNs. Verify when the host is an FQDN, relax when it
+   is not. The connection stays encrypted either way.
+
+Trap 3 is the nastiest of the three: local development exercises the external endpoint, so
+nothing warns you until the first production deploy.
 
 ### Google OAuth
 

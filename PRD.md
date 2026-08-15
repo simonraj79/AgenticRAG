@@ -483,17 +483,24 @@ Both Render services deploy from https://github.com/simonraj79/AgenticRAG.
 
 | | Backend (Web Service) | Frontend (Static Site) |
 |---|---|---|
+| Service name | `agentic-rag-api` | `agentic-rag-web` |
+| Hostname | `agentic-rag-api-6x6b.onrender.com` | `agentic-rag-web-e9e9.onrender.com` |
 | Root directory | `backend` | `frontend` |
-| Runtime | Python | Node |
-| Build command | `pip install -r requirements.txt && alembic upgrade head` | `npm ci && npm run build` |
-| Start / publish | `uvicorn app.main:app --host 0.0.0.0 --port $PORT` | Publish `dist` |
+| Runtime | Python 3.12.10 | Node |
+| Plan / region | `starter` / `singapore` | free / CDN |
+| Build command | `pip install -r requirements.txt` | `npm ci && npm run build` |
+| Start / publish | `alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port $PORT` | Publish `dist` |
 | Health check path | `/api/health` | — |
 
 **Binding.** The backend must bind Render's injected `$PORT` on `0.0.0.0`. Binding
 localhost passes local testing and fails Render's health check.
 
-**Migrations run at build time**, so a schema change ships with the deploy that needs it
-rather than requiring a manual step.
+**Migrations run at START, not at build.** The internal database hostname does not resolve
+from Render's build environment, so `alembic upgrade head` belongs in the start command.
+It is idempotent, so re-running it on every restart is harmless, and a schema change still
+ships with the deploy that needs it.
+
+**`npm ci` requires `package-lock.json` to be committed.** It is.
 
 ### 6.5 Cross-origin configuration
 
@@ -577,9 +584,13 @@ As of 2026-08-15. Scripts under `scripts/` are idempotent and safe to re-run.
 | Render Postgres | ✅ **Live** | `agentic-rag-db` · `dpg-d9vt7v1t0dsc738c8kpg-a` · `basic_256mb` · **singapore** · PG **18** · `available` |
 | Pinecone index | ✅ **Live** | `agentic-rag-ntu` · **768d** · cosine · serverless aws **us-east-1** · `Ready` |
 | Google OAuth client | ✅ **Live** | `Agentic RAG Web` · Web application · `dsai-mod-2-group-project` · **In production** · External |
-| GitHub repo | ✅ **Live** | https://github.com/simonraj79/AgenticRAG (public, empty) |
-| Render web service | ⏸ **Deferred** | Awaiting code to deploy |
-| Render static site | ⏸ **Deferred** | Awaiting code to deploy |
+| GitHub repo | ✅ **Live** | https://github.com/simonraj79/AgenticRAG (public) |
+| Render web service | ✅ **Live** | `agentic-rag-api` · `srv-d9vtuhpt0dsc738dmgsg` · `starter` · **singapore** · https://agentic-rag-api-6x6b.onrender.com |
+| Render static site | ✅ **Live** | `agentic-rag-web` · `srv-d9vtuj61egvs73fdfang` · free · https://agentic-rag-web-e9e9.onrender.com |
+
+**All six resources are provisioned.** Verified end to end: `/api/health` returns
+`{"status":"ok","database":"ok"}` from Singapore against the private-network Postgres, and
+the static site serves.
 
 Pinecone host: `agentic-rag-ntu-o3j2ojr.svc.aped-4627-b74a.pinecone.io`
 Pinecone tags: `embedding_model=gemini-embedding-2`, `dimension=768`, `project=agentic-rag-ntu`
@@ -600,11 +611,23 @@ The quota was resolved by removing two unused indexes (`tbllive`, `localflowise`
 detects the existing index, verifies dimension, metric and region against this document,
 and reports drift rather than recreating anything.
 
-**Web service and static site — deliberately not created yet.** The repository exists but
-has no code in it, and `POST /v1/services` triggers a deploy immediately on creation. A
-deploy with nothing to build fails, and Render's documentation does not state whether a
-service whose build never succeeded still accrues charges. They will be created once the
-scaffold is pushed, which also lets us confirm the backend's real hostname.
+**Web service and static site.** Created via `scripts/create_render_services.py` *after*
+the scaffold was pushed, because `POST /v1/services` triggers a deploy immediately and a
+service with nothing to build fails on creation. Two findings from the run:
+
+**Render appends a random suffix to service hostnames.** The service named
+`agentic-rag-api` resolves at `agentic-rag-api-6x6b.onrender.com`, not
+`agentic-rag-api.onrender.com`. No hostname can be predicted before creation, which
+invalidated the redirect URI registered earlier — it has since been corrected in the
+Google console. `scripts/create_render_services.py --wire` reads the real hostnames back
+and sets `FRONTEND_URL`, `OAUTH_REDIRECT_URI` and `VITE_API_URL` accordingly.
+
+**The first backend deploy failed on TLS.** The internal Postgres endpoint presents a
+self-signed certificate, so a verifying SSL context raised
+`SSLCertVerificationError: self-signed certificate`. The external endpoint has a valid
+public certificate, which is why local development had worked. `app/config.py` now
+verifies against external FQDNs and relaxes verification only on the private network —
+the connection stays encrypted either way. See §7.
 
 **Google OAuth — created by hand, because no API exists.** There is no gcloud command and
 no public API for creating a Web Application OAuth client. Two near-misses to avoid if
@@ -715,16 +738,28 @@ localhost redirect URI.
 
 ## 10. Open items
 
+Infrastructure is complete. What remains is application code.
+
 | # | Item | Blocking? |
 |---|---|---|
-| 1 | Backend scaffold + Alembic migrations for §4 | Yes — blocks both Render services |
-| 2 | Create Render web service + static site | Yes — deployment |
-| 3 | Correct redirect URI 2 if Render assigns a different hostname | Yes — login breaks in prod |
-| 4 | Set `DATABASE_URL` to the internal URL in Render's env settings | Yes — prod DB access |
-| 5 | Add local IP to Postgres allow-list if external connection fails | Only for local dev |
-| 6 | Decide whether the workshop PDFs belong in a public repo | No — see below |
-| 7 | Test whether `gemma-4-31b-it` supports structured output; if so, drop `DECISION_MODEL` | No |
-| 8 | Build the 10-question golden set | Blocks Stage 3 only |
+| 1 | Implement OAuth routes + session middleware (`app/auth/`) | Yes — everything is behind login |
+| 2 | Implement ingest pipeline (`app/rag/ingest.py`) | Blocks Stage 1 |
+| 3 | Implement retriever seam + Stage 1 chain (`app/rag/`) | Blocks Stage 1 |
+| 4 | Add RAG dependencies (langchain, langchain-google-genai, langchain-pinecone, langchain-cohere, pypdf) | Yes |
+| 5 | Implement Stage 2 loop + trace writing | Blocks Stage 2 |
+| 6 | Build the 10-question golden set + Ragas wiring | Blocks Stage 3 |
+| 7 | Build the five React views | Yes — UI is a scaffold only |
+| 8 | Test whether `gemma-4-31b-it` supports structured output; if so, drop `DECISION_MODEL` | No |
+| 9 | Decide whether the workshop PDFs belong in a public repo | No — see below |
+
+**Resolved:** the local IP `155.69.165.66/32` is on the Postgres allow-list; the redirect
+URI has been corrected to the real Render hostname; `DATABASE_URL` on the service is the
+internal URL.
+
+**Watch:** that allow-list entry is a single IP on what looks like a campus network. If
+your public IP changes, local database access stops working and
+`scripts/create_render_db.py` will need the new address added. Deployed traffic is
+unaffected — it uses the private network.
 
 **On item 6.** The repository is public and the three source PDFs total roughly 17 MB of
 NTU course material. Committing them is a copyright question rather than a technical one,
