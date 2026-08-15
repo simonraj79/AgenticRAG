@@ -7,12 +7,19 @@
 **GCP project:** `dsai-mod-2-group-project`
 **Last updated:** 2026-08-15
 
+> **This document is the specification; [CLAUDE.md](CLAUDE.md) is the operational companion.**
+> Where a section describes something that has since been built and measured, the measurement
+> is recorded inline rather than left to fold back into prose — a spec that quietly disagrees
+> with the code is worse than no spec. Sections carrying post-build measurements:
+> §2.1 (eval judge), §2.3 (multimodal embeddings), §3.3 (ingest), §3.6 (Stage 3),
+> §3.7 (conversations), §4.2 (personas), §10 (open items).
+
 | § | Section | |
 |---|---|---|
 | 1 | [What we're building](#1-what-were-building) | Scope and the three stages |
 | 2 | [Tech stack](#2-tech-stack) | Every layer, and what changed from the workshop |
 | 3 | [Architecture](#3-architecture) | Auth, tenancy, the query pipelines, API surface |
-| 4 | [Database schema](#4-database-schema) | 14 tables |
+| 4 | [Database schema](#4-database-schema) | 17 tables |
 | 5 | [Environment variables](#5-environment-variables) | What each is for, which are auto-read |
 | 6 | [Deployment](#6-deployment--rendercom) | Plans, regions, latency, build config |
 | 7 | [Hard constraints](#7-hard-constraints) | **Read before provisioning or coding** |
@@ -29,15 +36,25 @@ A retrieval-augmented generation system over a private document set, built in th
 progressive stages, with authenticated multi-user access and a durable record of every
 query, decision and evaluation.
 
-| Stage | Name | Behaviour |
-|---|---|---|
-| 1 | Classic RAG | Fixed chain: ingest → chunk → embed → store → retrieve → answer |
-| 2 | Agentic enhancements | Conditional query rewriting, reranking, decision tracing |
-| 3 | Measurement | Golden set + Ragas scorecard across four metrics |
+| Stage | Name | Behaviour | Status |
+|---|---|---|---|
+| 1 | Classic RAG | Fixed chain: ingest → chunk → embed → store → retrieve → answer | ✅ built |
+| 2 | Agentic enhancements | Conditional query rewriting, reranking, decision tracing | ◐ rerank + trace built; the score-triggered rewrite loop is not |
+| 3 | Measurement | Golden set + Ragas scorecard across four metrics | ✅ built |
 
 The distinction that matters: **Stage 1 is a chain, Stage 2 is a loop.** "Agentic" here
 means the system decides which behaviour fits the current turn — rewriting fires only
 when retrieval looks weak, not on every query.
+
+**Stage 2 is partly built by a side door.** Conversations (§3.7) needed a rewriter to resolve
+follow-ups whose subject is a pronoun, so `pipeline.py` already contextualises a question
+against history and records a `REWRITE` trace event. That is the same machinery Stage 2's
+loop needs; only the *trigger* differs — coreference rather than a low top score. Stage 2
+should extend the existing rewriter, not add a second one.
+
+Three features were added after the original scope and are specified below rather than
+retrofitted into the tables above: **conversation memory** (§3.7), **teaching personas**
+(§4.2), and **golden-set authoring** (§3.6).
 
 Authentication and persistence are not in the workshop, which is a single-user local
 build. They are added here because the deployed system is multi-user, and because a
@@ -66,8 +83,21 @@ unless the deployment target or available credentials genuinely force a change.
 | Decision LLM | Gemini Flash | — | ➕ |
 | Reranker | Cohere `rerank-v3` | same | — |
 | Output parsing | `StrOutputParser`, Pydantic parser | same | — |
-| Evaluation | Ragas | same | — |
-| Eval judge | Gemini Flash Lite | same | — |
+| Evaluation | Ragas **0.4.3** | same | — |
+| **Eval judge** | **`gemma-4-31b-it`** (`RAGAS_JUDGE_MODEL`) | Gemini Flash Lite | 🔄 |
+
+**The eval judge is currently the generation model, and that is a measured problem.**
+Consolidating onto one model was requested deliberately, and `eval_runs` records both
+`judge_model` and `generation_model` so a self-judged scorecard is visible as such. But
+asking a model whether its own answer is supported by its own context is self-assessment,
+and it fails concretely: on a turn whose answer was copied **verbatim** out of the retrieved
+text, `gemma-4-31b-it` scored faithfulness **0.000** where `gemini-flash-latest` scored
+0.667. Answer relevance was stable across both judges (0.813 vs 0.811), so the defect is
+specific to faithfulness rather than a general judge-quality gap.
+
+Consequence for anyone reading a scorecard: **a low faithfulness score must be re-run with
+`RAGAS_JUDGE_MODEL=gemini-flash-latest` before it is acted on.** The weakest-metric pointer
+is only as trustworthy as the judge behind it, and Stage 3's whole value is that pointer.
 
 **Why the three swaps.** Ollama requires model weights in memory and on disk; Render's
 free tier gives limited RAM and an ephemeral filesystem, so a local model runner is
@@ -88,16 +118,30 @@ retriever, the chain and everything downstream are identical.
 | Layer | Choice | Notes |
 |---|---|---|
 | Backend | FastAPI | Owns all secrets and all LangChain calls |
-| Frontend | React + Tailwind CSS (Vite) | Five views: Login · Ingest · Ask · Trace · Evaluate |
-| Answer transport | SSE streaming | Token-by-token from FastAPI |
+| Frontend | React + Tailwind CSS (Vite) | **Login · Dashboard · Chat · Documents · Evaluate** |
+| Answer transport | **JSON (SSE deferred)** | See below |
 | **Auth** | **Google OAuth 2.0** via Authlib | Authorization Code flow, server-side |
 | **Session** | **Server-side, DB-backed** | httpOnly cookie carrying an opaque token |
 | **Database** | **Render Postgres 18** | Lowest paid tier |
 | **ORM / migrations** | **SQLAlchemy 2.0 (async) + Alembic** | Driver: `asyncpg` |
+| Markdown rendering | `react-markdown` + `remark-gfm` | Personas emit lists and numbered steps |
 
 The workshop leaves the UI open ("Streamlit, Gradio, React, or plain HTML — we won't
 grade the framework"), so the frontend choice is within the rules rather than a
 deviation.
+
+**The five views changed shape.** The original list — Login · Ingest · Ask · Trace ·
+Evaluate — assumed one corpus and one-shot questions. Tenancy moved to agents (§3.2) and
+questions became conversations (§3.7), so Ingest and Ask became *tabs on an agent*, and
+Trace stopped being a view at all: it is now opened inline from the message it explains,
+because provenance a click and a screen away is provenance nobody checks.
+
+**SSE streaming is specified but not built.** Streaming and durable recording pull in
+opposite directions — the `queries` row is only complete once the last token has landed —
+so the shape that works is to stream and then write the rows in the same handler after the
+stream closes. It was deferred to keep Stage 1 correct first, and the cost has since risen:
+a coaching persona takes 30–60 s to answer (§2.4), so the blank wait is now the single worst
+part of the product. This is the first UX item to build next.
 
 ### 2.3 Model specifications (verified 2026-08-15)
 
@@ -192,10 +236,33 @@ text, roughly 700–900 chunks, about 2–3 MB of vectors against a 10 GB allowa
 ### 3.3 Indexing (runs when documents change)
 
 ```
-Upload → Load → Chunk → Embed (gemini-embedding-2, 768d)
-      → Upsert to Pinecone (namespace = user)
-      → Record documents / chunks / ingestion_runs rows
+Upload → 202 Accepted, document row at status "pending"
+       ↓ (background job, own DB session)
+       Load → Chunk → Embed (gemini-embedding-2, 768d)
+            → Upsert to Pinecone (namespace = agent_{id})
+            → Record documents / chunks / ingestion_runs rows
+       ↓
+       status: pending → processing → ready | failed     (client polls)
 ```
+
+**Limit: 50 MB** (`MAX_UPLOAD_MB`). Accepted: `.md`, `.markdown`, `.txt`, `.pdf`.
+
+**The cap and the background job are one change, not two.** Ingest was originally
+synchronous, and that — not the deployment target — was the real constraint: raising the
+limit alone would have converted a clean `413` into a request that holds a socket open for
+minutes and then times out somewhere less legible. The limit became configurable only once
+it stopped being the thing protecting the request timeout.
+
+Both size checks are kept: a cheap pre-check on the multipart `size` header so a 200 MB
+upload is refused before it is pulled into memory, and the authoritative one on the bytes
+actually read. The header is attacker-controlled and nothing upstream validates it against
+the body, so it can shortcut a rejection but can never authorise an acceptance.
+
+**Duplicate detection stays synchronous**, before the handoff. A duplicate that returns 202
+and then fails quietly in the background is a worse experience than an immediate `409`.
+
+**Failure text lives in `audit_log`**, not on the document — there is no `documents.error`
+column — under `app.rag.ingest.INGEST_FAILURE_ACTION`, keyed to the document id.
 
 ### 3.4 Query — Stage 1
 
@@ -229,32 +296,141 @@ and it becomes a refactor.
 
 ### 3.6 Evaluation — Stage 3
 
-For each of 10 golden-set questions: run through the agent, capture retrieved chunks and
-answer, score with Ragas on faithfulness, answer relevance, context precision and context
-recall. Results persist to `eval_runs` / `eval_results` so successive runs are comparable
-over time.
+For each active golden-set question: run it through the agent as a **real turn** (writing
+`queries`, `query_chunks` and `trace_events`, so an eval answer is as traceable as any
+other), then score with Ragas on faithfulness, answer relevance, context precision and
+context recall. Results persist to `eval_runs` / `eval_results` so successive runs are
+comparable over time.
 
 Ragas needs **both a judge LLM and an embedding model** — both Gemini here. It defaults to
 OpenAI for both, so both must be configured explicitly or it fails on a missing
 `OPENAI_API_KEY`. `context_recall` additionally requires a reference answer, which is why
 `golden_questions.reference_answer` is not optional.
 
-### 3.7 API surface
+#### 3.6.1 Authoring the golden set
+
+The set is **per agent** — a question about lecture transcripts scored against a policy
+corpus measures nothing — and is built three ways, which coexist:
+
+1. **AI-suggested.** An LLM reads a sample of the agent's own indexed chunks (from Postgres,
+   not Pinecone: the corpus, not a similarity search) and proposes ten questions with
+   grounded reference answers. Default split is **8 answerable + 2 refusal**.
+2. **Edited.** Every field of every question is editable. Editing a suggestion flips its
+   `source` from `ai_suggested` to `edited`, and the UI badges the two differently — the
+   point of the edit feature is knowing which questions a model wrote and which a human has
+   vetted. Re-running *Suggest* replaces untouched suggestions and **never** touches a
+   question a human has edited or written.
+3. **Plain JSON, imported and exported.** The file is meant to be hand-edited: import accepts
+   the wrapped object or a bare list, ignores unknown keys, reports per-row problems rather
+   than rejecting the file, and takes the file's line order as the set's order.
+
+**Refusal questions must be plausible neighbours of the corpus, not absurdities.** For a
+station-engineering corpus, "which of the fourteen launches took place in 2040?" — where the
+text gives only a range — probes grounding. "What is the capital of France?" probes nothing,
+because any model declines it. The generator is instructed accordingly, and this is the
+single largest determinant of whether the set measures anything.
+
+#### 3.6.2 Scoring rules
+
+**Refusal questions are excluded from all four metric means** and graded pass/fail on
+behaviour instead (`eval_results.behaviour_ok`, reported as `refusal_pass / refusal_total`).
+A *correct* refusal retrieves nothing useful and returns an answer that deliberately does not
+follow from its context, so faithfulness and context recall score near zero for behaving
+perfectly. Averaging them in would penalise correct refusals and — worse — aim the
+weakest-metric pointer at whichever metric refusals punish hardest.
+
+**`None` and `0.0` are different facts and stay different all the way to the screen.** `None`
+means *not measured*; `0.0` means *measured and bad*. Conflating them is how a scorecard
+lies: a run whose judge was rate-limited must read "measured nothing", not "perfectly
+unfaithful".
+
+#### 3.6.3 The weakest metric is the deliverable
+
+A scorecard that does not say what to do next is a dashboard. Each metric maps to the
+specific **agent parameter** to change — all four are per-agent editable:
+
+| Weakest metric | What it means | What to change |
+|---|---|---|
+| Faithfulness | Retrieval worked; generation went past it | System prompt grounding clause; persona verbosity; generation model |
+| Answer relevance | Grounded, but not answering the question | Prompt shape; preamble burying the answer |
+| Context precision | Junk ranked into the top-n | `rerank_top_n`, `retrieve_k`, chunking |
+| Context recall | Retrieval missed text the answer needed | Raise `retrieve_k`, `chunk_size`/`chunk_overlap`, check embedding model matches the index |
+
+**A run takes 23–25 minutes for ten questions** (measured twice), so it is a background job
+with progress, not a request.
+
+**Measured caveat, recorded because it inverts a reading:** on a single-chunk corpus,
+context precision and recall both return 1.00 — that is retrieval that *cannot* fail, not
+retrieval that is excellent. Treat a perfect retrieval score on a small corpus as "not yet
+measured".
+
+### 3.7 Conversations — multi-turn memory
+
+Originally out of scope (§11). Added because a chat interface makes single-shot turns
+untenable.
+
+```
+Turn 1: "What altitude does Kestrel Station orbit at?"   → embedded as typed
+Turn 2: "What is its power budget?"
+        ↳ contextualise against history (decision model, function calling)
+        ↳ embed "What is the power budget of Kestrel Station?"   ← REWRITE trace event
+        ↳ retrieve → rerank → answer
+```
+
+A `conversations` row threads `queries`; `queries.conversation_id` is nullable, because
+one-shot rows predate it and NULL legitimately means "asked outside a thread".
+
+**Contextualisation is bounded and fails soft.** It reads at most the last ~6 turns —
+unbounded history grows the prompt without improving the rewrite, and this call is on the
+latency path (measured 3.8 s). If it fails for any reason the raw question is used and the
+turn continues: a failed rewrite must degrade to Stage 1 behaviour, never fail the turn.
+
+**`rewritten_question` is null when no rewrite happened**, never a copy of the question, so
+the UI can distinguish "not rewritten" from "rewritten to the same string". It is surfaced
+above the answer as *"Searched for …"*, which is the most useful thing a multi-turn RAG can
+show about itself — it explains why an answer is about something the user did not type.
+
+**One conversation per eval question, never one per run.** Sharing a thread across a golden
+set would let contextualisation rewrite later questions through earlier ones, so the
+scorecard would measure a different set of questions than the editor displays.
+
+### 3.8 API surface
+
+Routes are **nested under the agent** and resolve through an ownership dependency. The
+original flat surface predates the move of tenancy from users to agents (§3.2); flat routes
+would have to carry the agent id in a body or query parameter, which is exactly the
+client-supplied scoping §7 forbids. Nesting makes the constraint structural.
 
 | Endpoint | Method | Auth | Purpose |
 |---|---|---|---|
-| `/api/auth/google/login` | GET | — | Begin OAuth |
-| `/api/auth/google/callback` | GET | — | Exchange code, create session |
-| `/api/auth/me` | GET | ✅ | Current user |
-| `/api/auth/logout` | POST | ✅ | Revoke session |
-| `/api/documents` | GET/POST/DELETE | ✅ | List, ingest, remove |
-| `/api/ask` | POST | ✅ | Query pipeline, SSE stream |
-| `/api/queries` | GET | ✅ | Query history |
+| `/api/auth/google/login` · `/callback` | GET | — | OAuth begin / exchange |
+| `/api/auth/me` · `/logout` | GET · POST | ✅ | Current user · revoke session |
+| `/api/auth/dev-login` | POST | — | **Dev only**, triple-gated (§7) |
+| `/api/agent-templates` | GET | ✅ | The eight persona presets |
+| `/api/agents` | GET/POST | ✅ | List / create |
+| `/api/agents/{id}` | GET/PATCH/DELETE | ✅ | Read / retune / delete + drop namespace |
+| `/api/agents/{id}/documents` | GET/POST | ✅ | List / upload (**202**, background) |
+| `/api/agents/{id}/documents/{doc}` | DELETE | ✅ | Delete rows **and** vectors |
+| `/api/agents/{id}/ask` | POST | ✅ | One-shot; creates a conversation implicitly |
+| `/api/agents/{id}/conversations` | GET/POST | ✅ | Threads for this agent |
+| `/api/conversations/{id}` | GET/PATCH/DELETE | ✅ | Transcript / rename / delete |
+| `/api/conversations/{id}/ask` | POST | ✅ | Ask **within** a thread (history-aware) |
+| `/api/agents/{id}/queries` | GET | ✅ | Query history |
 | `/api/trace/{query_id}` | GET | ✅ | Decision timeline |
-| `/api/feedback` | POST | ✅ | Thumbs up/down on an answer |
-| `/api/evaluate` | POST | ✅ | Run golden set |
-| `/api/eval-runs` | GET | ✅ | Historical scorecards |
-| `/api/health` | GET | — | Render health check |
+| `/api/agents/{id}/golden-questions` | GET/POST | ✅ | List / add one |
+| `…/golden-questions/suggest` | POST | ✅ | **202**, LLM proposes ten |
+| `…/golden-questions/export` · `/import` | GET · POST | ✅ | Plain JSON out / in |
+| `/api/golden-questions/{id}` | PATCH/DELETE | ✅ | Edit / remove |
+| `/api/agents/{id}/eval-runs` | GET/POST | ✅ | History / start (**202**) |
+| `/api/eval-runs/{id}` | GET/DELETE | ✅ | Scorecard / remove |
+| `/api/health` · `/api/config` | GET | — | Render health check · non-secret config |
+
+**Three routes are reached by their own id** — `/api/conversations/{id}`,
+`/api/golden-questions/{id}`, `/api/eval-runs/{id}` — and so have no `agent_id` for the
+ownership dependency to bind to. Each checks ownership by hand, by following the row to its
+agent. They are the highest-risk lines in the codebase and are commented as such.
+
+`/api/feedback` remains specified and unbuilt.
 
 ---
 
@@ -291,6 +467,42 @@ unless noted.
 | `retrieve_k`, `rerank_enabled`, `rerank_top_n` | Retrieval defaults |
 | `score_threshold`, `max_rewrites` | Stage 2 loop bounds |
 | `system_prompt`, `is_active` | |
+| **`persona_role`, `pedagogy`, `icon`, `category`** | The teaching persona — see below |
+
+#### Teaching personas
+
+Eight templates ship. Three are parameter presets; **five are teaching personas grounded in
+learning science**, because the workshop corpus is course material and "what the agent
+retrieves" matters less to a learner than "what it does with it".
+
+| Slug | Persona | Rests on | k / top_n |
+|---|---|---|---|
+| `lecture-qa` | Teaching assistant | PRD default, sized for transcripts | 20 / 3 |
+| `policy-lookup` | Policy assistant | Clause-structured lookup | 20 / 3 |
+| `feynman-explainer` | Explainer | Feynman technique; self-explanation effect; the illusion of explanatory depth | 20 / 3 |
+| `socratic-tutor` | Socratic tutor | Elaborative interrogation | 20 / 4 |
+| `polya-coach` | Problem coach | Pólya's four phases, *How to Solve It* | 20 / 5 |
+| `quiz-generator` | Quiz writer | Retrieval practice / testing effect (Roediger & Karpicke) | **40 / 8** |
+| `reflective-coach` | Reflection guide | Gibbs' reflective cycle; Schön | **12 / 4** |
+| `from-scratch` | Blank canvas | Model defaults | 20 / 3 |
+
+Retrieval parameters differ *per persona* rather than being copied: a quiz generator draws
+items from across the whole corpus and needs breadth; a reflection guide works a narrow
+point and needs focus.
+
+**A persona changes the shape of a response, never its grounding.** Every persona prompt
+states the refusal rule at least as forcefully as the persona rule, because a warm,
+confident teaching voice makes an ungrounded answer *read* better than a blunt refusal —
+personas are the most likely place in this system for hallucination to start.
+
+**And Stage 3 measured that this is not sufficient.** On the first real golden-set run the
+Feynman Explainer scored **`refusal_pass = 0 / 2`**, reproduced on a second run: it answered
+both questions its corpus could not answer. The cause is not a missing rule but the persona
+itself — it is designed to *name the gap* ("the material does not cover X, but here is what
+it does say"), which is pedagogically right and structurally an answer rather than a
+refusal. The behaviour the persona rewards and the behaviour the golden set measures are in
+direct tension. Retesting the same set against the non-persona `lecture-qa` template is the
+obvious next experiment and costs one run.
 
 **`agents`** — one user-created RAG agent: one corpus, one config, one namespace
 | Column | Notes |
@@ -337,12 +549,25 @@ or re-embed without re-parsing the original files.
 | `chunk_size`, `chunk_overlap` | Makes the Build #1 chunk-size experiment reproducible |
 | `chunk_count`, `started_at`, `finished_at`, `status` | |
 
-### 4.3 Query & trace
+### 4.4 Query & trace
+
+**`conversations`** — one thread of turns against one agent (§3.7)
+| Column | Notes |
+|---|---|
+| `agent_id` → agents, `user_id` → users | Cascade on both |
+| `title` | Auto-derived from the first question; renameable |
+| `is_archived`, `updated_at` | The chat list sorts on `updated_at` |
+
+`updated_at` is maintained by the ORM's `onupdate`, **not** a database trigger — appending a
+`queries` row does not touch the conversation, so whatever records a turn must also write the
+conversation or threads never reorder.
 
 **`queries`** — one row per question asked
 | Column | Notes |
 |---|---|
 | `user_id`, `session_id` | |
+| `conversation_id` → conversations | **Nullable.** NULL means a one-shot question outside any thread — the rows that predate §3.7 — so every reader must handle it rather than assume a thread |
+| `rewritten_question` | The standalone question actually embedded, or NULL when no rewrite fired. Never a copy of the question |
 | `question`, `answer` | |
 | `model_used`, `latency_ms` | |
 | `prompt_tokens`, `completion_tokens` | Cost attribution |
@@ -366,29 +591,51 @@ or re-embed without re-parsing the original files.
 This table does double duty: it powers citations in the UI, and it supplies the
 `contexts` field Ragas needs for context precision and recall.
 
-### 4.4 Evaluation
+### 4.5 Evaluation
 
-**`golden_questions`** — the fixed test set
+**`golden_questions`** — the test set, **per agent**
 | Column | Notes |
 |---|---|
+| `agent_id` → agents | Nullable for legacy rows; **every read must filter on it explicitly** |
 | `question`, `reference_answer` | Reference answer required by `context_recall` |
 | `expected_behaviour` | `answer` / `refuse` — refusal is a correct outcome |
+| `source` | `ai_suggested` / `edited` / `manual` / `imported` — provenance is the point of the editor |
+| `order_index` | Stable display order; also the tiebreak that keeps two runs of one set comparable |
 | `is_active` | Retire questions without deleting history |
+
+Scoping was added late. A bare `select(GoldenQuestion).where(is_active)` now silently mixes
+unscoped legacy rows into whichever agent is being scored — reintroducing at the query layer
+exactly the failure the column was added to prevent. Filter on `agent_id` as well.
 
 **`eval_runs`** — one row per scorecard
 | Column | Notes |
 |---|---|
-| `user_id`, `judge_model`, `status` | |
-| `started_at`, `finished_at` | |
-| `notes` | What changed since last run — the point of eval-driven development |
+| `agent_id`, `user_id`, `status` | `pending` / `running` / `completed` / `failed` |
+| `judge_model`, `generation_model` | **Both**, recorded per run — see below |
+| `progress_done`, `progress_total` | A run takes 23–25 min; the UI polls these |
+| `summary` (JSONB) | Aggregate scores, `weakest_metric`, `scored_count`, refusal tally, resolved investment advice |
+| `error` | Run-level failure. Distinct from `eval_results.error` |
+| `started_at`, `finished_at`, `notes` | `notes` is what changed since last run — how two runs become an experiment rather than two numbers |
+
+`generation_model` is stored **per run**, never read back through `agents.generation_model`
+at display time: the agent's setting can change after a run, and reading it live would
+attribute a score to a model that never produced the answer. When the two model columns are
+equal the run is self-judged, and the scorecard says so.
+
+`summary` is JSONB rather than four float columns because it also carries the weakest-metric
+pointer and its advice, is written once at the end of a run, and will grow as metrics are
+added. Nothing in the database validates its shape, so it is serialised through a single
+Pydantic model rather than a hand-built dict.
 
 **`eval_results`** — one row per question per run
 | Column | Notes |
 |---|---|
-| `eval_run_id`, `golden_question_id`, `query_id` | |
-| `faithfulness`, `answer_relevance`, `context_precision`, `context_recall` | |
+| `eval_run_id`, `golden_question_id`, `query_id` | `query_id` joins an eval answer back into the normal Trace view |
+| `faithfulness`, `answer_relevance`, `context_precision`, `context_recall` | NULL means *not measured*, never zero |
+| `behaviour_ok` | Did it answer / refuse as expected? Not derivable from the floats — a correct refusal is four NULLs and would otherwise be indistinguishable from a crash |
+| `error` | One question failing must not void the run |
 
-### 4.5 Supporting tables
+### 4.6 Supporting tables
 
 **`feedback`** — `query_id`, `user_id`, `rating` (+1/−1), `comment`.
 Ten golden questions catch regressions; real users catch what you didn't think to test.
@@ -401,7 +648,7 @@ accounting is how you see it coming rather than discovering it on a bill.
 Day 1 lists "a full audit trail of every retrieval" as one of the reasons to build rather
 than buy. This table is what makes that claim true.
 
-### 4.6 Indexes
+### 4.7 Indexes
 
 `users(google_sub)` · `sessions(token_hash)` · `sessions(user_id, expires_at)` ·
 `documents(user_id)` · `chunks(document_id)` · `chunks(pinecone_id)` ·
@@ -429,6 +676,17 @@ environment settings. `.env.example` is the committed template.
 | `SESSION_SECRET_KEY` | Cookie signing | ❌ app convention |
 | `FRONTEND_URL` | CORS allowlist, post-login redirect | ❌ app convention |
 | `RENDER_API_KEY` | Local deploy tooling only | ❌ **never** used by the app |
+| `ENVIRONMENT` | Gates the dev-login route | ❌ **defaults to `development`** |
+| `DEV_AUTH_ENABLED` | Gates the dev-login route | ❌ defaults to `false` |
+| `MAX_UPLOAD_MB` | Upload cap (§3.3) | ❌ defaults to 50 |
+| `INGEST_IN_BACKGROUND` | Off-request ingest (§3.3) | ❌ defaults to `true` |
+| `RAGAS_JUDGE_MODEL` | Stage 3 judge (§2.1) | ❌ defaults to `gemma-4-31b-it` |
+| `RAGAS_MAX_CONCURRENCY` | Judged calls in flight | ❌ defaults to 2, for free-tier rate limits |
+
+**`ENVIRONMENT` must be set to `production` on Render.** It defaults to `development`, so on
+the deployed service only two of the dev-login route's three gates are doing work. The route
+still fails closed there — `DEV_AUTH_ENABLED` is false and `request.client.host` behind
+Render's proxy is the proxy, never loopback — but a gate that is inert is not a gate.
 
 `langchain-google-genai` checks `GOOGLE_API_KEY` first, then `GEMINI_API_KEY`.
 
@@ -746,23 +1004,36 @@ AgenticRAG/
 │   ├── app/
 │   │   ├── main.py              FastAPI app, CORS, middleware
 │   │   ├── config.py            Settings from env
-│   │   ├── api/                 Route modules (§3.7)
+│   │   ├── api/                 Route modules (§3.8)
 │   │   ├── auth/                Authlib wiring, session management
-│   │   ├── db/                  SQLAlchemy models + session factory
+│   │   ├── db/                  SQLAlchemy models, seed data, personas
 │   │   ├── rag/
 │   │   │   ├── retriever.py     THE SEAM — built in exactly one place
 │   │   │   ├── ingest.py        Load → chunk → embed → upsert
-│   │   │   ├── pipeline.py      Stage 1 chain / Stage 2 loop
+│   │   │   ├── pipeline.py      Stage 1 chain + history-aware rewrite
+│   │   │   ├── delete.py        Vectors before rows (§7)
+│   │   │   ├── jobs.py          Background ingest — own DB session
 │   │   │   └── trace.py         Decision logging
-│   │   └── eval/                Ragas wiring, golden set runner
+│   │   └── eval/
+│   │       ├── generate.py      LLM-suggested golden questions (§3.6.1)
+│   │       ├── ragas_runner.py  The four metrics, judge + embeddings
+│   │       ├── metrics_guide.py Weakest metric → next investment (§3.6.3)
+│   │       └── jobs.py          Background eval run — own DB session
 │   ├── alembic/                 Migrations
 │   └── requirements.txt
 ├── frontend/
-│   ├── src/                     Five views (§2.2)
+│   ├── src/
+│   │   ├── views/               Login · Dashboard · AgentDetail
+│   │   │                        (+ Chat · Documents · Evaluate tabs)
+│   │   ├── components/          Message · CitationCard · TracePanel ·
+│   │   │                        Scorecard · GoldenSetEditor
+│   │   └── lib/                 api.ts — the only door to the backend
 │   ├── package.json
 │   └── vite.config.ts
 ├── scripts/
 │   ├── create_index.py          Pinecone provisioning (idempotent)
+│   ├── migrate_index.py         Blue/green index migration (§7)
+│   ├── slice_check.py           RAG end-to-end check
 │   └── create_render_db.py      Render Postgres provisioning (idempotent)
 ├── docs/                        Workshop PDFs
 ├── .env.example
@@ -830,30 +1101,42 @@ text pipeline is unaffected — this only gates the citation-image feature.
 
 ---
 
-Infrastructure is complete. What remains is application code.
+Infrastructure is complete. Stages 1 and 3 are built; Stage 2 is half-built.
 
-| # | Item | Blocking? |
+| # | Item | Status |
 |---|---|---|
-| 1 | Seed `agent_templates` (Lecture Q&A, Policy Lookup, From scratch) | Blocks agent creation |
-| 2 | Implement OAuth routes + session middleware (`app/auth/`) | Yes — everything is behind login |
-| 3 | Implement agent CRUD + admin listing | Blocks the marketplace flow |
-| 4 | Add RAG dependencies (langchain, langchain-google-genai, langchain-pinecone, langchain-cohere, pypdf) | Yes |
-| 5 | Implement ingest pipeline, namespace-scoped (`app/rag/ingest.py`) | Blocks Stage 1 |
-| 6 | Implement retriever seam + Stage 1 chain (`app/rag/`) | Blocks Stage 1 |
-| 7 | Implement Stage 2 loop + trace writing | Blocks Stage 2 |
-| 8 | Build the 10-question golden set + Ragas wiring | Blocks Stage 3 |
-| 9 | Build the React views (dashboard, create, agent tabs, admin) | Yes — UI is a scaffold only |
-| 10 | Object storage for slide images (R2/S3) | Only gates citation images |
-| 11 | Test whether `gemma-4-31b-it` supports structured output; if so, drop `DECISION_MODEL` | No |
-| 12 | Decide whether the workshop PDFs belong in a public repo | No — see below |
+| 1 | Seed `agent_templates` | ✅ **8 templates**, five of them teaching personas (§4.2) |
+| 2 | OAuth routes + session middleware (`app/auth/`) | ✅ done |
+| 3 | Agent CRUD | ✅ done — admin listing still outstanding |
+| 4 | RAG dependencies | ✅ done, plus `ragas`, `langchain-community<0.4`, `python-multipart` |
+| 5 | Ingest pipeline, namespace-scoped | ✅ done, now 50 MB and off-request (§3.3) |
+| 6 | Retriever seam + Stage 1 chain | ✅ done |
+| 7 | **Stage 2 loop** + trace writing | ◐ trace, rerank and a rewriter all exist; the **score-triggered loop** does not |
+| 8 | 10-question golden set + Ragas wiring | ✅ done, with authoring and editing (§3.6.1) |
+| 9 | React views | ✅ done — Login · Dashboard · Chat · Documents · Evaluate |
+| 10 | Object storage for slide images (R2/S3) | Open — only gates citation images |
+| 11 | Does `gemma-4-31b-it` support structured output? | ✅ **yes**, via `function_calling`; `DECISION_MODEL` collapsed onto it |
+| 12 | Workshop PDFs in a public repo | Open — see below |
+| **13** | **SSE streaming** (§2.2) | Open — **now the largest UX gap**, 30–60 s of blank waiting per persona turn |
+| **14** | **OAuth consent brand reads "Bedtime Story"** | Open — console-only fix, and it is the first screen an attendee sees |
+| **15** | **Move the eval judge off the generation model** | Open — measured, not theoretical (§2.1) |
+| **16** | **Coaching personas fail refusals** (`0/2`) | Open — measured twice (§4.2) |
+| **17** | Multimodal embedding of PDFs and images | Open — deliberately deferred, see §2.3 |
+| **18** | Deleting a document destroys past queries' stored contexts | Open — FK cascade; costs Stage 3 its evidence |
+| **19** | Blocking SDK calls inside `async def` | Open — uniform deferral; fix all call sites together |
 
-**Resolved:** the local IP `155.69.165.66/32` is on the Postgres allow-list; the redirect
-URI has been corrected to the real Render hostname; `DATABASE_URL` on the service is the
-internal URL.
+Items 13–19 were all discovered by building and measuring, not by planning. Items 15 and 16
+are the direct output of Stage 3 and are the strongest argument for having built it.
 
-**Watch:** that allow-list entry is a single IP on what looks like a campus network. If
-your public IP changes, local database access stops working and
-`scripts/create_render_db.py` will need the new address added. Deployed traffic is
+**Resolved:** the redirect URI has been corrected to the real Render hostname;
+`DATABASE_URL` on the service is the internal URL.
+
+**Watch — and this has now bitten twice.** The Postgres allow-list holds fixed `/32`
+entries, so moving between the campus network and anywhere else silently revokes local
+database access; it surfaces as `ConnectionDoesNotExistError`, which names no firewall.
+Currently allowed: `155.69.165.66/32` (campus) and `116.88.179.94/32`. Diagnose with
+`curl -s https://api.ipify.org` before reading the traceback, and note that Render's PATCH
+**replaces** the whole list, so every entry to keep must be resent. Deployed traffic is
 unaffected — it uses the private network.
 
 **On item 6.** The repository is public and the three source PDFs total roughly 17 MB of

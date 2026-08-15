@@ -20,6 +20,16 @@ time and would cost it again.
 | Provision Postgres | `python scripts/create_render_db.py [--dry-run]` |
 | RAG end-to-end check | `backend/.venv/Scripts/python.exe scripts/slice_check.py` |
 | Tear down that check | `backend/.venv/Scripts/python.exe scripts/slice_check.py --cleanup` |
+| **Why is the DB unreachable?** | `curl -s https://api.ipify.org` — compare against the allow-list |
+| **Did `pip freeze` break the build?** | `grep -n pywin32 backend/requirements.txt` — the marker must survive |
+| **Which Pinecone namespaces exist?** | see "namespace counts" under *Embeddings and Pinecone* |
+
+Both of the middle two are diagnostics for failures this project has hit **twice each**. Run
+them before reading a traceback, not after.
+
+**Local dev needs `DEV_AUTH_ENABLED=true` and `ENVIRONMENT=development` in `.env`** to use
+the dev-login shim; both are absent from `.env.example` on purpose. See the Google OAuth
+section for why that route is gated three ways.
 
 ---
 
@@ -44,8 +54,25 @@ time and would cost it again.
 - **The retriever is constructed in exactly one place** (`backend/app/rag/retriever.py`).
   That is what keeps the Stage 1 → Stage 2 change a one-liner. Do not call
   `similarity_search()` anywhere else.
+- **API routes are nested under the agent** (`/api/agents/{agent_id}/...`) and resolve through
+  `owned_agent` in `app/api/deps.py`. PRD §3.8's original flat `/api/documents` predates the
+  move of tenancy from users to agents, and flat routes would have to carry the agent id in a
+  body or query param — exactly the client-supplied scoping §7 forbids. Nesting makes the
+  constraint structural: no request can be expressed without naming an agent. The three routes
+  reached by their own id (`/api/conversations/{id}`, `/api/golden-questions/{id}`,
+  `/api/eval-runs/{id}`) have no `agent_id` to bind, so they check ownership by hand — those
+  are the highest-risk lines in the codebase and each says so in a comment.
+- **There is one question-rewriter, not two.** History-aware contextualisation (turning "what
+  is its power budget?" into a standalone question) and PRD §3.5's Stage 2 rewrite loop are
+  different *triggers* — coreference versus a low top score — on the same machinery. Stage 2
+  must compose with the existing rewriter in `pipeline.py` rather than add a second one, or
+  the trace will show two REWRITE events with no way to tell which fired why.
 - **ASCII in `print()`.** The Windows console codepage mangles em-dashes into `�`. Use
-  them freely in Markdown and comments, not in terminal output.
+  them freely in Markdown and comments, not in terminal output. This has now broken three
+  throwaway verification scripts in this repo — an emoji from `agent_templates.icon`, a `§`,
+  and a `│` copied out of the repo-layout tree. It is not only about em-dashes, and it is not
+  only about application code: **any** script that prints text read from the database or from
+  a Markdown file will hit it. `ascii(value)` when you just need to see what is there.
 
 ---
 
@@ -336,6 +363,35 @@ cannot keep the moment a persona is selected, and a progress note that under-pro
 worse than none — the user starts counting against it and concludes it has hung. Second,
 SSE streaming (PRD §2.2, still unbuilt) went from a nice-to-have to the main outstanding UX
 problem: 45 s of blank waiting is the worst part of the product now.
+
+### Background jobs
+
+Two things now run off the request thread — document ingest (`app/rag/jobs.py`) and eval runs
+(`app/eval/jobs.py`) — and both hit the same traps.
+
+**A `BackgroundTasks` callback must open its OWN database session.** The request's session is
+already closed by the time the task runs. Passing it in, or passing ORM objects loaded from
+it, fails later with a closed-connection or wrong-loop error whose traceback points at
+SQLAlchemy internals rather than at the handoff. **Pass ids and bytes; re-load inside the
+job.** Both job modules do this, and both say so in a comment.
+
+**A background task that dies silently leaves a row stuck at `processing` forever**, which is
+worse than a row marked `failed`, because "processing" looks like progress and nobody
+investigates. Every job writes a terminal status in a `finally`, and the failure text goes
+somewhere the API can surface — `documents` has no `error` column, so ingest failures land in
+`audit_log` under `app.rag.ingest.INGEST_FAILURE_ACTION`. Import that constant; do not retype
+the string.
+
+**Blocking SDK calls inside `async def` are the standing deferral here.** Pinecone, Cohere
+and the embedding calls are synchronous, and Render's starter plan runs a single uvicorn
+worker, so a minutes-long blocking call stalls every other request. The background jobs wrap
+theirs; the in-request call sites in `ingest.py` still do not. Fix them together when it
+matters, not one at a time.
+
+**A ten-question eval run takes 23–25 minutes** (measured twice: 1497 s and 1380 s). That is
+ten full agent turns at 30–60 s each plus four judged calls per question. It is why the run is
+a job with `progress_done`/`progress_total` and not a request, and why the UI warns before
+starting rather than after.
 
 ### Render
 
