@@ -3,6 +3,9 @@
 Multi-user agentic RAG over private documents, built for the NTU "Agentic RAG Harness
 Engineering" workshop and deployed on Render.
 
+**New here, or resuming work? Start with [HANDOFF.md](HANDOFF.md)** — current state, what
+exists, and what to do next.
+
 **[PRD.md](PRD.md) is the specification** — tech stack, architecture, database schema,
 deployment configuration, and the constraints that cannot be reversed. Read §7 before
 changing anything infrastructural.
