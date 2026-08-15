@@ -16,10 +16,24 @@
  * means show Login. Every later 401 from any call routes to the same place via
  * the handler registered below, so an expired session anywhere in the app ends
  * at the login screen instead of at a broken page.
+ *
+ * **A 401 and a failed request are different answers, and conflating them cost
+ * a real debugging session.** This bootstrap used to `.catch()` everything and
+ * fall through to Login, on the reasoning that a 401 here "is not an error, it
+ * is the answer to the question". That is true of a 401 and false of everything
+ * else: `lib/api.ts` throws `ApiError(0, "Cannot reach the API...")` when fetch
+ * itself rejects, so a timeout, a DNS blip or a backend restart also rendered
+ * the login screen -- telling a signed-in user their session was gone, when in
+ * fact the question was never asked. The cookie is still in the jar, so a manual
+ * reload fixes it, which is exactly what makes the bug look like a flaky login
+ * rather than a bug.
+ *
+ * 401 means *nobody is signed in* -> Login.
+ * Anything else means *we could not find out* -> say so, and offer Retry.
  */
 
-import { useEffect, useState } from "react";
-import { api, setUnauthorizedHandler } from "./lib/api.ts";
+import { useCallback, useEffect, useState } from "react";
+import { ApiError, api, setUnauthorizedHandler } from "./lib/api.ts";
 import type { User } from "./lib/types.ts";
 import { ErrorBanner, Spinner, errorMessage } from "./components/ui.tsx";
 import Login from "./views/Login.tsx";
@@ -33,6 +47,10 @@ export default function App() {
   const [booting, setBooting] = useState(true);
   const [view, setView] = useState<View>({ kind: "dashboard" });
   const [error, setError] = useState<string | null>(null);
+  // Distinct from `error`, which banners a failure inside the signed-in shell.
+  // This one means the session question could not be ASKED, so there is no
+  // shell to banner it in yet.
+  const [bootError, setBootError] = useState<string | null>(null);
 
   // Registered before the first request goes out, and re-registered on every
   // mount (StrictMode mounts twice in development; the second registration
@@ -45,24 +63,43 @@ export default function App() {
     return () => setUnauthorizedHandler(null);
   }, []);
 
-  useEffect(() => {
-    let cancelled = false;
-    api<User>("/api/auth/me")
-      .then((me) => {
-        if (!cancelled) setUser(me);
-      })
-      .catch(() => {
-        // Swallowed deliberately, and this is the ONE place that is right.
-        // A 401 here is not an error, it is the answer to the question: nobody
-        // is signed in. Every other call surfaces its message.
-      })
-      .finally(() => {
-        if (!cancelled) setBooting(false);
-      });
-    return () => {
-      cancelled = true;
-    };
+  // `loadSession` rather than an inline effect body, because Retry below has to
+  // run exactly the same thing. A second copy of this that drifted from the
+  // first would be a bug nobody could see.
+  const loadSession = useCallback(async (signal?: { cancelled: boolean }) => {
+    const live = () => !signal?.cancelled;
+    if (live()) {
+      setBooting(true);
+      setBootError(null);
+    }
+    try {
+      const me = await api<User>("/api/auth/me");
+      if (live()) setUser(me);
+    } catch (cause) {
+      // 401 is the ANSWER to the question, not a failure to ask it: nobody is
+      // signed in, so fall through to Login with no error shown.
+      if (cause instanceof ApiError && cause.status === 401) {
+        if (live()) setUser(null);
+      } else if (live()) {
+        // Anything else -- ApiError(0) from a rejected fetch, a 500, a backend
+        // mid-restart -- means we never found out. Rendering Login here would
+        // assert "you are signed out" on no evidence, and the assertion is
+        // usually FALSE: the httpOnly cookie is still in the jar, so the very
+        // next request would have worked. Say what happened and offer Retry.
+        setBootError(errorMessage(cause));
+      }
+    } finally {
+      if (live()) setBooting(false);
+    }
   }, []);
+
+  useEffect(() => {
+    const signal = { cancelled: false };
+    void loadSession(signal);
+    return () => {
+      signal.cancelled = true;
+    };
+  }, [loadSession]);
 
   async function logout() {
     setError(null);
@@ -89,6 +126,34 @@ export default function App() {
     );
   }
 
+  // Ordered BEFORE the `!user` check on purpose. When the session question
+  // could not be answered, `user` is also null -- and falling through to Login
+  // is precisely the bug this branch exists to prevent.
+  if (bootError) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-slate-950 px-6">
+        <div className="w-full max-w-md space-y-4 text-center">
+          <h1 className="text-lg font-semibold tracking-tight text-slate-100">
+            Could not check your session
+          </h1>
+          <ErrorBanner error={bootError} />
+          <p className="text-sm text-slate-400">
+            You have not been signed out &mdash; the app could not reach the API to
+            find out. If you signed in just now, your session is most likely intact.
+          </p>
+          <button
+            type="button"
+            data-testid="retry-session"
+            onClick={() => void loadSession()}
+            className="min-h-11 rounded-md border border-slate-700 bg-slate-900 px-4 py-2 text-sm text-slate-200 transition hover:border-slate-600"
+          >
+            Try again
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   if (!user) {
     return <Login onAuthenticated={setUser} />;
   }
@@ -102,11 +167,11 @@ export default function App() {
         thread has got to.
       */}
       <nav className="sticky top-0 z-20 border-b border-slate-800 bg-slate-950/90 backdrop-blur">
-        <div className="mx-auto flex max-w-6xl items-center justify-between gap-4 px-6 py-3">
+        <div className="mx-auto flex max-w-6xl items-center justify-between gap-3 px-4 py-3 sm:px-6">
           <button
             type="button"
             onClick={() => setView({ kind: "dashboard" })}
-            className="text-sm font-semibold tracking-tight text-slate-100 transition hover:text-white"
+            className="min-h-11 rounded-md px-1 text-sm font-semibold tracking-tight text-slate-100 transition hover:text-white"
           >
             Agentic RAG
           </button>
@@ -123,7 +188,7 @@ export default function App() {
               type="button"
               data-testid="logout"
               onClick={() => void logout()}
-              className="rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-sm text-slate-300 transition hover:border-slate-600"
+              className="min-h-11 rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-300 transition hover:border-slate-600"
             >
               Sign out
             </button>
