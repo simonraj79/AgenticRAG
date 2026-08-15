@@ -220,7 +220,19 @@ export function Reveal({
 }) {
   return (
     <details data-testid={testId} className="group rounded-lg border border-slate-800 bg-slate-950/60">
-      <summary className="cursor-pointer list-none px-4 py-2.5 text-xs font-medium tracking-wide text-slate-400 uppercase transition select-none hover:text-slate-200">
+      {/*
+        `min-h-11` plus `flex items-center`, not padding. A `<summary>` is the
+        one interactive element in this file that is not a `<button>`, which is
+        exactly how it stayed at ~36px while every button around it was brought
+        to the 44px convention -- it was never in the audit's list because
+        nothing about it looks like a control.
+
+        The flex box is required, not decoration: `min-h-11` on its own grows the
+        box and leaves the label sitting at the top of it, so the target gets
+        bigger while the text appears to drift upward. The marker span keeps
+        `inline-block` for its rotate transform.
+      */}
+      <summary className="flex min-h-11 cursor-pointer list-none items-center px-4 py-2.5 text-xs font-medium tracking-wide text-slate-400 uppercase transition select-none hover:text-slate-200">
         <span className="mr-2 inline-block transition group-open:rotate-90" aria-hidden="true">
           &rsaquo;
         </span>

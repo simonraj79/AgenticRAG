@@ -509,7 +509,7 @@ function ResultRow({
             type="button"
             aria-expanded={open}
             onClick={onToggle}
-            className="rounded-md border border-slate-700 bg-slate-900 px-2.5 py-1 text-xs text-slate-300 transition hover:border-slate-600"
+            className="min-h-11 rounded-md border border-slate-700 bg-slate-900 px-2.5 py-1 text-xs text-slate-300 transition hover:border-slate-600"
           >
             {open ? "Hide" : "Answer"}
           </button>

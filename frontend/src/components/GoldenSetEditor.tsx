@@ -358,7 +358,7 @@ export default function GoldenSetEditor({
             data-testid="golden-suggest"
             disabled={suggesting}
             onClick={() => void suggest()}
-            className="rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-sm text-slate-200 transition hover:border-slate-600 disabled:opacity-50"
+            className="min-h-11 rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-sm text-slate-200 transition hover:border-slate-600 disabled:opacity-50"
           >
             {suggesting ? "Suggesting…" : "Suggest 10 questions"}
           </button>
@@ -375,7 +375,10 @@ export default function GoldenSetEditor({
             href={evaluation.exportUrl(agentId)}
             target="_blank"
             rel="noreferrer noopener"
-            className="rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-sm text-slate-200 transition hover:border-slate-600"
+            // `inline-flex items-center` alongside `min-h-11`: an anchor is not
+            // a flex container by default, so the minimum height would stretch
+            // the box and leave the text sitting at the top of it.
+            className="inline-flex min-h-11 items-center rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-sm text-slate-200 transition hover:border-slate-600"
           >
             Export JSON
           </a>
@@ -499,7 +502,7 @@ export default function GoldenSetEditor({
                           onChange={(event) =>
                             setDraft({ ...draft, expected_behaviour: event.target.value })
                           }
-                          className="ml-2 rounded-md border border-slate-700 bg-slate-950 px-2 py-1 text-sm text-slate-100 outline-none"
+                          className="ml-2 min-h-11 rounded-md border border-slate-700 bg-slate-950 px-2 py-1 text-sm text-slate-100 outline-none"
                         >
                           <option value="answer">answer</option>
                           <option value="refuse">refuse</option>
@@ -525,14 +528,14 @@ export default function GoldenSetEditor({
                         data-testid="golden-save"
                         disabled={savingId === row.id}
                         onClick={() => void saveEdit(row.id)}
-                        className="rounded-md bg-emerald-500 px-3 py-1.5 text-sm font-semibold text-emerald-950 transition hover:bg-emerald-400 disabled:opacity-50"
+                        className="min-h-11 rounded-md bg-emerald-500 px-3 py-1.5 text-sm font-semibold text-emerald-950 transition hover:bg-emerald-400 disabled:opacity-50"
                       >
                         {savingId === row.id ? "Saving…" : "Save"}
                       </button>
                       <button
                         type="button"
                         onClick={() => setEditingId(null)}
-                        className="rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-sm text-slate-300 transition hover:border-slate-600"
+                        className="min-h-11 rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-sm text-slate-300 transition hover:border-slate-600"
                       >
                         Cancel
                       </button>
@@ -579,7 +582,11 @@ export default function GoldenSetEditor({
                         type="button"
                         data-testid="golden-edit"
                         onClick={() => beginEdit(row)}
-                        className="rounded-md border border-slate-700 bg-slate-900 px-2.5 py-1 text-xs text-slate-300 transition hover:border-slate-600"
+                        // `min-w-11` as well as `min-h-11`: "Edit" is four
+                        // characters at `text-xs`, so height alone would leave
+                        // a 44x28 target -- the note at CreateAgentWizard's
+                        // ReviewRow makes the same point about the same word.
+                        className="min-h-11 min-w-11 rounded-md border border-slate-700 bg-slate-900 px-2.5 py-1 text-xs text-slate-300 transition hover:border-slate-600"
                       >
                         Edit
                       </button>
@@ -638,7 +645,7 @@ export default function GoldenSetEditor({
               onChange={(event) =>
                 setNewDraft({ ...newDraft, expected_behaviour: event.target.value })
               }
-              className="ml-2 rounded-md border border-slate-700 bg-slate-950 px-2 py-1 text-sm text-slate-100 outline-none"
+              className="ml-2 min-h-11 rounded-md border border-slate-700 bg-slate-950 px-2 py-1 text-sm text-slate-100 outline-none"
             >
               <option value="answer">answer</option>
               <option value="refuse">refuse</option>
@@ -650,7 +657,7 @@ export default function GoldenSetEditor({
             data-testid="golden-add"
             disabled={adding || newDraft.question.trim() === ""}
             onClick={() => void addQuestion()}
-            className="rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-sm text-slate-200 transition hover:border-slate-600 disabled:opacity-50"
+            className="min-h-11 rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-sm text-slate-200 transition hover:border-slate-600 disabled:opacity-50"
           >
             {adding ? "Adding…" : "Add question"}
           </button>
@@ -692,7 +699,7 @@ export default function GoldenSetEditor({
           data-testid="golden-import"
           disabled={importing || importText.trim() === ""}
           onClick={() => void importQuestions(importText)}
-          className="mt-3 rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-sm text-slate-200 transition hover:border-slate-600 disabled:opacity-50"
+          className="mt-3 min-h-11 rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-sm text-slate-200 transition hover:border-slate-600 disabled:opacity-50"
         >
           {importing ? "Importing…" : "Import"}
         </button>

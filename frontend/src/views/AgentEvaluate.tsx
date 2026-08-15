@@ -307,7 +307,13 @@ export default function AgentEvaluate({
         </p>
 
         <div className="mt-4 flex flex-wrap items-end gap-3">
-          <label className="min-w-[18rem] flex-1 text-xs text-slate-400">
+          {/* The `min-w` is gated on `sm` because it is a LAYOUT hint -- keep
+              the notes field and the run button on one line while there is room
+              for both -- and below `sm` there is not. 18rem is 288px against
+              248px of usable width at 320px (320 - 32 page padding - 40 card
+              padding), so unconditionally it forces the card wider than the
+              viewport and the whole document scrolls sideways. */}
+          <label className="flex-1 text-xs text-slate-400 sm:min-w-[18rem]">
             What changed since the last run?
             <input
               type="text"
@@ -324,7 +330,7 @@ export default function AgentEvaluate({
             data-testid="eval-run"
             disabled={starting || running || activeCount === 0}
             onClick={() => void startRun()}
-            className="rounded-md bg-emerald-500 px-4 py-2 text-sm font-semibold text-emerald-950 transition hover:bg-emerald-400 disabled:opacity-50"
+            className="min-h-11 rounded-md bg-emerald-500 px-4 py-2 text-sm font-semibold text-emerald-950 transition hover:bg-emerald-400 disabled:opacity-50"
           >
             {starting ? "Starting…" : running ? "Run in progress" : "Run evaluation"}
           </button>
@@ -390,7 +396,7 @@ export default function AgentEvaluate({
                   type="button"
                   data-testid="eval-recheck"
                   onClick={checkAgain}
-                  className="rounded-md border border-slate-700 bg-slate-900 px-2.5 py-1 font-medium text-slate-300 transition hover:border-slate-600"
+                  className="min-h-11 rounded-md border border-slate-700 bg-slate-900 px-2.5 py-1 font-medium text-slate-300 transition hover:border-slate-600"
                 >
                   Check again
                 </button>

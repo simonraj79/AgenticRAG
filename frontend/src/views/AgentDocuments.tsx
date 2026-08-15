@@ -289,7 +289,7 @@ export default function AgentDocuments({
             data-testid="doc-upload-submit"
             disabled={uploading || !file}
             onClick={() => void upload()}
-            className="rounded-md bg-emerald-500 px-4 py-2 text-sm font-semibold text-emerald-950 transition hover:bg-emerald-400 disabled:opacity-50"
+            className="min-h-11 rounded-md bg-emerald-500 px-4 py-2 text-sm font-semibold text-emerald-950 transition hover:bg-emerald-400 disabled:opacity-50"
           >
             {uploading ? "Uploading…" : "Upload and index"}
           </button>
@@ -326,7 +326,7 @@ export default function AgentDocuments({
                 type="button"
                 data-testid="doc-refresh"
                 onClick={() => void refreshNow()}
-                className="rounded-md border border-slate-700 bg-slate-900 px-2.5 py-1 font-medium text-slate-300 transition hover:border-slate-600"
+                className="min-h-11 rounded-md border border-slate-700 bg-slate-900 px-2.5 py-1 font-medium text-slate-300 transition hover:border-slate-600"
               >
                 Check again
               </button>
@@ -343,8 +343,78 @@ export default function AgentDocuments({
           />
         )}
 
+        {/*
+          The same six facts, rendered twice: a card list below `sm`, the table
+          at `sm` and up.
+
+          That duplication is the honest cost of a table on a phone, and it is
+          cheaper than the alternatives. Six columns at 375px do not reflow --
+          they scroll sideways, and the delete button, being last, sits off the
+          right edge until the user discovers a horizontal scroll they were
+          given no affordance for. Turning the rows into blocks with CSS keeps
+          one copy of the markup and produces a `<table>` whose semantics no
+          longer match what is on screen, with the header row either repeated
+          per cell or lost. So: two blocks, one source of data, and the pair
+          must be edited together -- a column added to one and not the other is
+          a fact the phone silently does not show.
+
+          The card list carries its OWN test ids rather than reusing the row
+          ones. Both copies are always in the DOM (one is display:none, which a
+          locator still matches), so sharing `doc-row` would make every
+          `getByTestId("doc-row")` resolve to two elements and throw under
+          Playwright's strict mode.
+        */}
         {documents.length > 0 && (
-          <div className="overflow-x-auto rounded-lg border border-slate-800">
+          <ul data-testid="doc-card-list" className="space-y-2 sm:hidden">
+            {documents.map((doc) => (
+              <li
+                key={doc.id}
+                data-testid="doc-card"
+                data-document-id={doc.id}
+                className="rounded-lg border border-slate-800 bg-slate-900/40 p-3"
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <span className="min-w-0 flex-1 break-words text-sm text-slate-200">
+                    {doc.filename}
+                  </span>
+                  <span data-testid="doc-card-status" data-status={doc.status}>
+                    <StatusPill status={doc.status} />
+                  </span>
+                </div>
+
+                {doc.error && (
+                  <p
+                    data-testid="doc-card-error"
+                    className="mt-2 text-xs whitespace-pre-wrap text-rose-300"
+                  >
+                    {doc.error}
+                  </p>
+                )}
+
+                <p className="mt-2 text-xs text-slate-400">
+                  {doc.chunk_count} {doc.chunk_count === 1 ? "chunk" : "chunks"} ·{" "}
+                  {formatBytes(doc.byte_size)} · {formatTimestamp(doc.created_at)}
+                </p>
+
+                {/* First-class on the card rather than tucked into a corner:
+                    on the narrow viewport this is the only delete there is. */}
+                <div className="mt-3">
+                  <ConfirmDeleteButton
+                    testId="doc-card-delete"
+                    label="Delete"
+                    confirmLabel="Delete + drop vectors?"
+                    size="sm"
+                    busy={deletingId === doc.id}
+                    onConfirm={() => void remove(doc.id)}
+                  />
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
+
+        {documents.length > 0 && (
+          <div className="hidden overflow-x-auto rounded-lg border border-slate-800 sm:block">
             <table className="w-full text-left text-sm">
               <thead className="bg-slate-900/60 text-xs tracking-wide text-slate-400 uppercase">
                 <tr>

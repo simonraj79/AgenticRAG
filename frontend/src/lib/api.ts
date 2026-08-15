@@ -32,6 +32,9 @@ import type {
   GoldenQuestion,
   GoldenQuestionInput,
   GoldenSetFileQuestion,
+  Handout,
+  HandoutDetail,
+  HandoutRequest,
   TraceEvent,
 } from "./types.ts";
 
@@ -358,4 +361,107 @@ export const evaluation = {
 
   deleteRun: (runId: string) =>
     api<{ ok: boolean }>(`/api/eval-runs/${encodeURIComponent(runId)}`, { method: "DELETE" }),
+};
+
+// --------------------------------------------------------------------------
+// Handouts
+// --------------------------------------------------------------------------
+
+/**
+ * The generated-asset routes, transcribed once.
+ *
+ * **Every path carries the agent id**, including the two that address a single
+ * handout by its own uuid. That is not repetition: nesting under `{agent_id}`
+ * is what makes ownership structural rather than checked by hand (PRD section
+ * 7). The three routes in this app that are reached by their own id --
+ * conversations, golden questions, eval runs -- have to verify ownership in
+ * Python, and they are the highest-risk lines in the backend. Handouts do not
+ * join that list.
+ *
+ * Everything here goes through `api()`, so `credentials: "include"` and the
+ * error unwrapping are not bypassed. `downloadUrl` is the one exception and it
+ * is not a request at all -- see below.
+ */
+export const handouts = {
+  /**
+   * One agent's handouts, newest first.
+   *
+   * All three filters are optional and all three are applied server-side. The
+   * panel reads the list twice with different filters -- once scoped to the
+   * open thread, once unscoped for "All handouts" -- which is why
+   * `conversationId` is a filter rather than something the client sorts out
+   * from one big response.
+   */
+  list: (
+    agentId: string,
+    opts: { conversationId?: string; kind?: string; limit?: number } = {},
+  ) => {
+    // Built with URLSearchParams rather than string concatenation so the values
+    // are escaped once, by the platform, and an absent filter contributes
+    // nothing at all -- `?kind=undefined` is a filter the backend would try to
+    // honour and match zero rows.
+    const query = new URLSearchParams();
+    if (opts.conversationId) query.set("conversation_id", opts.conversationId);
+    if (opts.kind) query.set("kind", opts.kind);
+    if (opts.limit !== undefined) query.set("limit", String(opts.limit));
+    const encoded = query.toString();
+    const suffix = encoded ? `?${encoded}` : "";
+    return api<Handout[]>(
+      `/api/agents/${encodeURIComponent(agentId)}/handouts${suffix}`,
+    );
+  },
+
+  /** One handout with `preview_text` and `source_code`. Fetched when a row is
+   *  expanded, never for the list: both fields can run to kilobytes and the
+   *  list renders up to 200 rows. Same fetch-on-first-open shape as
+   *  `TracePanel`. */
+  load: (agentId: string, handoutId: string) =>
+    api<HandoutDetail>(
+      `/api/agents/${encodeURIComponent(agentId)}/handouts/${encodeURIComponent(handoutId)}`,
+    ),
+
+  /**
+   * Ask for a handout. Answers **202** with the row already inserted at
+   * `status: "pending"` -- the bytes are written afterwards by a background
+   * job, so **the caller must poll `list` until the status changes** rather
+   * than treating this response as a finished file. Nothing about the returned
+   * row is downloadable yet: `byte_size` is 0 and the download route 409s.
+   *
+   * Polling stops when no row is pending, which is the shape `AgentEvaluate`
+   * already uses for eval runs. A fixed interval that never stops is the
+   * failure mode to avoid.
+   *
+   * A 409 here means the agent is at its handout quota. It is refused, never
+   * silently evicted -- a panel that deletes the user's oldest deck to make
+   * room for a chart is worse than one that says no.
+   */
+  create: (agentId: string, req: HandoutRequest) =>
+    api<Handout>(`/api/agents/${encodeURIComponent(agentId)}/handouts`, {
+      method: "POST",
+      json: req,
+    }),
+
+  remove: (agentId: string, handoutId: string) =>
+    api<{ ok: boolean }>(
+      `/api/agents/${encodeURIComponent(agentId)}/handouts/${encodeURIComponent(handoutId)}`,
+      { method: "DELETE" },
+    ),
+
+  /**
+   * A URL, not a request -- exactly like `evaluation.exportUrl` above.
+   *
+   * The download is a plain `<a href download>`, a navigation the browser owns,
+   * whose `Content-Disposition: attachment` header does the saving. The
+   * alternative -- fetch the bytes, wrap them in a Blob, click a synthetic
+   * link -- is inert inside the viewer sandbox, which blocks downloads a page
+   * starts itself, and it would also pull megabytes of image data through JS
+   * for no gain. The route is a cookie-authenticated GET and the session cookie
+   * is `SameSite=None; Secure` (PRD section 6.5), so the link carries it.
+   *
+   * The same URL is the `src` of a chart's thumbnail. **Only once `status` is
+   * "ready"**: pointed at a pending row it answers 409 and the `<img>` renders
+   * broken.
+   */
+  downloadUrl: (agentId: string, handoutId: string) =>
+    `${API_URL}/api/agents/${encodeURIComponent(agentId)}/handouts/${encodeURIComponent(handoutId)}/download`,
 };

@@ -85,6 +85,21 @@ export type Agent = {
   pedagogy: string | null;
   icon: string | null;
   category: string | null;
+  /**
+   * Whether the model is handed `search_corpus` and `run_python` and left to
+   * decide for itself whether to call them.
+   *
+   * **False for every agent that existed before the tool loop shipped, and that
+   * asymmetry is deliberate.** The migration backfills existing rows to false
+   * while the server default for new rows is true, so an agent whose scorecard
+   * is already recorded in EVAL.md keeps behaving exactly as it was measured --
+   * a tool loop changes the answer, and a historical run that silently stops
+   * being reproducible is worse than one that was never taken.
+   */
+  tools_enabled: boolean;
+  /** Tool round-trips allowed in one turn before the loop is closed and an
+   *  answer is forced. A ceiling, not a target: most turns use none. */
+  max_tool_steps: number;
   document_count: number;
   created_at: string;
 };
@@ -137,6 +152,120 @@ export type Citation = {
   text_preview: string;
 };
 
+// --------------------------------------------------------------------------
+// Handouts -- the generated-asset panel
+// --------------------------------------------------------------------------
+
+/**
+ * One generated file: a chart, a slide deck, a data table or a study sheet.
+ *
+ * Handouts arrive by two routes and this type does not separate them beyond
+ * `origin`. "tool" means the agent wrote Python in the middle of answering and
+ * it produced a file -- the user asked to chart some numbers and got a chart as
+ * part of the answer. "recipe" means the user pressed a button in the panel and
+ * described what they wanted, with no conversation turn involved. Same row,
+ * same list, one small label.
+ *
+ * `kind` is "chart" | "deck" | "sheet" | "table", `status` is "pending" |
+ * "ready" | "failed" and `origin` is "tool" | "recipe" -- all three typed as
+ * plain `string` for the reason recorded on `GoldenQuestion` below: they are
+ * `String(16)` columns rather than enums specifically so a fifth recipe costs a
+ * seed row instead of a migration. A union here would make this file the thing
+ * that breaks when the backend gains a value, which is backwards. Every read
+ * site must render an unrecognised value rather than throw.
+ *
+ * **A `pending` handout has no downloadable content yet.** Creation answers 202
+ * and a background job writes the bytes afterwards, so until `status` flips to
+ * "ready" the row is real and listable but empty: `byte_size` is 0, the
+ * download route answers 409, and a thumbnail `<img>` pointed at that URL will
+ * fail. The row is returned early on purpose -- it is what the panel shows a
+ * spinner against -- but nothing may read its content on the strength of it
+ * existing. A row that failed carries `error`; a row still "pending" long after
+ * it was created means the job died without writing its terminal status.
+ *
+ * There is no `content` field, and that is a guard rather than an omission: the
+ * bytes never cross this boundary as JSON. They are fetched by a plain link --
+ * see `handouts.downloadUrl` in `api.ts`.
+ */
+export type Handout = {
+  id: string;
+  kind: string;
+  title: string;
+  filename: string;
+  mime_type: string;
+  /** 0 while `status` is "pending" -- nothing has been written yet. */
+  byte_size: number;
+  status: string;
+  origin: string;
+  /** Why a "failed" row failed. Without it a failure is a red card with no way
+   *  to find out what went wrong short of reading the server log. */
+  error: string | null;
+  /** The thread this was made in or from, null for a handout made from the
+   *  panel with no conversation open. Deleting the conversation CASCADEs, so a
+   *  handout listed under a thread does not outlive it. */
+  conversation_id: string | null;
+  /** The turn that produced it, for `origin: "tool"`. `ON DELETE SET NULL`
+   *  rather than cascade -- a handout outlives the query it came from. */
+  query_id: string | null;
+  created_at: string;
+};
+
+/**
+ * One handout, opened.
+ *
+ * Two extra fields, both fetched only when a row is expanded, because both can
+ * run to kilobytes and the list renders up to 200 rows.
+ *
+ * **`source_code` is shown, not hidden.** It is the Python that produced the
+ * file, and displaying it is a product decision rather than a debugging
+ * leftover: this is an application whose entire purpose is making a pipeline
+ * inspectable, so concealing the one step that generates an artefact would be
+ * the single place it stopped practising what it teaches. It is also the
+ * fastest route to understanding why a chart is wrong. Null for the "sheet"
+ * recipe, which the model writes directly with no sandbox involved.
+ *
+ * `preview_text` is the markdown body for a "sheet" and a caption otherwise, so
+ * a study sheet renders inline without a second request for its bytes.
+ */
+export type HandoutDetail = Handout & {
+  preview_text: string | null;
+  source_code: string | null;
+};
+
+/**
+ * One of the four things the panel offers to make.
+ *
+ * Client-side copy, deliberately: there is no endpoint that lists recipes,
+ * because the set is fixed at four and a round trip to learn what four buttons
+ * say would be a request for a constant. `key` is the value that goes into
+ * `HandoutRequest.recipe` and is what the backend's `RECIPES` dict is keyed on;
+ * the other three fields are label copy for the button.
+ */
+export type HandoutRecipe = {
+  key: string;
+  label: string;
+  /** One line under the button, saying what this recipe is for. */
+  blurb: string;
+  icon: string;
+};
+
+/**
+ * The create body -- named for what it is, since section 4.6 of the plan gives
+ * `handouts.create(agentId, req)` without naming `req`.
+ *
+ * `brief` is what the handout should cover, in the user's own words, and it is
+ * also what searches the corpus: a handout is grounded the same way an answer
+ * is, or it becomes the one place the product hallucinates freely.
+ * `conversation_id` adds the recent answers of a thread on top of that, which
+ * is the case the panel exists for ("chart what we just discussed"). Omitted,
+ * the brief alone still retrieves -- so the panel works with no thread open.
+ */
+export type HandoutRequest = {
+  recipe: string;
+  brief: string;
+  conversation_id?: string | null;
+};
+
 /** One turn as the server records it: the question, the answer, and everything
  *  needed to justify the answer. This is what a reloaded conversation is made
  *  of, and what a freshly asked turn is folded into. */
@@ -164,6 +293,21 @@ export type ChatMessage = {
   rewritten_question: string | null;
   created_at: string;
   citations: Citation[];
+  /**
+   * Files this turn produced, if the agent ran Python while answering.
+   *
+   * Carried on the replayed turn and not only on the fresh one, deliberately: a
+   * reloaded conversation must show the same thing the live one did, and the
+   * alternative -- the panel re-deriving which handout belongs to which turn
+   * from a separate list request -- puts the join in the client, where it can
+   * disagree with the server. Empty for every turn on an agent with tools off,
+   * and empty for every turn recorded before handouts existed.
+   */
+  handouts: Handout[];
+  /** How many tool round-trips the answer took; 0 when the model answered
+   *  without calling one, which is the common case. The count is a chip on the
+   *  turn -- the TOOL_CALL / TOOL_RESULT trace events hold the detail. */
+  tool_steps: number;
 };
 
 /** `POST .../ask`. The same turn as `ChatMessage`, minus the question (the
@@ -178,6 +322,18 @@ export type AskResult = {
   model_used: string | null;
   rewritten_question: string | null;
   citations: Citation[];
+  /**
+   * Files this turn just produced. Both fields default to empty server-side, so
+   * an agent with tools disabled serialises exactly as it did before.
+   *
+   * The panel prepends these rather than waiting for its 3-second poll to
+   * notice them -- a file the user explicitly asked for should not take three
+   * seconds to appear. On a narrow viewport, where the panel is a closed
+   * drawer, this is also what lets the answer carry a chip that opens it;
+   * otherwise the artefact is invisible on the device most likely to be used.
+   */
+  handouts: Handout[];
+  tool_steps: number;
 };
 
 /**

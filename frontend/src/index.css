@@ -102,6 +102,45 @@ summary::-webkit-details-marker {
 
 /*
   ------------------------------------------------------------------
+  Citation chips, inline in a rendered answer.
+
+  Here for the same reason as everything else in this file: no utility class can
+  give an element a hit area LARGER than the box it draws, and this is the one
+  control in the app where those two must differ. The chip is 24x24 because it
+  sits inline in prose -- a 44px inline-flex box would push every line of the
+  paragraph containing it apart, which is a worse defect than the one being
+  fixed -- while `min-h-11`, the 44px tap-target contract, still has to hold for
+  what is the most-tapped control in the product.
+
+  A centred, transparent ::after is the standard resolution: the chip renders
+  identically and the finger gets the area it actually needs. Nothing sets
+  `pointer-events` here on purpose -- the pseudo-element inherits the button's
+  own, which is what makes the enlarged region clickable rather than merely
+  painted.
+
+  The overlap with a neighbouring chip is real and harmless. `mx-0.5` separates
+  two adjacent chips by 4px, so their 44px regions do overlap -- but they
+  overlap over each other's MARGINS, not over each other's visible boxes, and a
+  tap landing in that sliver was ambiguous to the user before it was ambiguous
+  to the browser.
+*/
+
+.gw-chip {
+  position: relative;
+}
+
+.gw-chip::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 44px;
+  height: 44px;
+  transform: translate(-50%, -50%);
+}
+
+/*
+  ------------------------------------------------------------------
   The landing scene: CSS 3D, no dependency.
 
   Kept here rather than inline because @keyframes and `transform-style` have no

@@ -167,7 +167,16 @@ export default function App() {
         thread has got to.
       */}
       <nav className="sticky top-0 z-20 border-b border-slate-800 bg-slate-950/90 backdrop-blur">
-        <div className="mx-auto flex max-w-6xl items-center justify-between gap-3 px-4 py-3 sm:px-6">
+        {/*
+          `flex-wrap` on both rows is the floor, not the fix. At 320px the
+          brand, the monogram, the email, the admin pill and Sign out come to
+          more than the viewport with `gap-3` between them, and a flex row with
+          no wrap does not overflow its own box -- it overflows the DOCUMENT,
+          which is the horizontal scrollbar the whole app then inherits. Wrapping
+          converts that into a taller nav, which is merely ugly. The pill moving
+          behind `sm:` below is what stops it ever having to.
+        */}
+        <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-3 px-4 py-3 sm:px-6">
           <button
             type="button"
             onClick={() => setView({ kind: "dashboard" })}
@@ -176,11 +185,16 @@ export default function App() {
             Groundwork
           </button>
 
-          <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center gap-3">
             <Initials user={user} />
             <span className="hidden text-xs text-slate-400 sm:inline">{user.email}</span>
             {user.role === "admin" && (
-              <span className="rounded-full border border-sky-800/60 bg-sky-950/40 px-2 py-0.5 text-xs font-medium text-sky-300">
+              // Hidden below `sm` for the same reason the email is: it is a
+              // status label, not a control, and the narrow viewport has to
+              // spend its width on the two things that are (the way back to the
+              // agent list, and the way out). The monogram stays because it is
+              // the only remaining answer to "who am I signed in as".
+              <span className="hidden rounded-full border border-sky-800/60 bg-sky-950/40 px-2 py-0.5 text-xs font-medium text-sky-300 sm:inline-flex">
                 admin
               </span>
             )}

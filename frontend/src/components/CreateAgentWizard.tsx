@@ -66,7 +66,7 @@ import {
 // Shape of the tunables
 // --------------------------------------------------------------------------
 
-/** The eight parameters the wizard can set. Mirrors `AgentTunables` on the
+/** The ten parameters the wizard can set. Mirrors `AgentTunables` on the
  *  server, minus `system_prompt`, which this flow shows but does not send. */
 export type Tuning = {
   chunk_size: number;
@@ -77,6 +77,14 @@ export type Tuning = {
   rerank_top_n: number;
   score_threshold: number;
   max_rewrites: number;
+  /** Whether the agent may call tools mid-answer -- search the corpus a second
+   *  time, or write and run Python. The only parameter here that changes what
+   *  the agent DOES rather than what it retrieves, which is why it is the one
+   *  with a sentence about latency under it. */
+  tools_enabled: boolean;
+  /** Tool round-trips allowed in one turn before the loop is closed and an
+   *  answer is forced. A ceiling, not a target: most turns use none. */
+  max_tool_steps: number;
 };
 
 /**
@@ -99,9 +107,16 @@ const SERVER_DEFAULTS: Tuning = {
   rerank_top_n: 3,
   score_threshold: 0.5,
   max_rewrites: 2,
+  tools_enabled: true,
+  max_tool_steps: 3,
 };
 
-/** What the slider can reach: the band worth dragging in, not the API's range. */
+/** What the slider can reach: the band worth dragging in, not the API's range.
+ *
+ *  `max_tool_steps` is the exception that proves the rule -- its band IS the
+ *  API's range, because 0-8 is already small enough to aim at and there is no
+ *  useful value outside it. The number input beside it is then a readout rather
+ *  than an escape hatch, which is the right relationship for a ceiling. */
 const SLIDER_BAND = {
   chunk_size: { min: 128, max: 2048, step: 64 },
   chunk_overlap: { min: 0, max: 512, step: 8 },
@@ -109,6 +124,7 @@ const SLIDER_BAND = {
   rerank_top_n: { min: 1, max: 20, step: 1 },
   score_threshold: { min: 0, max: 1, step: 0.01 },
   max_rewrites: { min: 0, max: 5, step: 1 },
+  max_tool_steps: { min: 0, max: 8, step: 1 },
 } as const;
 
 /** What the server accepts (`AgentTunables`). The number input enforces these,
@@ -121,6 +137,7 @@ const API_BOUNDS = {
   rerank_top_n: { min: 1, max: 100 },
   score_threshold: { min: 0, max: 1 },
   max_rewrites: { min: 0, max: 5 },
+  max_tool_steps: { min: 0, max: 8 },
 } as const;
 
 const MAX_NAME_LENGTH = 128; // `agents.name` is String(128).
@@ -136,6 +153,14 @@ function tuningFrom(template: Template | null): Tuning {
     rerank_top_n: template.rerank_top_n,
     score_threshold: template.score_threshold,
     max_rewrites: template.max_rewrites,
+    // Not carried on `Template`, and deliberately not added to it: the personas
+    // were seeded before the tool loop existed and none of them holds an
+    // opinion about it. A teaching persona is a claim about how to answer, not
+    // about whether the agent may go and look something up a second time -- so
+    // the agent-level default stands whichever card is chosen, and switching
+    // persona never silently turns tools on or off.
+    tools_enabled: SERVER_DEFAULTS.tools_enabled,
+    max_tool_steps: SERVER_DEFAULTS.max_tool_steps,
   };
 }
 
@@ -1005,6 +1030,8 @@ export default function CreateAgentWizard({
                 <Fact label="Rerank top n" value={tuning.rerank_top_n} />
                 <Fact label="Score threshold" value={tuning.score_threshold} />
                 <Fact label="Max rewrites" value={tuning.max_rewrites} />
+                <Fact label="Tools" value={tuning.tools_enabled ? "on" : "off"} />
+                <Fact label="Max tool steps" value={tuning.max_tool_steps} />
               </dl>
             ) : (
               <div data-testid="tuning-sliders" className="mt-5 space-y-6">
@@ -1135,6 +1162,40 @@ export default function CreateAgentWizard({
                     help="Ceiling on the rewrite loop. Cost blowout is one of the four named agentic failure modes, and an unbounded rewrite loop is precisely how it happens. 0 turns rewriting off."
                   />
                 </div>
+
+                <Segmented
+                  testId="tuning-tools"
+                  legend="Tools"
+                  name="tuning-tools"
+                  value={tuning.tools_enabled ? "on" : "off"}
+                  onChange={(next) => editTuning({ tools_enabled: next === "on" })}
+                  options={[
+                    { value: "on", label: "On" },
+                    { value: "off", label: "Off" },
+                  ]}
+                  // The honest cost, in one line, beside the switch that buys
+                  // it. Every other parameter on this step changes what the
+                  // agent retrieves; this one changes what it DOES, and the
+                  // thing a user notices is the wait. Generation is 89% of a
+                  // turn, so a turn that calls a tool and then generates again
+                  // is close to two turns -- but only on the turns that need it,
+                  // which is the half of the sentence that stops this reading as
+                  // a warning against switching it on.
+                  help="Lets the agent search the corpus again or write and run Python in the middle of answering, instead of working from one pass of retrieval. It adds a few seconds to the turns where it does that, and nothing to the turns where it does not."
+                />
+
+                <div className="grid gap-6 sm:grid-cols-2">
+                  <ParamSlider
+                    id="max-tool-steps"
+                    label="Max tool steps"
+                    value={tuning.max_tool_steps}
+                    onChange={(next) => editTuning({ max_tool_steps: next })}
+                    band={SLIDER_BAND.max_tool_steps}
+                    bounds={API_BOUNDS.max_tool_steps}
+                    disabled={!tuning.tools_enabled}
+                    help="Tool round-trips allowed in one turn before the loop is closed and an answer is forced. The same reasoning as max rewrites, applied to the same failure mode: a loop with no ceiling is how cost blowout actually happens. 0 leaves tools bound but unreachable, which is a slower way of saying off."
+                  />
+                </div>
               </div>
             )}
 
@@ -1214,6 +1275,8 @@ export default function CreateAgentWizard({
                   <Fact label="Rerank top n" value={tuning.rerank_top_n} />
                   <Fact label="Score threshold" value={tuning.score_threshold} />
                   <Fact label="Max rewrites" value={tuning.max_rewrites} />
+                  <Fact label="Tools" value={tuning.tools_enabled ? "on" : "off"} />
+                  <Fact label="Max tool steps" value={tuning.max_tool_steps} />
                 </dl>
                 {!customizing && (
                   <p className="mt-2 text-xs text-slate-400">

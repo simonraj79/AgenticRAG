@@ -8,7 +8,9 @@
  * a missing renderer. `react-markdown` plus `remark-gfm` is the whole fix, and
  * Tailwind's preflight is why every tag needs an explicit class: the reset
  * strips list markers and heading sizes, so an unstyled `<ul>` renders as a
- * paragraph run together.
+ * paragraph run together. The tag-by-tag map that supplies those classes
+ * started here and now lives in `lib/markdown.tsx`, because the handouts panel
+ * renders a study sheet through the same pipeline and two copies of it drift.
  *
  * **The chips are the point of the feature.** The answer carries `[1]`, `[2]`
  * inline; each becomes a superscript button that opens the sources list and
@@ -25,10 +27,16 @@
 import { Children, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import Markdown from "react-markdown";
-import type { Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { ChatMessage } from "../lib/types.ts";
 import { formatDuration, formatTimestamp } from "../lib/format.ts";
+// The component map lives in `lib/markdown.tsx` rather than here, because the
+// handouts panel renders a study sheet's preview through the same pipeline and
+// a copied seventy-line map is how the answer and the handout end up with
+// different heading sizes six months apart. `createMarkdownComponents` takes
+// the `inline` hook that turns `[1]` into a citation chip; the panel calls the
+// same factory with no hook.
+import { createMarkdownComponents } from "../lib/markdown.tsx";
 import CitationCard from "./CitationCard.tsx";
 import TracePanel from "./TracePanel.tsx";
 
@@ -42,6 +50,10 @@ export default function Message({ message }: { message: ChatMessage }) {
   // focus effect. Without it the second click is a no-op, because the state it
   // would set is the state already there.
   const [focusNonce, setFocusNonce] = useState(0);
+  // Bumped by the tool-activity chip, which is a summary whose detail lives in
+  // the trace panel. A nonce for the same reason as the one above: a boolean
+  // would already be true the second time the chip is pressed.
+  const [traceSignal, setTraceSignal] = useState(0);
 
   const cards = useRef(new Map<number, HTMLLIElement>());
 
@@ -74,8 +86,9 @@ export default function Message({ message }: { message: ChatMessage }) {
     (children: ReactNode) => withCitations(children, citationsByMarker, selectCitation),
     [citationsByMarker, selectCitation],
   );
-  const components = useMemo(() => markdownComponents(inline), [inline]);
+  const components = useMemo(() => createMarkdownComponents(inline), [inline]);
   const sourcesId = `sources-${message.query_id}`;
+  const toolActivity = summariseToolActivity(message.tool_steps, message.handouts.length);
 
   return (
     <li data-testid="chat-message" className="space-y-2.5">
@@ -106,8 +119,17 @@ export default function Message({ message }: { message: ChatMessage }) {
         )}
 
         {/* The testid sits on the answer alone, so its textContent is the answer
-            and not also the latency and the model name. */}
-        <div data-testid="chat-answer" className="text-sm leading-relaxed text-slate-100">
+            and not also the latency and the model name.
+
+            `break-words` is on the container rather than on each tag: `pre` and
+            `table` carry their own `overflow-x-auto` in the component map, but a
+            60-character URL or an unspaced identifier inside an ordinary
+            paragraph has nothing to scroll and pushes the bubble past the
+            viewport, taking the whole document's width with it. */}
+        <div
+          data-testid="chat-answer"
+          className="text-sm leading-relaxed break-words text-slate-100"
+        >
           <Markdown remarkPlugins={[remarkGfm]} components={components}>
             {message.answer ?? ""}
           </Markdown>
@@ -146,6 +168,25 @@ export default function Message({ message }: { message: ChatMessage }) {
             </button>
           )}
 
+          {toolActivity && (
+            /*
+              A turn that used tools looked identical to one that did not until
+              somebody opened the trace, which is to say: it looked identical.
+              This is a SUMMARY, not a control -- it changes nothing about the
+              turn -- but it is a button, because the detail it summarises
+              already exists one element below and a chip that names something
+              unreachable is worse than no chip.
+            */
+            <button
+              type="button"
+              data-testid="tool-activity"
+              onClick={() => setTraceSignal((value) => value + 1)}
+              className="min-h-11 rounded-full border border-cyan-800/60 bg-cyan-950/40 px-2.5 py-2 text-xs font-medium text-cyan-200 transition hover:border-cyan-600 hover:text-cyan-100"
+            >
+              {toolActivity}
+            </button>
+          )}
+
           <span className="ml-auto text-xs text-slate-400">
             {formatTimestamp(message.created_at)}
             {message.latency_ms !== null ? ` · ${formatDuration(message.latency_ms)}` : ""}
@@ -156,7 +197,7 @@ export default function Message({ message }: { message: ChatMessage }) {
         {/* On its own line, not in the row above: the panel it opens is
             full-width, and a flex item that expands to a JSON payload drags the
             whole row's layout with it. */}
-        <TracePanel queryId={message.query_id} />
+        <TracePanel queryId={message.query_id} openSignal={traceSignal} />
 
         {sourcesOpen && (
           <div id={sourcesId} className="mt-3">
@@ -273,7 +314,14 @@ function CitationChip({
       data-testid="citation-chip"
       aria-label={`Show source ${marker}: ${sourceName}`}
       onClick={() => onSelect(marker)}
-      className="mx-0.5 inline-flex h-6 min-w-6 items-center justify-center rounded border border-sky-700 bg-sky-950/60 px-1 align-super font-mono text-[11px] font-semibold text-sky-200 transition hover:border-sky-400 hover:bg-sky-900/60 hover:text-sky-50"
+      // `gw-chip` is the 44px hit area, and it is the one place in this app
+      // where the tap target and the drawn box deliberately differ. Growing the
+      // button itself to `min-h-11` would space every line of the paragraph it
+      // sits in by 44px, which trades a touch defect for a typographic one; the
+      // pseudo-element in `index.css` gives the finger its area and leaves the
+      // prose alone. See the comment there for why the overlap with a
+      // neighbouring chip is harmless.
+      className="gw-chip mx-0.5 inline-flex h-6 min-w-6 items-center justify-center rounded border border-sky-700 bg-sky-950/60 px-1 align-super font-mono text-[11px] font-semibold text-sky-200 transition hover:border-sky-400 hover:bg-sky-900/60 hover:text-sky-50"
     >
       {marker}
     </button>
@@ -281,90 +329,31 @@ function CitationChip({
 }
 
 /**
- * Tag-by-tag styling for the rendered answer.
+ * "searched twice · made 1 handout", or `null` when the turn used no tools.
  *
- * Long because Tailwind's preflight removes every default: without `list-disc`
- * a bulleted list has no bullets, without `font-semibold` bold is not bold. The
- * alternative is the typography plugin, which is a build dependency this
- * project does not carry -- and `package-lock.json` has to stay consistent for
- * Render's `npm ci`.
+ * Null rather than an empty string, so the caller renders nothing at all rather
+ * than an empty pill -- and `tool_steps === 0` with no handouts is the COMMON
+ * case, including every turn taken by an agent with tools switched off and every
+ * turn recorded before the loop existed.
  *
- * `inline` is applied to every tag that can hold text directly. `code` and
- * `pre` deliberately skip it: a chunk of code containing `[0]` is an array
- * index, not a citation.
+ * `tool_steps` counts every tool round-trip rather than searches specifically,
+ * and "searched" is the plain reading of the overwhelming majority of them; the
+ * second half names the round-trips that produced something instead. The exact
+ * per-step detail is in the trace, which is what the chip opens.
+ *
+ * "once" and "twice" rather than "1 time" and "2 times", because this is a
+ * sentence fragment in prose and not a counter.
  */
-function markdownComponents(inline: (children: ReactNode) => ReactNode): Components {
-  return {
-    p: ({ children }) => <p className="mb-3 last:mb-0">{inline(children)}</p>,
-    ul: ({ children }) => (
-      <ul className="mb-3 list-disc space-y-1 pl-5 last:mb-0">{children}</ul>
-    ),
-    ol: ({ children }) => (
-      <ol className="mb-3 list-decimal space-y-1 pl-5 last:mb-0">{children}</ol>
-    ),
-    li: ({ children }) => <li className="leading-relaxed">{inline(children)}</li>,
-    h1: ({ children }) => (
-      <h1 className="mt-4 mb-2 text-base font-semibold text-slate-50 first:mt-0">
-        {inline(children)}
-      </h1>
-    ),
-    h2: ({ children }) => (
-      <h2 className="mt-4 mb-2 text-base font-semibold text-slate-50 first:mt-0">
-        {inline(children)}
-      </h2>
-    ),
-    h3: ({ children }) => (
-      <h3 className="mt-3 mb-1.5 text-sm font-semibold text-slate-100 first:mt-0">
-        {inline(children)}
-      </h3>
-    ),
-    h4: ({ children }) => (
-      <h4 className="mt-3 mb-1.5 text-sm font-semibold text-slate-200 first:mt-0">
-        {inline(children)}
-      </h4>
-    ),
-    strong: ({ children }) => (
-      <strong className="font-semibold text-slate-50">{inline(children)}</strong>
-    ),
-    em: ({ children }) => <em className="italic">{inline(children)}</em>,
-    blockquote: ({ children }) => (
-      <blockquote className="mb-3 border-l-2 border-slate-700 pl-3 text-slate-300 last:mb-0">
-        {children}
-      </blockquote>
-    ),
-    a: ({ children, href }) => (
-      <a
-        href={href}
-        target="_blank"
-        rel="noreferrer noopener"
-        className="text-sky-300 underline underline-offset-2 transition hover:text-sky-200"
-      >
-        {children}
-      </a>
-    ),
-    code: ({ children }) => (
-      <code className="rounded bg-slate-950 px-1 py-0.5 font-mono text-[0.85em] text-emerald-200">
-        {children}
-      </code>
-    ),
-    pre: ({ children }) => (
-      <pre className="mb-3 overflow-x-auto rounded-md bg-slate-950 p-3 text-xs leading-relaxed last:mb-0 [&>code]:bg-transparent [&>code]:p-0">
-        {children}
-      </pre>
-    ),
-    hr: () => <hr className="my-4 border-slate-800" />,
-    table: ({ children }) => (
-      <div className="mb-3 overflow-x-auto last:mb-0">
-        <table className="w-full border-collapse text-xs">{children}</table>
-      </div>
-    ),
-    th: ({ children }) => (
-      <th className="border border-slate-800 bg-slate-900 px-2 py-1 text-left font-semibold text-slate-200">
-        {inline(children)}
-      </th>
-    ),
-    td: ({ children }) => (
-      <td className="border border-slate-800 px-2 py-1 align-top">{inline(children)}</td>
-    ),
-  };
+function summariseToolActivity(steps: number, handouts: number): string | null {
+  const parts: string[] = [];
+
+  if (steps === 1) parts.push("searched once");
+  else if (steps === 2) parts.push("searched twice");
+  else if (steps > 2) parts.push(`searched ${steps} times`);
+
+  if (handouts === 1) parts.push("made 1 handout");
+  else if (handouts > 1) parts.push(`made ${handouts} handouts`);
+
+  return parts.length > 0 ? parts.join(" · ") : null;
 }
+
