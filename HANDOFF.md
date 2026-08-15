@@ -60,16 +60,16 @@ example found elsewhere.
 | Render backend | `srv-d9vtuhpt0dsc738dmgsg` | https://agentic-rag-api-6x6b.onrender.com |
 | Render static site | `srv-d9vtuj61egvs73fdfang` | https://agentic-rag-web-e9e9.onrender.com |
 | Google OAuth client | `Agentic RAG Web` | project `dsai-mod-2-group-project` · **in production** |
-| GitHub | https://github.com/simonraj79/AgenticRAG | public · **uncommitted work in the tree** |
+| GitHub | https://github.com/simonraj79/AgenticRAG | public · clean tree · **`main` is 1 commit ahead of `origin`** |
 
 Health check returns `{"status":"ok","version":"0.1.0","database":"ok"}`. Cost is roughly
 **$33–34/mo** (Render backend ~$7, Postgres ~$6–7, Pinecone Builder ~$20).
 
-> **First thing to do in a fresh session: decide what to do with the uncommitted work.**
-> `backend/app/rag/` and `scripts/slice_check.py` are untracked; `CLAUDE.md`, `HANDOFF.md`,
-> `backend/app/config.py`, `backend/requirements.in` and `backend/requirements.txt` are
-> modified. Nothing has been pushed. It is all working and verified — it simply was not
-> committed, because committing was never asked for.
+> **The RAG slice is committed but not pushed.** `04f89a6` holds `backend/app/rag/`,
+> `scripts/slice_check.py`, the `config.py` model decisions and the dependency additions.
+> The working tree is clean; `main` sits one commit ahead of `origin/main`. Push when you
+> are ready — the repository is public, so the push is what makes this code readable by
+> anyone, not the commit.
 
 ### Code: scaffold plus a working RAG slice
 
