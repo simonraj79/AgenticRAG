@@ -173,7 +173,7 @@ export default function App() {
             onClick={() => setView({ kind: "dashboard" })}
             className="min-h-11 rounded-md px-1 text-sm font-semibold tracking-tight text-slate-100 transition hover:text-white"
           >
-            Agentic RAG
+            Groundwork
           </button>
 
           <div className="flex items-center gap-3">

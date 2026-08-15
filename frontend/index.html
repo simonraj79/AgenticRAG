@@ -3,6 +3,13 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+      Served from public/, so Vite copies it to the dist root untouched and the
+      href stays /favicon.svg in dev and in the built static site alike. SVG
+      only, deliberately: there is no .ico fallback, so pre-16.4 Safari shows
+      its default glyph rather than a stale bitmap of an older mark.
+    -->
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <title>Groundwork &middot; agentic RAG harness</title>
     <meta
       name="description"

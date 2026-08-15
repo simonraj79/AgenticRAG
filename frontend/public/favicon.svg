@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="Groundwork">
+  <!--
+    The same mark as the login Wordmark (views/Login.tsx): stacked strata
+    narrowing to a point - ground layers, and the pipeline funnelling to one
+    answer. Redrawn rather than imported, because a favicon is rendered at
+    16px and the page logo is not:
+
+      - strokes go 1.6 -> 2.6 (on a 24 -> 32 viewBox), or the lower strata
+        disappear entirely at tab size;
+      - the faintest layer's opacity floor rises 0.5 -> 0.6, for the same
+        reason;
+      - a slate-950 plate is added. The gradient is emerald-to-sky and both
+        ends are light, so on a light tab bar an unplated mark washes out.
+        Browsers composite the favicon over their own chrome, not over the
+        page, so the app background cannot be relied on.
+
+    Keep the two in sync by eye, not by tooling - they are deliberately
+    different drawings of one mark.
+  -->
+  <defs>
+    <linearGradient id="gw-mark" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#6ee7b7" />
+      <stop offset="100%" stop-color="#38bdf8" />
+    </linearGradient>
+  </defs>
+
+  <rect width="32" height="32" rx="7" fill="#020617" />
+
+  <g fill="none" stroke="url(#gw-mark)" stroke-width="2.6" stroke-linecap="round">
+    <path d="M4 8h24" />
+    <path d="M6 13h20" opacity="0.88" />
+    <path d="M8.5 18h15" opacity="0.74" />
+    <path d="M11 23h10" opacity="0.6" />
+  </g>
+</svg>

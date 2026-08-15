@@ -936,7 +936,7 @@ As of 2026-08-15. Scripts under `scripts/` are idempotent and safe to re-run.
 |---|---|---|
 | Render Postgres | ✅ **Live** | `agentic-rag-db` · `dpg-d9vt7v1t0dsc738c8kpg-a` · `basic_256mb` · **singapore** · PG **18** · `available` |
 | Pinecone index | ✅ **Live** | `agentic-rag-ntu` · **768d** · cosine · serverless aws **ap-southeast-1** · Builder plan · `Ready` |
-| Google OAuth client | ✅ **Live** | `Agentic RAG Web` · Web application · `dsai-mod-2-group-project` · **In production** · External |
+| Google OAuth client | ✅ **Live** | `Agentic RAG Web` · Web application · `dsai-mod-2-group-project` · **In production** · External · consent brand `Groundwork`, **shared with the `Bedtime Story Web` client in the same project** and unverified, so the screen shows the redirect host rather than either name |
 | GitHub repo | ✅ **Live** | https://github.com/simonraj79/AgenticRAG (public) |
 | Render web service | ✅ **Live** | `agentic-rag-api` · `srv-d9vtuhpt0dsc738dmgsg` · `starter` · **singapore** · https://agentic-rag-api-6x6b.onrender.com |
 | Render static site | ✅ **Live** | `agentic-rag-web` · `srv-d9vtuj61egvs73fdfang` · free · https://agentic-rag-web-e9e9.onrender.com |
@@ -1154,7 +1154,7 @@ Infrastructure is complete. Stages 1 and 3 are built; Stage 2 is half-built.
 | 11 | Does `gemma-4-31b-it` support structured output? | ✅ **yes**, via `function_calling`; `DECISION_MODEL` collapsed onto it |
 | 12 | Workshop PDFs in a public repo | Open — see below |
 | **13** | **SSE streaming** (§2.2) | Open — **much less urgent since the move to OpenRouter**: a persona turn measured 6.3 s and a full ten-question run 90 s, against 30–60 s per turn before. Still the right shape, no longer the top UX problem |
-| **14** | **OAuth consent brand reads "Bedtime Story"** | Open — console-only fix, and it is the first screen an attendee sees |
+| ~~14~~ | ~~**OAuth consent brand reads "Bedtime Story"**~~ | ✅ **done** — renamed to `Groundwork` on the Branding page, 2026-08-15. The unrecognised app name an attendee was being asked to trust is gone. It was **not** replaced by `Groundwork`: an unverified brand is not displayed at all, so the screen now reads the redirect host `agentic-rag-api-6x6b.onrender.com`. Showing the name needs branding verification, which the scopes themselves do not require (§8) |
 | ~~15~~ | ~~Move the eval judge off the generation model~~ | ✅ **done** — judge is `google/gemini-3.7-flash` via OpenRouter; verbatim-context faithfulness went 0.000 → 1.000 (§2.1) |
 | **16** | **Coaching personas fail refusals** (`1/2`) | Open — was `0/2` twice; three of those four rows were a detector gap, now fixed. The remaining row is real: the persona names the gap instead of declining (§4.2) |
 | **17** | Multimodal embedding of PDFs and images | Open — deliberately deferred, see §2.3 |
