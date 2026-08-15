@@ -36,6 +36,15 @@ ENV/
 # rewriting history. Delete these lines once the licensing question is settled.
 *.pdf
 
+# ---- Local working notes ----
+# CLAUDE.md is kept out of the public repo by request. Two things this does NOT do:
+# it does not remove the file (it stays on disk and is still the agent's brief),
+# and it does not remove it from HISTORY - every version committed before this
+# line is still readable on GitHub. Scrubbing those needs a history rewrite.
+# EVAL.md, HANDOFF.md, PRD.md and README.md all link to it; those links resolve
+# locally and 404 on GitHub. Re-track with `git add -f CLAUDE.md`.
+CLAUDE.md
+
 # ---- Node / frontend ----
 node_modules/
 dist/
