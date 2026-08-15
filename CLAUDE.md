@@ -61,6 +61,37 @@ most tutorials show `task_type="RETRIEVAL_DOCUMENT"` / `"RETRIEVAL_QUERY"`. Pass
 `embedding-001` did not — it required manual L2 normalization after MRL truncation, and
 skipping that silently degraded cosine similarity. Do not port that normalization code.
 
+**`gemini-embedding-2` is multimodal. We use it as a text embedder, on purpose.** It is the
+first multimodal embedding model in the Gemini API — text, images, video, audio and PDFs into
+one *unified* space, so a text query can retrieve a page image directly. That is genuinely
+useful for a slide-heavy corpus, and we are not using it, because the native path costs more
+than it currently returns:
+
+| Constraint | Value |
+|---|---|
+| PDF per request | **1 file, 6 pages** |
+| Images per request | 6 (PNG/JPEG only) |
+| Audio / video | 180 s / 120 s |
+| Token ceiling | **8,192 across all modalities combined** |
+
+So a slide deck cannot be embedded whole — it needs 6-page windowing plus halve-and-retry
+when a dense window busts the token ceiling. And **`langchain-google-genai` cannot do it at
+all**: `GoogleGenerativeAIEmbeddings.embed_documents` is `(texts: list[str], ...)` with no
+`embed_images` (verified against 4.3.4), so multimodal means calling `google-genai` directly
+and stepping outside the retriever seam that keeps the Stage 1 → Stage 2 change a one-liner.
+
+**Do not "fix" this by switching to `gemini-embedding-001`.** That reasoning is backwards
+three separate ways: the two embedding spaces are **incompatible**, so it forces a full
+re-ingest of every existing namespace; -001's input ceiling is 2,048 tokens, a quarter of
+-2's; it does not auto-normalize at 768d, so the manual L2 code deleted above would have to
+come back; and it is text-only, so it does not make multimodal reliable — it removes the
+option permanently. The fragility is in the multimodal *path*, never in the model.
+
+The design if it is ever built: index a PDF **twice into the same namespace** — text chunks
+via the existing path, plus 6-page visual windows via the native path — with
+`chunks.text` for a visual window holding that window's extracted text, so generation and
+re-embedding still work. Same model, same space, which is the whole point.
+
 **The embedding model is part of the index.** Indexing with one model and querying with
 another returns confident nonsense rather than an error, because matching dimensions do
 not imply a shared vector space. The index is tagged `embedding_model`, and
@@ -207,6 +238,14 @@ The line is kept as `pywin32==312; sys_platform == "win32"`. **Re-check it after
 `pip freeze`**, because freezing will silently flatten it again. Any future Windows-only
 transitive dependency has the same problem.
 
+This is not hypothetical: it has now been flattened and restored **twice**, most recently by
+the freeze that added Ragas. Treat "re-add the marker" as the second half of the `pip freeze`
+command, not as a thing to remember:
+
+```bash
+grep -n 'pywin32' backend/requirements.txt
+```
+
 ### Gemma 4 on the Gemini API
 
 **Structured output works, but only through a tolerant parser.** PRD §2 recorded it as
@@ -253,10 +292,50 @@ prompt governs *refusing*, and only the second one was load-bearing in every cas
 Do not treat `score_threshold` as a safety control. Stage 3 exists to turn 0.5 into a
 measured number.
 
+**And now Stage 3 has measured something the prompt alone did not fix: the coaching personas
+weaken refusal.** First real golden-set run, Feynman Explainer, 2026-08-15:
+**`refusal_pass = 0 / 2`.** Both questions the corpus cannot answer were answered anyway.
+
+The cause is not a missing rule — the persona prompts all carry the grounding clause. It is
+that the Feynman persona is *designed* to **name the gap** rather than decline: it says "the
+material does not cover X, but here is what it does say", which is pedagogically right and is
+also, structurally, an answer rather than a refusal. The behaviour the persona rewards and
+the behaviour the golden set measures are in direct tension.
+
+This is the concrete instance of the risk written into every persona prompt — that a warm,
+confident teaching voice makes an ungrounded answer read better than a blunt refusal. It was
+a prediction; it is now a measurement, and it is the strongest argument in this codebase for
+having built Stage 3 at all. Note that the plain `lecture-qa` template was **not** tested
+here, so this is a finding about coaching personas specifically, not about the system prompt
+in general. Retesting the same golden set against a non-persona agent is the obvious next
+experiment, and it costs one run.
+
 **Latency is dominated by generation, not by the cross-Pacific hop.** PRD §6 flags Cohere
 as the only Singapore → US round trip. Measured: embed 365 ms, Pinecone k=20 394 ms,
 Cohere rerank ~830 ms, **Gemma generation 13.2 s — 89% of the total**. The hop the PRD
 worried about costs a twentieth of what generation does. Optimise there or nowhere.
+
+**Persona verbosity *is* latency.** Because generation is token-bound and already 89% of the
+turn, anything that makes the model write more is the single biggest lever on response time —
+larger than retrieval, reranking and the network combined. Measured 2026-08-15 on the same
+one-chunk corpus:
+
+| Turn | Output | Latency |
+|---|---|---|
+| Bare Stage 1 | 136 chars | **9.8 s** |
+| Feynman persona, first turn | ~600 chars | **30.6 s** |
+| Feynman persona, follow-up | ~1,800 chars | **44.8 s** |
+
+Retrieval was identical in all three. The persona prompt asks for an analogy, a worked
+example and a named gap, so it emits roughly ten times the text — and costs 4.5× the time.
+A follow-up adds a further **3.8 s** for history contextualisation, before the question is
+even embedded.
+
+Two consequences. First, any UI copy quoting a fixed "10–15 s" becomes a promise the system
+cannot keep the moment a persona is selected, and a progress note that under-promises is
+worse than none — the user starts counting against it and concludes it has hung. Second,
+SSE streaming (PRD §2.2, still unbuilt) went from a nice-to-have to the main outstanding UX
+problem: 45 s of blank waiting is the worst part of the product now.
 
 ### Render
 
@@ -282,6 +361,30 @@ paid tier for a new database is **`basic_256mb`**.
 `ipAllowList: None`, and connections are dropped mid-handshake — surfacing as
 `ConnectionDoesNotExistError: connection was closed in the middle of operation`, which
 looks like a network fault rather than a firewall. Add a `/32` entry to connect locally.
+
+**That same error means "your IP changed" far more often than it means anything else.**
+It has now happened twice. The allow-list holds fixed `/32` entries, so moving between the
+campus network and anywhere else silently revokes local database access — `alembic`, the
+local backend and every script fail identically, with an asyncpg traceback that names no
+firewall. Deployed traffic is unaffected, because Render uses the private network, so
+"production works but my laptop doesn't" is the tell.
+
+Diagnose in one command before reading the traceback:
+
+```bash
+curl -s https://api.ipify.org
+```
+
+Fix it by **PATCHing the whole list back**, not by appending — `PATCH /v1/postgres/{id}`
+with `ipAllowList` replaces the entire set, exactly like the env-var `PUT` above, so every
+entry you want to keep must be resent or it is dropped:
+
+```bash
+curl -s -X PATCH -H "Authorization: Bearer $RENDER_API_KEY" -H "Content-Type: application/json" -d '{"ipAllowList":[{"cidrBlock":"155.69.165.66/32","description":"campus"},{"cidrBlock":"YOUR.IP.HERE/32","description":"off-campus"}]}' https://api.render.com/v1/postgres/dpg-d9vt7v1t0dsc738c8kpg-a
+```
+
+**The database id needs its `-a` suffix** — `dpg-d9vt7v1t0dsc738c8kpg-a`. Without it the API
+returns a bare 404 that reads like the database does not exist.
 
 **`POST /v1/services` triggers a deploy immediately.** Creating a service before there is
 code to build produces a failed deploy, and Render does not document whether a
@@ -341,6 +444,16 @@ near-misses that waste time:
 
 **The client secret is displayed exactly once.** No recovery — only regeneration.
 
+**The consent screen shows the OAuth *brand* name, not the client name — and ours is
+wrong.** PRD §8 records the client as `Agentic RAG Web`, which is accurate, but signing in
+renders **"You're signing back in to Bedtime Story"**: the brand/app name on the GCP project
+`dsai-mod-2-group-project` belongs to an unrelated earlier app, and a brand is per-project,
+not per-client. Observed in Chrome 2026-08-15. This is worse than cosmetic — a user is being
+asked to hand over their identity to an app whose name they do not recognise, which is
+exactly the shape of a phishing prompt, and it is the first screen a workshop attendee sees.
+Fix on the Branding page of the Google Auth Platform console; there is no API for it, same
+as client creation.
+
 **`Authorized JavaScript origins` and `Authorized redirect URIs` are not two places for
 the same URL.** Redirect URIs are where Google sends the auth *code*, so they point at the
 **backend** (the exchange needs the client secret). JavaScript origins authorize the
@@ -396,7 +509,105 @@ binaries in git are permanent — removing them later means rewriting history.
 ### Ragas
 
 **Ragas needs a judge LLM *and* an embedding model**, and defaults to OpenAI for both.
-Configure both explicitly or it fails on a missing `OPENAI_API_KEY`.
+Configure both explicitly or it fails on a missing `OPENAI_API_KEY`. Only `AnswerRelevancy`
+actually uses the embeddings — it generates questions back from the answer and compares them
+to the original in embedding space — but `evaluate()` takes both and omitting either is the
+OpenAI failure.
+
+**Ragas will not import at all without `langchain-community<0.4`.** `ragas/llms/base.py` does
+`from langchain_community.chat_models.vertexai import ChatVertexAI` at *module scope*, and
+langchain-community 0.4.x **deleted** that module — only `google_palm` survives. So the
+latest Ragas and the latest langchain-community are mutually incompatible out of the box, and
+the failure is `ModuleNotFoundError` on an import nothing in this project wrote.
+
+Downgrading Ragas does **not** help: every version from 0.2.15 through 0.4.3 carries the same
+import (checked). The fix is pinning the *other* side. `langchain-community==0.3.31` installs
+cleanly and — importantly — does **not** drag `langchain-core` back below 1.x, so the whole
+LangChain 1.x stack is unaffected. Verified working together: ragas 0.4.3, langchain-community
+0.3.31, langchain-core 1.5.5, langchain 1.3.15.
+
+**Keep the deprecated `ragas.metrics` import. Do not "fix" the warning.** Importing from
+`ragas.metrics` emits a DeprecationWarning pointing at `ragas.metrics.collections`, and
+following it breaks the project twice over.
+
+First, the class names differ, so a literal move is an `ImportError`:
+
+| Old `ragas.metrics` | New `ragas.metrics.collections` |
+|---|---|
+| `Faithfulness` | `Faithfulness` |
+| `ResponseRelevancy` | **`AnswerRelevancy`** |
+| `LLMContextPrecisionWithReference` | **`ContextPrecisionWithReference`** |
+| `LLMContextRecall` | **`ContextRecall`** |
+
+Second — and this is the part that actually blocks the move — fixing the names still fails at
+construction:
+
+```
+ValueError: Collections metrics only support modern InstructorLLM.
+            Found: LangchainLLMWrapper.
+```
+
+The collections metrics require an `InstructorBaseRagasLLM`. For Gemini that means routing
+through `instructor.from_genai()`, and Ragas' own source carries a warning that that path
+sends invalid safety settings to Google (`HARM_CATEGORY_JAILBREAK`, instructor issue #1658).
+`LangchainLLMWrapper` is not optional here either: it is what lets Gemma survive as a judge,
+because it strips the markdown fence Gemma sometimes wraps its JSON in — the same fence that
+makes raw `response.parsed` return `None` (see the Gemma section above).
+
+So in 0.4.3 the deprecated import is the working one. `app/eval/ragas_runner.py` suppresses
+the DeprecationWarning **at that import statement only**, not globally, so a deprecation from
+anywhere else still surfaces. This was found by construction, not from docs — the warning is
+confidently wrong for this stack.
+
+**Exclude refusal questions from the metric means.** The golden set deliberately contains
+questions the corpus cannot answer, and `golden_questions.expected_behaviour = 'refuse'` marks
+them. A *correct* refusal retrieves nothing useful and returns an answer that deliberately
+does not follow from the context — so faithfulness and context_recall score near zero for
+behaving perfectly. Averaging them in penalises correct refusals, and worse, it aims the
+weakest-metric pointer at whichever metric refusals punish hardest rather than at the real
+weakness. Score them separately as pass/fail on `behaviour_ok`.
+
+**Judge and generator are the same model right now, and that is self-assessment.**
+`RAGAS_JUDGE_MODEL` defaults to `gemma-4-31b-it`, which is also `GENERATION_MODEL`. Asking a
+model "is this answer supported by these contexts?" about its own output is a known
+self-preference bias; PRD §2.1 specifies Gemini Flash Lite as judge for exactly this reason.
+It is one env var to change, `eval_runs` records both models, and the scorecard says so on
+screen — but do not read faithfulness as an independent measurement until they differ.
+
+**`ResponseRelevancy(strictness=...)` must be 1 for Gemma. The default of 3 fails every
+call.** `strictness` does not mean three requests — it asks for three *candidates* in one
+request (`candidate_count=3`), and Gemma on the Gemini API answers:
+
+> `400 INVALID_ARGUMENT: Multiple candidates is not enabled for this model`
+
+Measured 2026-08-15: this failed **7 of 8** scored questions on the first real run. The
+failure mode is the dangerous kind — it is per-metric, so the run still reported
+`status=completed` with three metrics populated, `answer_relevance` almost entirely null, and
+a confident weakest-metric pointer. **A metric that silently declines to measure is worse
+than one that crashes the run**, because the scorecard still renders. The cost of `1` is a
+noisier score (a mean over one generated question, not three); raise it only for a judge that
+supports multiple candidates, which Gemini Flash does.
+
+**Gemma is measurably unfit as a *faithfulness* judge, and this is not a theoretical worry.**
+Same turn, answer copied **verbatim** out of its context, scored twice:
+
+| Judge | faithfulness |
+|---|---|
+| `gemma-4-31b-it` | **0.000** |
+| `gemini-flash-latest` | 0.667 |
+
+A word-for-word copy of the context scoring zero is the judge failing, not the generator
+drifting. That matters because the whole point of the scorecard is the weakest-metric
+pointer: the first real run named faithfulness (0.562) as the weakest metric and advised
+tightening the system prompt, when a large part of that number was judge error. **Before
+acting on a low faithfulness score, re-run with `RAGAS_JUDGE_MODEL=gemini-flash-latest` and
+see whether the finding survives.** Answer relevance was stable across both judges
+(0.813 vs 0.811), so this is specific to faithfulness, not a general judge-quality problem.
+
+**Context precision and recall both scoring exactly 1.0 usually means the corpus is too
+small to measure.** The first run returned 1.0 and 0.9999999999 — not excellent retrieval,
+but a single-chunk corpus where retrieval cannot fail. Treat a perfect retrieval score on a
+tiny corpus as "not yet measured", the same as a null.
 
 **`context_recall` requires a reference answer.** The other three metrics work from
 question + contexts + answer alone. That is why `golden_questions.reference_answer` is not

@@ -50,6 +50,30 @@ class Settings(BaseSettings):
     # --- Frontend ---
     frontend_url: str = "http://localhost:5173"
 
+    # --- Uploads and ingest ---
+    # `app/api/documents.py` argued against exactly this setting, and it was
+    # right: "a limit that can be raised by an environment variable will be
+    # raised by an environment variable, and the reason it is low is a property
+    # of how ingest works, not of where the service is deployed." The property it
+    # meant is that ingest ran INLINE -- the request held a worker, a database
+    # connection and the whole file in memory while it split, embedded and
+    # upserted. Under that design a large file did not fail cleanly, it timed
+    # out, and a mysterious timeout is the failure a size cap exists to prevent.
+    # The 10 MB constant was not sizing the workload (the whole workshop corpus
+    # is ~1.4 MB); it was protecting the request.
+    #
+    # So the cap and the blocking had to move together, and neither alone.
+    # Raising the limit while ingest still ran in the request would have made the
+    # failure worse rather than merely larger. `ingest_in_background` is the half
+    # that moved ingest onto a background job with its own session
+    # (`app/rag/jobs.py`), and only once that landed did this number become a
+    # property of the deployment -- memory, embedding spend, how long a user will
+    # watch a status badge -- rather than the thing holding the request timeout
+    # up. Set `ingest_in_background=false` and this number is dangerous again;
+    # they are one decision with two names, not two independent knobs.
+    max_upload_mb: int = 50
+    ingest_in_background: bool = True
+
     # --- Models / vector store (used from the RAG layer) ---
     gemini_api_key: str = ""
     pinecone_api_key: str = ""
@@ -100,6 +124,36 @@ class Settings(BaseSettings):
     generation_top_p: float = 0.95
     generation_top_k: int = 64
     generation_max_tokens: int = 2048
+
+    # --- Evaluation (Stage 3) ---
+    # The model that GRADES the answers. PRD 2.1 specifies Gemini Flash Lite for
+    # this and the reason is worth stating plainly: with the default below, the
+    # judge is the same model as `generation_model`, so the run is
+    # self-assessment. `faithfulness` asks "is this answer supported by these
+    # contexts?" of the very model that wrote the answer, and LLM-as-judge setups
+    # are known to score their own output generously (self-preference bias). The
+    # number is not meaningless -- it is measured against the retrieved contexts,
+    # not against taste -- but it is not independent either.
+    #
+    # It stays `gemma-4-31b-it` because that is what was asked for, and three
+    # things keep the choice honest rather than hidden: switching is one env var,
+    # `eval_runs` records `judge_model` and `generation_model` separately per run
+    # (never read back from `agents.generation_model`, which can change after a
+    # run), and the scorecard says so when the two are equal.
+    ragas_judge_model: str = "gemma-4-31b-it"
+
+    # How many judge calls may be in flight at once, within one question.
+    #
+    # This exists because of the Gemini free tier. Each scored question costs
+    # FOUR judged metrics, and three of them are themselves multi-call
+    # (faithfulness generates statements then verdicts them; answer relevance
+    # generates `strictness` questions from the answer). A ten-question run is
+    # therefore tens of judge requests on top of ten generations, and a 429 is
+    # the most likely way it fails -- as a burst, not as a total. Two is slow and
+    # boring on purpose: the run is a background job, so the cost of being
+    # conservative is a progress bar that moves less quickly, while the cost of
+    # being greedy is a scorecard full of nulls that looks like a broken judge.
+    ragas_max_concurrency: int = 2
 
     @property
     def async_database_url(self) -> str:

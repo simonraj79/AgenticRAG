@@ -95,18 +95,25 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100">
-      <nav className="border-b border-slate-800 bg-slate-950/80 backdrop-blur">
-        <div className="mx-auto flex max-w-5xl items-center justify-between px-6 py-3">
+      {/*
+        Sticky, which it did not need to be when every view fitted on a screen.
+        A conversation with an agent does not: sign-out and the way back to the
+        agent list would otherwise be a full scroll away from wherever the
+        thread has got to.
+      */}
+      <nav className="sticky top-0 z-20 border-b border-slate-800 bg-slate-950/90 backdrop-blur">
+        <div className="mx-auto flex max-w-6xl items-center justify-between gap-4 px-6 py-3">
           <button
             type="button"
             onClick={() => setView({ kind: "dashboard" })}
-            className="text-sm font-semibold tracking-tight text-slate-100"
+            className="text-sm font-semibold tracking-tight text-slate-100 transition hover:text-white"
           >
             Agentic RAG
           </button>
 
           <div className="flex items-center gap-3">
-            <span className="text-xs text-slate-400">{user.email}</span>
+            <Initials user={user} />
+            <span className="hidden text-xs text-slate-400 sm:inline">{user.email}</span>
             {user.role === "admin" && (
               <span className="rounded-full border border-sky-800/60 bg-sky-950/40 px-2 py-0.5 text-xs font-medium text-sky-300">
                 admin
@@ -125,24 +132,54 @@ export default function App() {
       </nav>
 
       {error && (
-        <div className="mx-auto max-w-5xl px-6 pt-6">
+        <div className="mx-auto max-w-6xl px-6 pt-6">
           <ErrorBanner error={error} />
         </div>
       )}
 
-      {view.kind === "dashboard" && (
-        <Dashboard onOpenAgent={(agentId) => setView({ kind: "agent", agentId })} />
-      )}
+      <main>
+        {view.kind === "dashboard" && (
+          <Dashboard onOpenAgent={(agentId) => setView({ kind: "agent", agentId })} />
+        )}
 
-      {view.kind === "agent" && (
-        // Keyed on the agent id so opening a different agent remounts rather
-        // than reusing the previous agent's loaded documents and answer.
-        <AgentDetail
-          key={view.agentId}
-          agentId={view.agentId}
-          onBack={() => setView({ kind: "dashboard" })}
-        />
-      )}
+        {view.kind === "agent" && (
+          // Keyed on the agent id so opening a different agent remounts rather
+          // than reusing the previous agent's loaded documents and conversation.
+          <AgentDetail
+            key={view.agentId}
+            agentId={view.agentId}
+            onBack={() => setView({ kind: "dashboard" })}
+          />
+        )}
+      </main>
     </div>
+  );
+}
+
+/**
+ * The signed-in user, as a monogram.
+ *
+ * Not `<img src={user.avatar_url}>`: that URL points at googleusercontent.com,
+ * so rendering it would have every page view of this app announce itself to
+ * Google -- for decoration. The login page inlines Google's own mark as SVG for
+ * the same reason. Two letters carry the same "you are signed in as someone"
+ * signal at no privacy cost.
+ */
+function Initials({ user }: { user: User }) {
+  const source = user.name?.trim() || user.email;
+  const letters = source
+    .split(/[\s@._-]+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part[0]?.toUpperCase() ?? "")
+    .join("");
+
+  return (
+    <span
+      title={user.name ?? user.email}
+      className="inline-flex h-7 w-7 items-center justify-center rounded-full border border-slate-700 bg-slate-900 text-[0.65rem] font-semibold text-slate-300"
+    >
+      {letters || "?"}
+    </span>
   );
 }

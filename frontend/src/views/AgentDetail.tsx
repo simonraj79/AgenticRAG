@@ -1,30 +1,47 @@
 /**
- * Agent detail: the corpus, the question box, and the trace, behind three tabs.
+ * Agent detail: what this agent is, its corpus, and the conversation with it.
  *
- * The agent record lives here rather than in each tab because two of the three
- * change it -- uploading or deleting a document moves `document_count` and
- * `status` -- and a count that disagrees with the list underneath it is the
- * kind of small wrongness that makes a demo look unfinished. One owner, one
- * refetch, `onCorpusChanged`.
+ * The agent record lives here rather than in each tab because the Documents tab
+ * changes it -- uploading or deleting moves `document_count` and `status` -- and
+ * a count that disagrees with the list underneath it is the kind of small
+ * wrongness that makes a demo look unfinished. One owner, one refetch,
+ * `onCorpusChanged`.
  *
- * `lastQueryId` lives here for the same reason: it is produced by the Ask tab
- * and consumed by the Trace tab, which are siblings.
+ * **The header leads with the persona, not the tuning.** It used to open with a
+ * six-column grid of chunk size, overlap, k, rerank and threshold, which
+ * answered "how is this configured" before "what is this". Those numbers are
+ * still on the page -- summarised in one line and expanded one click away --
+ * because this is a workshop artifact and "change chunk_size, watch the answer
+ * change" is the exercise. Demoted, not deleted.
  */
 
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../lib/api.ts";
 import type { Agent } from "../lib/types.ts";
-import { ErrorBanner, Spinner, StatusPill, errorMessage } from "../components/ui.tsx";
+import {
+  CategoryBadge,
+  ErrorBanner,
+  Fact,
+  PersonaIcon,
+  Reveal,
+  Spinner,
+  StatusPill,
+  errorMessage,
+} from "../components/ui.tsx";
 import AgentDocuments from "./AgentDocuments.tsx";
-import AgentAsk from "./AgentAsk.tsx";
-import AgentTrace from "./AgentTrace.tsx";
+import AgentChat from "./AgentChat.tsx";
+import AgentEvaluate from "./AgentEvaluate.tsx";
 
-type TabId = "documents" | "ask" | "trace";
+type TabId = "documents" | "chat" | "evaluate";
 
+// Order is the workflow, not the alphabet: you talk to an agent, you feed it,
+// and only then is there anything to measure. Evaluate sits last because a
+// scorecard over an empty corpus is noise -- PRD section 3.6 scores answers, and
+// there are none until the first two tabs have been used.
 const TABS: { id: TabId; label: string; testId: string }[] = [
+  { id: "chat", label: "Chat", testId: "tab-chat" },
   { id: "documents", label: "Documents", testId: "tab-documents" },
-  { id: "ask", label: "Ask", testId: "tab-ask" },
-  { id: "trace", label: "Trace", testId: "tab-trace" },
+  { id: "evaluate", label: "Evaluate", testId: "tab-evaluate" },
 ];
 
 export default function AgentDetail({
@@ -37,12 +54,17 @@ export default function AgentDetail({
   const [agent, setAgent] = useState<Agent | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [tab, setTab] = useState<TabId>("documents");
-  const [lastQueryId, setLastQueryId] = useState<string | null>(null);
+  const [tab, setTab] = useState<TabId | null>(null);
 
   const loadAgent = useCallback(async () => {
     try {
-      setAgent(await api<Agent>(`/api/agents/${agentId}`));
+      const record = await api<Agent>(`/api/agents/${agentId}`);
+      setAgent(record);
+      // Settled ONCE, on the first load, and never recomputed. Derived fresh on
+      // every render it would change under the user: uploading the first
+      // document moves `document_count` off zero, and the tab they are watching
+      // the upload on would swap itself for Chat mid-ingest.
+      setTab((current) => current ?? (record.document_count > 0 ? "chat" : "documents"));
     } catch (cause) {
       // 403 means authenticated-but-not-owner and 404 means gone. Both are
       // shown as-is: the tenancy boundary refusing is worth seeing, not
@@ -50,6 +72,17 @@ export default function AgentDetail({
       setError(errorMessage(cause));
     }
   }, [agentId]);
+
+  /**
+   * Stable across renders, and that stability is load-bearing rather than an
+   * optimisation: the Documents tab polls on a backoff timer whose effect
+   * depends on this callback, so a fresh arrow function each render would tear
+   * the timer down and restart it at the shortest interval every time the agent
+   * refetched -- a backoff that never backs off.
+   */
+  const handleCorpusChanged = useCallback(() => {
+    void loadAgent();
+  }, [loadAgent]);
 
   useEffect(() => {
     let cancelled = false;
@@ -64,7 +97,7 @@ export default function AgentDetail({
 
   if (loading) {
     return (
-      <div className="mx-auto max-w-5xl px-6 py-10">
+      <div className="mx-auto max-w-6xl px-6 py-10">
         <Spinner label="Loading agent" />
       </div>
     );
@@ -72,7 +105,7 @@ export default function AgentDetail({
 
   if (!agent) {
     return (
-      <div className="mx-auto max-w-5xl space-y-4 px-6 py-10">
+      <div className="mx-auto max-w-6xl space-y-4 px-6 py-10">
         <ErrorBanner error={error ?? "Agent not found."} />
         <button
           type="button"
@@ -85,8 +118,20 @@ export default function AgentDetail({
     );
   }
 
+  // An agent with no documents refuses every question, so sending a first-time
+  // visitor straight to Chat would show them a persona that can only say "I
+  // don't know". The corpus is the prerequisite, and the landing tab says so.
+  const activeTab: TabId = tab ?? "documents";
+
+  const parameterSummary = [
+    `${agent.chunk_size}-token chunks`,
+    `k=${agent.retrieve_k}`,
+    agent.rerank_enabled ? `rerank top ${agent.rerank_top_n}` : "rerank off",
+    `rewrite below ${agent.score_threshold.toFixed(2)}`,
+  ].join(" · ");
+
   return (
-    <div className="mx-auto max-w-5xl px-6 py-10">
+    <div className="mx-auto max-w-6xl px-6 py-10">
       <button
         type="button"
         data-testid="agent-back"
@@ -97,29 +142,72 @@ export default function AgentDetail({
       </button>
 
       <header className="mb-6">
-        <div className="flex flex-wrap items-center gap-3">
-          <h1 className="text-2xl font-semibold tracking-tight text-slate-100">{agent.name}</h1>
-          <StatusPill status={agent.status} />
-        </div>
-        {agent.description && <p className="mt-2 text-sm text-slate-400">{agent.description}</p>}
+        <div className="flex items-start gap-4">
+          <PersonaIcon icon={agent.icon} fallback={agent.name} size="lg" />
 
-        {/*
-          The retrieval parameters, on screen, always. This is a workshop
-          artifact: the whole exercise is "change chunk_size, change k, watch the
-          answer change", and that argument is unmakeable if the numbers in force
-          are hidden behind a settings panel.
-        */}
-        <dl className="mt-4 grid grid-cols-2 gap-x-6 gap-y-2 text-xs sm:grid-cols-6">
-          <Fact label="Documents" value={agent.document_count} />
-          <Fact label="Chunk size" value={agent.chunk_size} />
-          <Fact label="Overlap" value={agent.chunk_overlap} />
-          <Fact label="Retrieve k" value={agent.retrieve_k} />
-          <Fact
-            label="Rerank"
-            value={agent.rerank_enabled ? `top ${agent.rerank_top_n}` : "off"}
-          />
-          <Fact label="Threshold" value={agent.score_threshold} />
-        </dl>
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-center gap-3">
+              <h1 className="text-2xl font-semibold tracking-tight text-slate-100">
+                {agent.name}
+              </h1>
+              <StatusPill status={agent.status} />
+              <CategoryBadge category={agent.category} />
+            </div>
+
+            <p className="mt-1 text-sm text-slate-400">
+              {agent.persona_role ?? "Custom agent"}
+              <span className="text-slate-600"> · </span>
+              <span className="text-slate-300">
+                {agent.document_count} {agent.document_count === 1 ? "document" : "documents"}
+              </span>
+            </p>
+
+            {agent.description && (
+              <p className="mt-2 max-w-3xl text-sm text-slate-400">{agent.description}</p>
+            )}
+
+            <p className="mt-3 text-xs text-slate-600">{parameterSummary}</p>
+          </div>
+        </div>
+
+        {agent.pedagogy && (
+          <p className="mt-4 max-w-3xl border-l-2 border-slate-800 pl-4 text-xs leading-relaxed text-slate-500">
+            <span className="font-medium text-slate-400">Rests on: </span>
+            {agent.pedagogy}
+          </p>
+        )}
+
+        <div className="mt-5 space-y-3">
+          <Reveal summary="Retrieval parameters" testId="agent-parameters">
+            <dl className="grid grid-cols-2 gap-x-6 gap-y-2 text-xs sm:grid-cols-4">
+              <Fact label="Documents" value={agent.document_count} />
+              <Fact label="Chunk size" value={agent.chunk_size} />
+              <Fact label="Overlap" value={agent.chunk_overlap} />
+              <Fact label="Splitter" value={agent.splitter} />
+              <Fact label="Retrieve k" value={agent.retrieve_k} />
+              <Fact
+                label="Rerank"
+                value={agent.rerank_enabled ? `top ${agent.rerank_top_n}` : "off"}
+              />
+              <Fact label="Score threshold" value={agent.score_threshold} />
+              <Fact label="Max rewrites" value={agent.max_rewrites} />
+            </dl>
+            <p className="mt-3 text-xs text-slate-500">
+              Copied from the template at creation and owned by this agent since. The
+              embedding model is <span className="text-slate-300">{agent.embedding_model ?? "unset"}</span>,
+              and it cannot change without re-ingesting: a namespace built by one model and
+              queried with another returns confident nonsense rather than an error.
+            </p>
+          </Reveal>
+
+          {agent.system_prompt && (
+            <Reveal summary="System prompt" testId="agent-prompt">
+              <pre className="max-h-72 overflow-y-auto text-xs leading-relaxed whitespace-pre-wrap text-slate-400">
+                {agent.system_prompt}
+              </pre>
+            </Reveal>
+          )}
+        </div>
       </header>
 
       <div className="mb-6">
@@ -132,7 +220,7 @@ export default function AgentDetail({
         className="mb-6 flex gap-1 border-b border-slate-800"
       >
         {TABS.map((entry) => {
-          const active = tab === entry.id;
+          const active = activeTab === entry.id;
           return (
             <button
               key={entry.id}
@@ -153,33 +241,25 @@ export default function AgentDetail({
         })}
       </div>
 
-      {tab === "documents" && (
-        <AgentDocuments agentId={agent.id} onCorpusChanged={() => void loadAgent()} />
-      )}
-      {tab === "ask" && <AgentAsk agentId={agent.id} onAnswered={setLastQueryId} />}
       {/*
-        Keyed on `lastQueryId` so asking a question and switching to Trace
-        remounts the tab and refetches. Without the key the component keeps the
-        events it loaded for the previous turn, and the trace silently belongs
-        to the wrong query -- which is worse than showing nothing, because it
-        looks right.
+        Both tabs stay mounted-on-demand rather than hidden with CSS, and the
+        chat is keyed on the agent so switching agents cannot leave the previous
+        conversation on screen. The trace no longer needs a tab of its own: it
+        hangs off the citations inside an answer, where the decision it explains
+        is actually visible.
       */}
-      {tab === "trace" && (
-        <AgentTrace
-          key={lastQueryId ?? "latest"}
-          agentId={agent.id}
-          queryId={lastQueryId}
-        />
+      {activeTab === "documents" && (
+        <AgentDocuments agentId={agent.id} onCorpusChanged={handleCorpusChanged} />
       )}
-    </div>
-  );
-}
+      {activeTab === "chat" && <AgentChat key={agent.id} agentId={agent.id} />}
 
-function Fact({ label, value }: { label: string; value: string | number }) {
-  return (
-    <div>
-      <dt className="text-slate-500">{label}</dt>
-      <dd className="mt-0.5 text-slate-200">{value}</dd>
+      {/*
+        Keyed on the agent for the same reason AgentChat is: an eval run is
+        polled on an interval, and switching agents while one is in flight must
+        start a fresh component rather than let the old poll write a scorecard
+        into the new agent's view.
+      */}
+      {activeTab === "evaluate" && <AgentEvaluate key={agent.id} agent={agent} />}
     </div>
   );
 }

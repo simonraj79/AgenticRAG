@@ -7,14 +7,15 @@ only for as long as this module stays the single construction site. Call
 `similarity_search()` anywhere else and promoting Stage 1 to Stage 2 stops being
 a one-line change and becomes a refactor.
 
-Scored retrieval lives here too (`search_with_scores`), for the same reason:
-Stage 2's threshold check and the `query_chunks.similarity_score` column both
-need scores, and letting them reach for the vector store directly would punch a
-hole through the seam on day one.
+Scored retrieval lives here too (`search_with_scores`, `aretrieve`), for the
+same reason: Stage 2's threshold check and the `query_chunks.similarity_score`
+column both need scores, and letting them reach for the vector store directly
+would punch a hole through the seam on day one.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from functools import lru_cache
 
 from langchain_classic.retrievers import ContextualCompressionRetriever
@@ -37,6 +38,12 @@ META_DOCUMENT_ID = "document_id"
 META_AGENT_ID = "agent_id"
 META_FILENAME = "filename"
 META_CHUNK_INDEX = "chunk_index"
+
+# Where CohereRerank writes its score. Verified against langchain_cohere/rerank.py
+# (`doc_copy.metadata["relevance_score"] = res["relevance_score"]`), which also
+# deepcopies the base metadata -- so `chunk_id` survives the rerank and a
+# reranked document still joins back to its Postgres row.
+RERANK_SCORE_KEY = "relevance_score"
 
 
 @lru_cache(maxsize=1)
@@ -89,6 +96,23 @@ def get_vector_store(agent: Agent) -> PineconeVectorStore:
     )
 
 
+def _build_compressor(agent: Agent) -> CohereRerank:
+    """The reranker. One construction site, two consumers.
+
+    `build_retriever` hands this to `ContextualCompressionRetriever`;
+    `aretrieve` calls `acompress_documents` on it directly. Those are the same
+    operation -- `ContextualCompressionRetriever` does nothing but run the
+    compressor over whatever its base retriever returned -- and they are written
+    against one constructor so that changing the model or `top_n` cannot fix one
+    path and quietly miss the other.
+    """
+    return CohereRerank(
+        model=settings.rerank_model,
+        top_n=agent.rerank_top_n,
+        cohere_api_key=settings.cohere_api_key,
+    )
+
+
 def build_retriever(agent: Agent, *, rerank: bool | None = None) -> BaseRetriever:
     """Build the retriever for an agent.
 
@@ -110,12 +134,113 @@ def build_retriever(agent: Agent, *, rerank: bool | None = None) -> BaseRetrieve
         return base
 
     return ContextualCompressionRetriever(
-        base_compressor=CohereRerank(
-            model=settings.rerank_model,
-            top_n=agent.rerank_top_n,
-            cohere_api_key=settings.cohere_api_key,
-        ),
+        base_compressor=_build_compressor(agent),
         base_retriever=base,
+    )
+
+
+@dataclass
+class Retrieval:
+    """One retrieval pass, with every score it produced still attached.
+
+    `documents` is the FINAL context set -- post-rerank when reranking ran --
+    and `scored` is the pre-rerank candidate list carrying Pinecone's cosine
+    similarity. Both are kept because neither can be derived from the other and
+    they answer different questions: `query_chunks.similarity_score` and PRD
+    3.5's threshold check need the first-pass numbers, while the prompt and the
+    citation list need the final set. A rerank that lifts a chunk from rank 18
+    to rank 1 is only visible if both orderings survive, and that promotion IS
+    the Stage 2 demo.
+    """
+
+    query: str
+    documents: list[Document] = field(default_factory=list)
+    scored: list[tuple[Document, float]] = field(default_factory=list)
+    reranked: bool = False
+
+    @property
+    def top_score(self) -> float | None:
+        """Best first-pass similarity, or None when nothing came back.
+
+        Higher is closer -- see `search_with_scores` for why this must not be
+        inverted. This is the number PRD 3.5's `< 0.5 -> rewrite` compares.
+        """
+        return float(self.scored[0][1]) if self.scored else None
+
+    @property
+    def similarity_scores(self) -> list[float]:
+        """First-pass cosine scores, aligned to `scored` (NOT to `documents`).
+
+        Reranking reorders and truncates, so position i of `documents` is not
+        position i of `scored` once it has run. Join the two through
+        `chunk_id` metadata rather than by index.
+        """
+        return [float(score) for _, score in self.scored]
+
+    @property
+    def rerank_scores(self) -> list[float | None]:
+        """Cohere's scores, aligned to `documents`.
+
+        All None when reranking did not run, and that is data rather than a
+        gap: a Stage 1 answer genuinely has a similarity score and no rerank
+        score. Showing the pair side by side is what makes the reranking
+        demo legible.
+        """
+        return [
+            float(raw) if (raw := doc.metadata.get(RERANK_SCORE_KEY)) is not None
+            else None
+            for doc in self.documents
+        ]
+
+
+async def aretrieve(
+    agent: Agent, query: str, *, rerank: bool | None = None, k: int | None = None
+) -> Retrieval:
+    """Retrieve once, keeping the scores. The path the pipeline uses.
+
+    **This exists because `BaseRetriever` has nowhere to put a score.** Its
+    interface returns `list[Document]`, so anything needing
+    `query_chunks.similarity_score` -- or Stage 2's threshold, which branches on
+    the top score -- had to search a second time for numbers the first search
+    already paid for. `app/api/ask.py` did exactly that, and CLAUDE.md prices
+    the duplicate at embed 365 ms + Pinecone k=20 394 ms per question.
+
+    `build_retriever` above is unchanged and is still THE seam for the Stage 1
+    -> Stage 2 story. This is the same two steps in the same order against the
+    same objects -- `get_vector_store` then `_build_compressor` -- with the
+    scores kept instead of dropped on the floor. It is a decomposition of that
+    retriever, not a second implementation of it, which is what stops the two
+    from drifting into answering differently.
+
+    Async rather than sync-in-a-threadpool: `asimilarity_search_with_score`
+    awaits a genuine asyncio Pinecone client (`_IndexAsyncio`), so the event
+    loop stays free for the length of the index query rather than merely being
+    handed off to a worker thread. Cohere has no async client, so
+    `acompress_documents` runs it in an executor -- the same thing a threadpool
+    would do, done once by the library instead of at every call site.
+    """
+    if rerank is None:
+        rerank = agent.rerank_enabled
+
+    scored = await get_vector_store(agent).asimilarity_search_with_score(
+        query, k=k or agent.retrieve_k
+    )
+    documents = [doc for doc, _ in scored]
+
+    # `and documents`: reranking an empty list is a network call that cannot
+    # change anything, and `reranked` is recorded on the result, so claiming a
+    # rerank happened when there was nothing to rerank would put a RERANK step
+    # in a trace whose before/after lists are both empty.
+    reranked = bool(rerank and documents)
+    if reranked:
+        # list(), because CohereRerank returns a Sequence and everything
+        # downstream indexes, slices and enumerates it.
+        documents = list(
+            await _build_compressor(agent).acompress_documents(documents, query)
+        )
+
+    return Retrieval(
+        query=query, documents=documents, scored=scored, reranked=reranked
     )
 
 

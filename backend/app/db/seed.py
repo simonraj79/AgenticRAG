@@ -18,11 +18,19 @@ anyway because the prompt forbade answering outside the context. The threshold
 governs *rewriting*; the prompt governs *refusing*. Every prompt below must
 therefore carry its own grounding and refusal rules, because nothing downstream
 will supply them. See CLAUDE.md, "Retrieval calibration".
+
+The five pedagogical personas live in `personas.py` and are ordered into the
+picker at the bottom of this file. They are a different kind of object -- a
+teaching method that carries a retrieval configuration, rather than a retrieval
+configuration that carries a prompt -- but they are the same shape, and
+`ALL_TEMPLATES` is the single list anything seeding should read.
 """
 
 from __future__ import annotations
 
 from typing import Any
+
+from app.db.personas import PERSONA_TEMPLATES
 
 # --------------------------------------------------------------------------
 # System prompts
@@ -86,6 +94,14 @@ Answer the question using only the CONTEXT below.
 # Every non-nullable column is spelled out. The ORM's `default=` values are
 # Python-side only and do not exist in the database, so a Core insert that omits
 # one hits a NOT NULL violation rather than quietly picking up the default.
+#
+# These three carry `persona_role`, `icon` and `category` so the picker can
+# render them beside the personas without a special case, but their `pedagogy`
+# is deliberately absent: they are retrieval configurations, not teaching
+# methods, and inventing a learning-science justification for "Lecture Q&A"
+# would put a claim on the card that nothing supports. A null `pedagogy` is the
+# honest value, and consumers have to handle it anyway -- user-created agents
+# have one too.
 AGENT_TEMPLATES: list[dict[str, Any]] = [
     {
         "slug": "lecture-qa",
@@ -95,6 +111,10 @@ AGENT_TEMPLATES: list[dict[str, Any]] = [
             "transcripts, where a single answer is spread over several turns of "
             "dialogue."
         ),
+        "persona_role": "Teaching assistant",
+        "pedagogy": None,
+        "icon": "\U0001F393",  # graduation cap
+        "category": "general",
         # PRD 10, "Chunking default": 800 tokens / 120 overlap, markdown-aware.
         # 800 holds a multi-turn exchange together while using 10% of
         # gemini-embedding-2's 8,192-token ceiling, so nothing truncates; 120 is
@@ -121,6 +141,10 @@ AGENT_TEMPLATES: list[dict[str, Any]] = [
             "documents where the answer is one specific passage rather than a "
             "span of discussion."
         ),
+        "persona_role": "Policy assistant",
+        "pedagogy": None,
+        "icon": "\U0001F4CB",  # clipboard
+        "category": "general",
         # Halved from the lecture default, and deliberately: a policy answer is
         # one clause, so an 800-token chunk pulls in three neighbouring clauses
         # that the reranker then has to discount. 400 keeps a clause roughly
@@ -153,6 +177,14 @@ AGENT_TEMPLATES: list[dict[str, Any]] = [
             "Model defaults and a minimal grounding prompt. The starting point "
             "when you want to tune every parameter yourself."
         ),
+        "persona_role": "Blank canvas",
+        "pedagogy": None,
+        # Escaped rather than pasted, like every icon in personas.py: these are
+        # the only non-ASCII literals in the backend, and an escape survives a
+        # file being reopened under a non-UTF-8 codepage. U+FE0F forces emoji
+        # presentation -- a bare U+2699 renders as monochrome text on Windows.
+        "icon": "\u2699\uFE0F",  # gear
+        "category": "general",
         # Every value is the model default from app/db/models.py. That is the
         # point: "create your own" is not a separate branch in the code, it is
         # this template (PRD 4.2). If a default changes in the model, it changes
@@ -170,6 +202,24 @@ AGENT_TEMPLATES: list[dict[str, Any]] = [
     },
 ]
 
-# The slugs this module owns. Anything seeding or un-seeding should scope itself
-# to these and leave hand-created templates alone.
-TEMPLATE_SLUGS: list[str] = [template["slug"] for template in AGENT_TEMPLATES]
+# --------------------------------------------------------------------------
+# The picker
+# --------------------------------------------------------------------------
+
+# "From scratch" is the blank canvas, and it has to stay LAST. `api/agents.py`
+# orders the template picker by `TEMPLATE_SLUGS`, so declaration order here is
+# screen order there, and simply concatenating the personas onto the end of
+# AGENT_TEMPLATES would leave the blank canvas sitting third of eight -- reading
+# as just another option rather than as the fallback for someone who has
+# rejected all the others. Hence the splice rather than a `+`.
+_BLANK_CANVAS_SLUG = "from-scratch"
+
+ALL_TEMPLATES: list[dict[str, Any]] = [
+    *(t for t in AGENT_TEMPLATES if t["slug"] != _BLANK_CANVAS_SLUG),
+    *PERSONA_TEMPLATES,
+    *(t for t in AGENT_TEMPLATES if t["slug"] == _BLANK_CANVAS_SLUG),
+]
+
+# The slugs this module owns, in picker order. Anything seeding or un-seeding
+# should scope itself to these and leave hand-created templates alone.
+TEMPLATE_SLUGS: list[str] = [template["slug"] for template in ALL_TEMPLATES]

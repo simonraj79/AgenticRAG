@@ -22,7 +22,18 @@
  *    the 422 validation-array form -- so the real message reaches the screen.
  */
 
-import type { ApiInit } from "./types.ts";
+import type {
+  ApiInit,
+  AskResult,
+  Conversation,
+  ConversationDetail,
+  EvalRun,
+  EvalRunDetail,
+  GoldenQuestion,
+  GoldenQuestionInput,
+  GoldenSetFileQuestion,
+  TraceEvent,
+} from "./types.ts";
 
 /**
  * The ONLY configuration value the frontend receives.
@@ -150,9 +161,193 @@ export async function api<T>(path: string, init: ApiInit = {}): Promise<T> {
     throw new ApiError(response.status, await readError(response));
   }
 
-  if (response.status === 204) {
+  // An empty body is decoded as `undefined` rather than handed to a JSON
+  // parser. 204 is the obvious case, but 202 is the one that bites: the Stage 3
+  // routes accept work and answer "started", and a backend that answers 202
+  // with no body at all would make `response.json()` reject with a bare
+  // "Unexpected end of JSON input" -- an error naming neither the route nor the
+  // real problem, on a call that in fact succeeded.
+  const text = await response.text();
+  // Trimmed, because a body of a single newline is as empty as no body at all
+  // and would otherwise take the parse path below.
+  if (!text.trim()) {
     return undefined as unknown as T;
   }
 
-  return (await response.json()) as T;
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    // A 200 carrying HTML is a proxy or a wrong VITE_API_URL, not a bug in the
+    // caller. Naming the path and quoting the body is what makes that findable.
+    throw new ApiError(
+      response.status,
+      `Expected JSON from ${path} but got: ${text.slice(0, 200)}`,
+    );
+  }
 }
+
+// --------------------------------------------------------------------------
+// Chat
+// --------------------------------------------------------------------------
+
+/**
+ * The conversation routes, transcribed once.
+ *
+ * The other views build their paths inline, which is fine when a view owns one
+ * endpoint. Chat owns six, split across two components -- the thread reads and
+ * writes conversations, the trace panel reads a query's timeline -- and two of
+ * them differ only in which id goes in the path. Writing
+ * `/api/conversations/${id}/ask` by hand in one place and
+ * `/api/agents/${id}/ask` in another is exactly the shape of mistake that
+ * returns a 404 blamed on the backend.
+ *
+ * Everything here still goes through `api()`, so `credentials: "include"` and
+ * the error unwrapping are not bypassed.
+ */
+export const chat = {
+  /** Threads for one agent, most recently active first. */
+  list: (agentId: string) =>
+    api<Conversation[]>(`/api/agents/${encodeURIComponent(agentId)}/conversations`),
+
+  /** One thread with its full history. */
+  load: (conversationId: string) =>
+    api<ConversationDetail>(`/api/conversations/${encodeURIComponent(conversationId)}`),
+
+  rename: (conversationId: string, title: string) =>
+    api<Conversation>(`/api/conversations/${encodeURIComponent(conversationId)}`, {
+      method: "PATCH",
+      json: { title },
+    }),
+
+  remove: (conversationId: string) =>
+    api<{ ok: boolean }>(`/api/conversations/${encodeURIComponent(conversationId)}`, {
+      method: "DELETE",
+    }),
+
+  /**
+   * Ask inside an existing thread. Slow, and the range is wide: ~15 s for a
+   * terse agent, 30-60 s for a coaching persona, because generation is
+   * token-bound and a persona answer carries an analogy, a worked example and
+   * a named gap. A follow-up adds ~4 s more for contextualisation before the
+   * question is even embedded. That is why the caller shows elapsed time and a
+   * named stage rather than a spinner.
+   */
+  ask: (conversationId: string, question: string) =>
+    api<AskResult>(`/api/conversations/${encodeURIComponent(conversationId)}/ask`, {
+      method: "POST",
+      json: { question },
+    }),
+
+  /**
+   * Ask with no thread yet. The server creates one and returns its id, so the
+   * client never has to create an empty conversation up front and then decide
+   * what to do with it if the question is never sent.
+   */
+  askNew: (agentId: string, question: string) =>
+    api<AskResult>(`/api/agents/${encodeURIComponent(agentId)}/ask`, {
+      method: "POST",
+      json: { question },
+    }),
+
+  /** The decision timeline for one turn. */
+  trace: (queryId: string) => api<TraceEvent[]>(`/api/trace/${encodeURIComponent(queryId)}`),
+};
+
+// --------------------------------------------------------------------------
+// Evaluation (Stage 3)
+// --------------------------------------------------------------------------
+
+/**
+ * The Stage 3 routes, transcribed once.
+ *
+ * Named `evaluation` and not `eval`: `eval` is not a legal binding name under
+ * strict mode, which every ES module is, so `export const eval = {...}` is a
+ * syntax error rather than a shadowing warning.
+ *
+ * Eleven endpoints across two resources, and the golden-set half is split
+ * between agent-scoped paths (list, create, suggest, import, export) and
+ * question-scoped ones (patch, delete) -- a shape that invites writing
+ * `/api/agents/{id}/golden-questions/{qid}` by hand in one place and getting a
+ * 404 blamed on the backend. Everything still goes through `api()`, so
+ * `credentials: "include"` and the error unwrapping are not bypassed.
+ */
+export const evaluation = {
+  /** One agent's set, in `order_index` order. Server-side filtering on
+   *  `agent_id` is what keeps unscoped legacy rows out; this client never sees
+   *  them. */
+  goldenSet: (agentId: string) =>
+    api<GoldenQuestion[]>(`/api/agents/${encodeURIComponent(agentId)}/golden-questions`),
+
+  createQuestion: (agentId: string, input: GoldenQuestionInput) =>
+    api<GoldenQuestion>(`/api/agents/${encodeURIComponent(agentId)}/golden-questions`, {
+      method: "POST",
+      json: input,
+    }),
+
+  /**
+   * Ask the model to propose ten questions from this agent's own indexed
+   * chunks. Answers **202** and does the work in the background, so the caller
+   * polls `goldenSet` until they appear rather than awaiting them here.
+   */
+  suggestQuestions: (agentId: string) =>
+    api<unknown>(`/api/agents/${encodeURIComponent(agentId)}/golden-questions/suggest`, {
+      method: "POST",
+    }),
+
+  importQuestions: (agentId: string, questions: GoldenSetFileQuestion[]) =>
+    api<GoldenQuestion[]>(`/api/agents/${encodeURIComponent(agentId)}/golden-questions/import`, {
+      method: "POST",
+      json: { questions },
+    }),
+
+  /**
+   * A URL, not a request.
+   *
+   * Export is a plain `<a href>` to the endpoint, whose `Content-Disposition:
+   * attachment` header does the saving. The alternative -- fetch the JSON,
+   * wrap it in a Blob, click a synthetic `<a download>` -- is inert inside the
+   * viewer sandbox, which blocks downloads a page starts itself. A normal link
+   * is a navigation the browser owns, and it carries the session cookie because
+   * that cookie is `SameSite=None; Secure` (PRD section 6.5).
+   */
+  exportUrl: (agentId: string) =>
+    `${API_URL}/api/agents/${encodeURIComponent(agentId)}/golden-questions/export`,
+
+  /** Edit any field. Saving a suggested question is what flips its `source` to
+   *  "edited" -- server-side, so the response is the authority on the badge. */
+  updateQuestion: (questionId: string, patch: Partial<GoldenQuestionInput>) =>
+    api<GoldenQuestion>(`/api/golden-questions/${encodeURIComponent(questionId)}`, {
+      method: "PATCH",
+      json: patch,
+    }),
+
+  deleteQuestion: (questionId: string) =>
+    api<{ ok: boolean }>(`/api/golden-questions/${encodeURIComponent(questionId)}`, {
+      method: "DELETE",
+    }),
+
+  /**
+   * Start a run. Answers **202** with the run row, which is why the caller can
+   * begin polling immediately instead of guessing an id.
+   *
+   * Slow by construction: every question is a full agent turn (15 s bare, 30-60
+   * s under a coaching persona, because generation is token-bound) plus four
+   * judged calls. Ten questions is minutes, not seconds.
+   */
+  startRun: (agentId: string, notes: string | null) =>
+    api<EvalRun>(`/api/agents/${encodeURIComponent(agentId)}/eval-runs`, {
+      method: "POST",
+      json: { notes },
+    }),
+
+  /** This agent's runs, newest first -- the "what changed since last run"
+   *  history that is the whole reason `eval_runs` is persisted (PRD 4.4). */
+  listRuns: (agentId: string) =>
+    api<EvalRun[]>(`/api/agents/${encodeURIComponent(agentId)}/eval-runs`),
+
+  loadRun: (runId: string) =>
+    api<EvalRunDetail>(`/api/eval-runs/${encodeURIComponent(runId)}`),
+
+  deleteRun: (runId: string) =>
+    api<{ ok: boolean }>(`/api/eval-runs/${encodeURIComponent(runId)}`, { method: "DELETE" }),
+};

@@ -16,6 +16,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    desc,
     func,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
@@ -32,6 +33,21 @@ def _pk() -> Mapped[uuid.UUID]:
 
 def _created_at() -> Mapped[datetime]:
     return mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+def _updated_at() -> Mapped[datetime]:
+    """A last-touched timestamp maintained by SQLAlchemy, not by the database.
+
+    `onupdate` emits `now()` in the UPDATE statement, so it fires only when this
+    row itself is written. There is no trigger behind it: inserting a child row
+    that points here leaves the parent's timestamp alone.
+    """
+    return mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
 
 
 # --------------------------------------------------------------------------
@@ -115,6 +131,19 @@ class AgentTemplate(Base):
     system_prompt: Mapped[str | None] = mapped_column(Text)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
+    # Persona presentation. These carry no behaviour: the persona lives entirely
+    # in `system_prompt`, and these four exist so the picker can show what the
+    # prompt does without making a user read it. All nullable, because a
+    # hand-created template has no obligation to be a persona and the three
+    # templates seeded before this column existed have no pedagogy to claim.
+    persona_role: Mapped[str | None] = mapped_column(String(64))
+    pedagogy: Mapped[str | None] = mapped_column(Text)
+    icon: Mapped[str | None] = mapped_column(String(16))
+    # explain / practice / reflect / assess / general. Deliberately a plain
+    # String rather than an enum: adding a category must not need a migration,
+    # and an unrecognised value degrades to "ungrouped" rather than to an error.
+    category: Mapped[str | None] = mapped_column(String(32))
+
     agents: Mapped[list["Agent"]] = relationship(back_populates="template")
 
 
@@ -156,6 +185,16 @@ class Agent(Base):
     # The embedding model this agent's vectors were built with. A mismatch
     # against the current setting means the namespace must be re-ingested.
     embedding_model: Mapped[str | None] = mapped_column(String(128))
+
+    # Copied from the template at creation alongside every other parameter
+    # (PRD 4.2). Duplicated onto the agent rather than read back through
+    # `template_id` for the same reason the tuning parameters are: renaming a
+    # template's persona must not silently re-label agents somebody already
+    # built, and an agent whose template was deleted keeps its identity.
+    persona_role: Mapped[str | None] = mapped_column(String(64))
+    pedagogy: Mapped[str | None] = mapped_column(Text)
+    icon: Mapped[str | None] = mapped_column(String(16))
+    category: Mapped[str | None] = mapped_column(String(32))
 
     owner: Mapped[User] = relationship(back_populates="agents")
     template: Mapped[AgentTemplate | None] = relationship(back_populates="agents")
@@ -253,6 +292,46 @@ class IngestionRun(Base):
 # 4.3 Query & trace
 # --------------------------------------------------------------------------
 
+class Conversation(Base):
+    """One chat thread: an ordered run of queries against a single agent.
+
+    PRD section 11 still lists multi-turn conversational memory as out of scope.
+    It was requested after that section was written, so this table is the part
+    of the schema the PRD does not yet describe - not a contradiction of it.
+    """
+
+    __tablename__ = "conversations"
+
+    id: Mapped[uuid.UUID] = _pk()
+    created_at: Mapped[datetime] = _created_at()
+    # The chat list is ordered by recency of activity, which is this column.
+    # Nothing bumps it automatically - see `_updated_at`. The code that appends
+    # a turn has to touch the conversation row for the list to reorder.
+    updated_at: Mapped[datetime] = _updated_at()
+
+    # A thread belongs to one agent: its history is only meaningful against the
+    # corpus and persona that produced it, and history-aware retrieval reads
+    # earlier turns back as context for a search in this agent's namespace.
+    agent_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("agents.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    # Usually derived from the first question rather than typed. Nullable so a
+    # thread can exist before there is anything to name it after.
+    title: Mapped[str | None] = mapped_column(String(200))
+    # Hides a thread from the list without destroying the trace history that
+    # hangs off its queries. There is no delete path that would keep those.
+    is_archived: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+    # Ordered here as well as by the index below, so a thread read through the
+    # ORM is never rendered out of sequence by whatever order the rows come back.
+    queries: Mapped[list["Query"]] = relationship(
+        back_populates="conversation", order_by="Query.created_at"
+    )
+
+
 class Query(Base):
     __tablename__ = "queries"
 
@@ -269,6 +348,14 @@ class Query(Base):
     session_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("sessions.id", ondelete="SET NULL")
     )
+    # Nullable, and it stays nullable. Rows already exist from the one-shot era
+    # that belong to no thread, and a NOT NULL column cannot be added to a
+    # populated table without inventing a conversation to backfill them into -
+    # which would fabricate threads that were never had. A null here means "a
+    # single question, asked outside any thread", and readers must handle it.
+    conversation_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("conversations.id", ondelete="CASCADE"), index=True
+    )
     question: Mapped[str] = mapped_column(Text, nullable=False)
     answer: Mapped[str | None] = mapped_column(Text)
     model_used: Mapped[str | None] = mapped_column(String(128))
@@ -278,9 +365,16 @@ class Query(Base):
     # A correct refusal is a success case, not a failure.
     refused: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
+    conversation: Mapped[Conversation | None] = relationship(back_populates="queries")
     trace_events: Mapped[list["TraceEvent"]] = relationship(back_populates="query")
 
-    __table_args__ = (Index("ix_queries_user_created", "user_id", "created_at"),)
+    __table_args__ = (
+        Index("ix_queries_user_created", "user_id", "created_at"),
+        # The chat view reads exactly this: one thread's turns, oldest first.
+        # The single-column index on `conversation_id` finds the thread; this one
+        # returns it already ordered, so opening a long conversation never sorts.
+        Index("ix_queries_conversation_created", "conversation_id", "created_at"),
+    )
 
 
 class TraceEvent(Base):
@@ -331,33 +425,124 @@ class QueryChunk(Base):
 # --------------------------------------------------------------------------
 
 class GoldenQuestion(Base):
+    """One test question, belonging to the agent whose corpus can answer it."""
+
     __tablename__ = "golden_questions"
 
     id: Mapped[uuid.UUID] = _pk()
     created_at: Mapped[datetime] = _created_at()
 
+    # A golden set is only meaningful against ONE corpus. A question about
+    # lecture transcripts scored against a policy agent measures nothing - and
+    # it measures nothing QUIETLY, because faithfulness and recall still return
+    # numbers, they are simply numbers about the wrong corpus. Without this
+    # column every agent shares one global golden set, which is silently wrong
+    # rather than loudly broken, and a silently wrong scorecard is worse than no
+    # scorecard because it is acted on.
+    #
+    # Nullable for the same reason `queries.conversation_id` is: rows may
+    # already exist unscoped, and a NOT NULL column cannot be added to a
+    # populated table without a backfill - which here would mean guessing which
+    # agent a question was written for, i.e. inventing the very scoping this
+    # column exists to record. NULL means "written before golden sets belonged
+    # to an agent", and readers must filter it out rather than assume it.
+    agent_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("agents.id", ondelete="CASCADE"), index=True
+    )
     question: Mapped[str] = mapped_column(Text, nullable=False)
     # Required by Ragas context_recall - not optional decoration.
     reference_answer: Mapped[str | None] = mapped_column(Text)
     expected_behaviour: Mapped[str] = mapped_column(String(16), default="answer", nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    # ai_suggested / edited / manual / imported. Provenance is part of what a
+    # score is worth: a set the model wrote for itself and nobody reviewed is a
+    # weaker test than the same set after a human corrected it, and the two are
+    # indistinguishable once they are rows. Deliberately a plain String rather
+    # than an enum, for the same reason `agent_templates.category` is - adding a
+    # provenance must not need a migration.
+    source: Mapped[str] = mapped_column(
+        String(16), default="manual", server_default="manual", nullable=False
+    )
+    # Stable display order in the editor. `created_at` cannot supply it: editing
+    # a question does not change when it was created, and a user who drags a
+    # question up has nowhere to record that. NOT NULL with a server default,
+    # because existing rows have no order to preserve and 0 leaves them tied,
+    # which sorts by the secondary key rather than at random.
+    order_index: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0", nullable=False
+    )
+
+    # The editor reads exactly this: one agent's set, in display order. The
+    # single-column index on `agent_id` finds the set; this one hands it back
+    # already ordered, so opening a long golden set never sorts.
+    __table_args__ = (
+        Index("ix_golden_questions_agent_order", "agent_id", "order_index"),
+    )
 
 
 class EvalRun(Base):
+    """One scorecard: one agent's golden set, scored once."""
+
     __tablename__ = "eval_runs"
 
     id: Mapped[uuid.UUID] = _pk()
     created_at: Mapped[datetime] = _created_at()
 
+    # Which agent was scored. Same reasoning as `golden_questions.agent_id`
+    # above, and the same nullability for the same reason: a run predating this
+    # column cannot be attributed to an agent after the fact without guessing.
+    agent_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("agents.id", ondelete="CASCADE"), index=True
+    )
     user_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL")
     )
     judge_model: Mapped[str | None] = mapped_column(String(128))
+    # The model that produced the ANSWERS, kept BESIDE `judge_model` rather than
+    # collapsed into one "model" column. That separation is the point: when the
+    # two are equal the run is self-judged - a model grading its own output -
+    # and a scorecard that cannot tell you that is a scorecard you cannot trust.
+    # Recorded per run, not read from `agents.generation_model`, because the
+    # agent's setting can change afterwards and the number would then be
+    # attributed to a model that never produced it.
+    generation_model: Mapped[str | None] = mapped_column(String(128))
     status: Mapped[str] = mapped_column(String(32), default="running", nullable=False)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Aggregate scores, plus `weakest_metric`, `scored_count` and the refusal
+    # tally. JSONB rather than four float columns, on three grounds:
+    #   - it carries more than four floats already, and `weakest_metric` is a
+    #     string that would otherwise need a column of its own;
+    #   - the shape will grow as metrics are added, and a metric should not cost
+    #     a migration;
+    #   - it is written ONCE at the end of a run and read whole to render a
+    #     card, never queried field-by-field, so the one thing columns buy -
+    #     indexed per-field predicates - is not wanted here.
+    # The per-question numbers stay in `eval_results`; this is the roll-up.
+    summary: Mapped[dict | None] = mapped_column(JSONB)
+    # A long run is a background job, so the UI needs somewhere to read
+    # "3 of 12" from between polls. NOT NULL with a server default: a run that
+    # has not started yet is honestly 0 of 0, whereas NULL would force every
+    # reader to decide what a missing count means.
+    progress_done: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0", nullable=False
+    )
+    progress_total: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0", nullable=False
+    )
+    # Run-level failure - the reason a run ended without a summary. Distinct
+    # from `eval_results.error`, which is one question going wrong inside an
+    # otherwise good run.
+    error: Mapped[str | None] = mapped_column(Text)
     # What changed since the last run - the point of eval-driven development.
     notes: Mapped[str | None] = mapped_column(Text)
+
+    # The history list reads exactly this: one agent's runs, newest first.
+    # DESC in the index rather than at the call site so the newest-first read -
+    # which is every read - is a forward scan.
+    __table_args__ = (
+        Index("ix_eval_runs_agent_created", "agent_id", desc("created_at")),
+    )
 
 
 class EvalResult(Base):
@@ -379,6 +564,18 @@ class EvalResult(Base):
     answer_relevance: Mapped[float | None] = mapped_column(Float)
     context_precision: Mapped[float | None] = mapped_column(Float)
     context_recall: Mapped[float | None] = mapped_column(Float)
+    # Did the agent do what `expected_behaviour` asked - answer when it should
+    # answer, refuse when it should refuse. Not derivable from the four scores
+    # above: a correct refusal is a success case that Ragas has nothing to grade,
+    # so without this column the only record of a passed refusal question is four
+    # NULLs, which is indistinguishable from a run that crashed. Nullable because
+    # it is unknown until the question has actually been asked.
+    behaviour_ok: Mapped[bool | None] = mapped_column(Boolean)
+    # Why THIS question failed - a judge timeout, a generation error. Per-row so
+    # that one bad question records its reason and the run carries on; without
+    # it the only place to put the failure is the run, where it voids the whole
+    # scorecard for a single row.
+    error: Mapped[str | None] = mapped_column(Text)
 
 
 # --------------------------------------------------------------------------

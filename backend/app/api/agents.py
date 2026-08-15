@@ -12,8 +12,11 @@ never silently re-tune agents somebody already built and evaluated. An agent's
 parameters are part of its measured behaviour, so an agent whose config could
 change under it -- because an admin edited a shared preset -- would invalidate
 every eval run recorded against it, with nothing in the trace to show why the
-numbers moved. `template_id` survives creation for provenance only: it answers
-"where did this start", never "what is this now".
+numbers moved. The persona columns are copied for the same reason and are not an
+exception to it: what an agent is *called* has to stay as fixed as how it
+behaves, or a card and the traces under it start describing different things.
+`template_id` survives creation for provenance only: it answers "where did this
+start", never "what is this now".
 
 **2. Every single-agent route resolves through `OwnedAgent`.** Not one of them
 filters by owner inline. See `app/api/deps.py`: a forgotten `.where()` is not a
@@ -50,9 +53,23 @@ router = APIRouter(prefix="/api", tags=["agents"])
 
 # The parameters a template supplies to a new agent. Spelled out as one tuple
 # rather than copied field by field so that adding a tunable column cannot leave
-# it copied here and missing from the editor, or the reverse. Note what is NOT
-# in it: `slug`, `name`, `description` and `is_active` describe the template, not
-# the agent, and `id` is the provenance link that stays in `template_id`.
+# it copied here and missing from the editor, or the reverse.
+#
+# The last four are the PERSONA -- role, pedagogy, icon, category -- and they are
+# copied for exactly the PRD 4.2 reason the tuning numbers are, not as a
+# convenience. A persona is what an agent is: somebody picked "Socratic Tutor",
+# built a corpus for it and recorded eval runs against it. Read back through
+# `template_id` instead, and an admin renaming or recategorising the preset
+# tomorrow silently re-labels every agent already built from it, so the card and
+# the traces underneath it would start describing different things. Note that
+# `system_prompt` -- the persona's actual behaviour -- was copied from the start,
+# which is why the gap this closes was a labelling one: without these four an
+# agent behaved like a Socratic tutor and displayed as nothing in particular.
+#
+# What is still NOT in it: `slug`, `name`, `description` and `is_active` describe
+# the template as an entry in the picker rather than the agent (which carries its
+# own user-chosen name and description), and `id` is the provenance link that
+# stays in `template_id`.
 TEMPLATE_PARAMETERS: tuple[str, ...] = (
     "chunk_size",
     "chunk_overlap",
@@ -63,18 +80,64 @@ TEMPLATE_PARAMETERS: tuple[str, ...] = (
     "score_threshold",
     "max_rewrites",
     "system_prompt",
+    "persona_role",
+    "pedagogy",
+    "icon",
+    "category",
 )
 
 # Postgres' SQLSTATE for a unique violation. Used to make sure a 409 is only
 # ever claimed for a genuine duplicate -- see `_conflict_or_reraise`.
 _UNIQUE_VIOLATION = "23505"
 
-# Template display order. `created_at` cannot supply it (all three are seeded in
-# one migration, in one transaction, with one timestamp) and alphabetical order
-# would put "From scratch" at the top of the picker -- the worst possible first
-# option for a user who came here to be handed a starting point. The seed's
-# declaration order is the intended one: the PRD default first, the blank canvas
-# last. Anything not seeded by this repo sorts after the three, by name.
+# --- Template display order -------------------------------------------------
+#
+# Ordered deliberately, because nothing on the row supplies a usable order on its
+# own: `created_at` cannot (the templates are seeded by migration, in one
+# transaction, on one timestamp) and alphabetical order would put "From scratch"
+# at the top of the picker -- the worst possible first option for a user who came
+# here to be handed a starting point. Three keys, applied in this order.
+#
+# 1. THE BLANK CANVAS SORTS LAST, whatever category it carries. `from-scratch` is
+#    categorised `general`, so grouping alone would leave it third of eight,
+#    reading as just another preset rather than as the fallback for somebody who
+#    has rejected all of them.
+# 2. THEN BY CATEGORY. Eight entries is where a flat list stops being scannable,
+#    and keying the grouping on the column rather than on a hand-maintained list
+#    means a template added later lands with its peers instead of at the end.
+#    NULL and unrecognised categories fall through to the ELSE and group last --
+#    the same "ungrouped" degradation the frontend badge makes, and the reason
+#    `AgentTemplate.category` is a plain String rather than an enum.
+# 3. THEN BY THE SEED'S DECLARATION ORDER as the tiebreak inside a group, and
+#    finally by name for anything this repo did not seed.
+#
+# Keys 1 and 2 reproduce `seed.ALL_TEMPLATES` order exactly as it stands today.
+# That is not redundancy: the declaration list is what the seed used, and the
+# category rank is what keeps the picker sensible when the next persona is added
+# to the middle of it.
+_CATEGORY_ORDER: tuple[str, ...] = (
+    "general",
+    "explain",
+    "practice",
+    "assess",
+    "reflect",
+)
+
+# `seed.py` owns this slug and keeps its own copy private. Duplicated rather than
+# imported because the two uses are independent: there it splices the seed list,
+# here it pins one row to the bottom of a SQL sort.
+_BLANK_CANVAS_SLUG = "from-scratch"
+
+_BLANK_CANVAS_LAST = case(
+    {_BLANK_CANVAS_SLUG: 1}, value=AgentTemplate.slug, else_=0
+)
+
+_CATEGORY_ORDER_RANK = case(
+    {name: index for index, name in enumerate(_CATEGORY_ORDER)},
+    value=AgentTemplate.category,
+    else_=len(_CATEGORY_ORDER),
+)
+
 _TEMPLATE_ORDER = case(
     {slug: index for index, slug in enumerate(TEMPLATE_SLUGS)},
     value=AgentTemplate.slug,
@@ -103,10 +166,25 @@ SplitterName = Literal["markdown", "recursive"]
 class TemplateOut(BaseModel):
     """A preset, as the create-agent picker sees it.
 
-    `system_prompt` is deliberately absent. It is long, it is the load-bearing
-    safety control (see `app/db/seed.py`), and it is not a choice the picker
-    offers -- the copy lands on the agent, where `AgentOut.system_prompt` exposes
-    it for editing against the agent that will actually use it.
+    **`system_prompt` used to be deliberately absent**, on the grounds that it is
+    long, that it is the load-bearing safety control (see `app/db/seed.py`), and
+    that the picker offered a set of retrieval numbers rather than a prompt --
+    the copy landed on the agent, where `AgentOut.system_prompt` exposed it for
+    editing against the agent that would actually use it.
+
+    That reasoning is inverted by personas, and the reversal is the point rather
+    than a relaxation. What a user now picks between is a Socratic tutor and a
+    quiz writer, and the entire difference between those two IS the prompt: the
+    retrieval parameters barely move. Withholding it would mean asking somebody
+    to choose a teaching method from a one-line description while the thing they
+    are actually choosing stayed hidden. It is still the safety control, and
+    showing it is what lets a tutor read the refusal rules before trusting the
+    agent with a class.
+
+    The other four are presentation only (`app/db/models.py` says so at the
+    column): they let a card show what the prompt does without making the reader
+    parse it. All nullable -- `pedagogy` is null on the three original templates,
+    which are retrieval configurations rather than teaching methods.
     """
 
     model_config = ConfigDict(from_attributes=True)
@@ -115,6 +193,10 @@ class TemplateOut(BaseModel):
     slug: str
     name: str
     description: str | None = None
+    persona_role: str | None = None
+    pedagogy: str | None = None
+    icon: str | None = None
+    category: str | None = None
     chunk_size: int
     chunk_overlap: int
     splitter: str
@@ -123,14 +205,21 @@ class TemplateOut(BaseModel):
     rerank_top_n: int
     score_threshold: float
     max_rewrites: int
+    system_prompt: str | None = None
 
 
 class AgentOut(BaseModel):
     """One agent and its effective configuration.
 
-    Every parameter here is the agent's own column, never read through
-    `template_id`. What the UI shows is what the next ingest and the next query
-    will actually use.
+    Every field here is the agent's own column, never read through `template_id`
+    -- the persona labels included. What the UI shows is what the next ingest and
+    the next query will actually use, and what the card says is what this agent
+    was built as, not what the preset it started from has since been renamed to.
+
+    All four persona fields are nullable and the frontend has to treat them that
+    way: every agent created before the columns existed has them null, and
+    `pedagogy` is null even on a fresh agent built from one of the three original
+    templates.
     """
 
     model_config = ConfigDict(from_attributes=True)
@@ -138,6 +227,10 @@ class AgentOut(BaseModel):
     id: uuid.UUID
     name: str
     description: str | None = None
+    persona_role: str | None = None
+    pedagogy: str | None = None
+    icon: str | None = None
+    category: str | None = None
     status: str
     visibility: str
     template_id: uuid.UUID | None = None
@@ -311,7 +404,13 @@ async def _document_count(db: AsyncSession, agent_id: uuid.UUID) -> int:
 
 @router.get("/agent-templates")
 async def list_templates(user: CurrentUser, db: DbSession) -> list[TemplateOut]:
-    """The presets available when creating an agent.
+    """The presets available when creating an agent, grouped and ordered.
+
+    **The order is part of the response, not a detail of it.** The picker renders
+    this list verbatim -- it does not sort or group client-side -- so blank
+    canvas last and personas beside their own kind are decided here and nowhere
+    else. The three sort keys and why each exists are above
+    `_CATEGORY_ORDER`.
 
     `user` is unused in the body and is not decoration: it makes the route
     require a session. Templates are seed data rather than tenant data, so
@@ -326,7 +425,12 @@ async def list_templates(user: CurrentUser, db: DbSession) -> list[TemplateOut]:
     rows = await db.scalars(
         select(AgentTemplate)
         .where(AgentTemplate.is_active.is_(True))
-        .order_by(_TEMPLATE_ORDER, AgentTemplate.name)
+        .order_by(
+            _BLANK_CANVAS_LAST,
+            _CATEGORY_ORDER_RANK,
+            _TEMPLATE_ORDER,
+            AgentTemplate.name,
+        )
     )
     return [TemplateOut.model_validate(row) for row in rows.all()]
 
@@ -423,13 +527,17 @@ async def create_agent(
         # it (PRD 4.2).
         #
         # `system_prompt` is included: it is a tuned parameter here, not
-        # metadata, and it is the control that actually produces refusals.
+        # metadata, and it is the control that actually produces refusals. So are
+        # the four persona columns, which travel with it -- an agent that behaves
+        # like a Socratic tutor and cannot say so is half-copied.
         for field in TEMPLATE_PARAMETERS:
             setattr(agent, field, getattr(template, field))
-    # No else. From scratch means the model defaults, and `system_prompt` stays
-    # NULL -- which is safe rather than ungrounded: `pipeline.answer_question`
-    # resolves `agent.system_prompt or DEFAULT_SYSTEM_PROMPT`, so NULL means
-    # "use the default rules", never "no rules".
+    # No else. From scratch means the model defaults, `system_prompt` stays NULL
+    # -- which is safe rather than ungrounded: `pipeline.answer_question`
+    # resolves `agent.system_prompt or DEFAULT_SYSTEM_PROMPT`, so NULL means "use
+    # the default rules", never "no rules" -- and the persona columns stay NULL
+    # too, which every consumer already handles because agents created before
+    # those columns existed have them.
 
     db.add(agent)
     try:

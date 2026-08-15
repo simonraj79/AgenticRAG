@@ -56,3 +56,17 @@ langchain-mcp-adapters
 # would have killed every upload route at import time with a RuntimeError about
 # a missing dependency, nowhere near the change that caused it. Direct now.
 python-multipart
+
+# Stage 3 measurement. Ragas scores faithfulness, answer relevance, context
+# precision and context recall against the golden set.
+ragas
+
+# NOT optional, and NOT a stale pin to bump. `ragas/llms/base.py` imports
+# `langchain_community.chat_models.vertexai` at module scope, and
+# langchain-community 0.4.x DELETED that module -- so the newest ragas and the
+# newest langchain-community cannot be installed together, and `import ragas`
+# fails with a ModuleNotFoundError naming a package this project never imports.
+# Every ragas release from 0.2.15 to 0.4.3 carries that import, so downgrading
+# ragas does not help; the pin has to go here. 0.3.x does not drag langchain-core
+# back below 1.x, so the rest of the stack is unaffected.
+langchain-community<0.4

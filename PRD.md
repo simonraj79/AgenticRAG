@@ -110,6 +110,17 @@ deviation.
 | Max input | 8,192 tokens |
 | Normalization | **Automatic** at non-default dimensions |
 | `task_type` | **Not supported** — convey retrieval intent in the prompt text |
+| Modalities | **Text, images, video, audio, PDFs** — one unified embedding space |
+
+**It is the first multimodal embedding model in the Gemini API, and we use it for text
+only.** Verified 2026-08-15. The native path was evaluated and deferred rather than
+overlooked: per-request limits are 1 PDF of 6 pages, 6 images, and 8,192 tokens across all
+modalities, so a slide deck needs windowing plus retry-on-overflow; and
+`langchain-google-genai` has no non-text entry point, so it means calling `google-genai`
+directly and leaving the retriever seam that keeps §3.5 a one-line change. CLAUDE.md records
+the full reasoning and the design to use if it is ever built. The one thing not to do is
+retreat to `gemini-embedding-001` — the two spaces are incompatible, so it forces a full
+re-ingest, and -001 is text-only anyway.
 
 We set `output_dimensionality=768` explicitly. It matches the workshop's numbers, costs
 4× less Pinecone storage than 3072, and is a recommended MRL tier.
@@ -858,7 +869,13 @@ The `docs/` directory in §9.1 assumes they stay; adjust if not.
 Acknowledged as real production concerns, deliberately not built:
 
 - Indirect prompt injection defenses (the five-layer model in the deck) — awareness only
-- Multi-turn conversational memory
+- ~~Multi-turn conversational memory~~ — **built 2026-08-15.** Scope changed deliberately:
+  the chat interface made single-shot turns untenable. `conversations` threads the `queries`
+  rows, and follow-ups are contextualised against history before embedding, because a
+  question like "what is its power budget?" carries its subject in a pronoun and retrieves
+  nothing when embedded raw. That rewrite shares machinery with §3.5's Stage 2 rewrite loop —
+  different trigger (coreference vs. low score), same mechanism — and Stage 2 should compose
+  with it rather than add a second rewriter.
 - Semantic caching, model routing, token budgets
 - Retries, timeouts, and fallbacks on external calls
 - Human-in-the-loop approval gates
