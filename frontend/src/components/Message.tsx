@@ -48,8 +48,8 @@ export default function Message({ message }: { message: ChatMessage }) {
   /** Markers the answer is allowed to turn into chips. A model can write `[4]`
    *  with three citations attached; that stays literal text rather than
    *  becoming a button that reveals nothing. */
-  const markers = useMemo(
-    () => new Set(message.citations.map((citation) => citation.marker)),
+  const citationsByMarker = useMemo(
+    () => new Map(message.citations.map((citation) => [citation.marker, citation.filename])),
     [message.citations],
   );
 
@@ -71,15 +71,16 @@ export default function Message({ message }: { message: ChatMessage }) {
   }, [activeMarker, focusNonce]);
 
   const inline = useCallback(
-    (children: ReactNode) => withCitations(children, markers, selectCitation),
-    [markers, selectCitation],
+    (children: ReactNode) => withCitations(children, citationsByMarker, selectCitation),
+    [citationsByMarker, selectCitation],
   );
   const components = useMemo(() => markdownComponents(inline), [inline]);
+  const sourcesId = `sources-${message.query_id}`;
 
   return (
     <li data-testid="chat-message" className="space-y-2.5">
       <div className="flex justify-end">
-        <div className="max-w-[85%] rounded-2xl rounded-br-sm border border-slate-700 bg-slate-800/70 px-4 py-2.5 text-sm whitespace-pre-wrap text-slate-100">
+        <div className="max-w-[85%] break-words rounded-2xl rounded-br-sm border border-slate-700 bg-slate-800/70 px-4 py-2.5 text-sm whitespace-pre-wrap text-slate-100">
           {message.question}
         </div>
       </div>
@@ -116,7 +117,7 @@ export default function Message({ message }: { message: ChatMessage }) {
           // Spelled out because a refusal looks like a failure and is not one.
           // The system prompt forbids answering outside the retrieved context,
           // and declining is the behaviour the golden set scores.
-          <p className="mt-3 border-t border-slate-800 pt-3 text-xs text-slate-500">
+          <p className="mt-3 border-t border-slate-800 pt-3 text-xs text-slate-400">
             The agent declined because the retrieved context did not support an answer.
             That is a correct outcome, not an error.
           </p>
@@ -133,14 +134,19 @@ export default function Message({ message }: { message: ChatMessage }) {
             <button
               type="button"
               aria-expanded={sourcesOpen}
+              aria-controls={sourcesId}
               onClick={() => setSourcesOpen((open) => !open)}
-              className="rounded-md border border-slate-700 bg-slate-900 px-2.5 py-1 text-xs text-slate-300 transition hover:border-slate-600 hover:text-slate-100"
+              className="min-h-11 rounded-md border border-slate-700 bg-slate-900 px-2.5 py-2 text-xs text-slate-300 transition hover:border-slate-600 hover:text-slate-100"
             >
-              {sourcesOpen ? "Hide sources" : `Sources (${message.citations.length})`}
+              {sourcesOpen
+                ? "Hide retrieved passages"
+                : message.refused
+                  ? `Passages checked (${message.citations.length})`
+                  : `Sources (${message.citations.length})`}
             </button>
           )}
 
-          <span className="ml-auto text-xs text-slate-500">
+          <span className="ml-auto text-xs text-slate-400">
             {formatTimestamp(message.created_at)}
             {message.latency_ms !== null ? ` · ${formatDuration(message.latency_ms)}` : ""}
             {message.model_used ? ` · ${message.model_used}` : ""}
@@ -153,19 +159,26 @@ export default function Message({ message }: { message: ChatMessage }) {
         <TracePanel queryId={message.query_id} />
 
         {sourcesOpen && (
-          <ol className="mt-3 space-y-2">
-            {message.citations.map((citation) => (
-              <CitationCard
-                key={`${citation.chunk_id}-${citation.marker}`}
-                citation={citation}
-                active={activeMarker === citation.marker}
-                cardRef={(element) => {
-                  if (element) cards.current.set(citation.marker, element);
-                  else cards.current.delete(citation.marker);
-                }}
-              />
-            ))}
-          </ol>
+          <div id={sourcesId} className="mt-3">
+            <p className="mb-2 text-xs text-slate-400">
+              {message.refused
+                ? "These are the closest passages the agent checked; they did not support an answer."
+                : "Retrieved passage previews used to ground this answer."}
+            </p>
+            <ol className="space-y-2" aria-label="Retrieved passages">
+              {message.citations.map((citation) => (
+                <CitationCard
+                  key={`${citation.chunk_id}-${citation.marker}`}
+                  citation={citation}
+                  active={activeMarker === citation.marker}
+                  cardRef={(element) => {
+                    if (element) cards.current.set(citation.marker, element);
+                    else cards.current.delete(citation.marker);
+                  }}
+                />
+              ))}
+            </ol>
+          </div>
         )}
       </div>
     </li>
@@ -199,7 +212,7 @@ export default function Message({ message }: { message: ChatMessage }) {
  */
 function withCitations(
   children: ReactNode,
-  markers: Set<number>,
+  citations: Map<number, string>,
   onSelect: (marker: number) => void,
 ): ReactNode {
   const parts: ReactNode[] = [];
@@ -212,12 +225,17 @@ function withCitations(
     let cursor = 0;
     for (const match of buffer.matchAll(MARKER_PATTERN)) {
       const marker = Number(match[1]);
-      if (!markers.has(marker)) continue;
+      if (!citations.has(marker)) continue;
 
       const at = match.index ?? 0;
       if (at > cursor) parts.push(buffer.slice(cursor, at));
       parts.push(
-        <CitationChip key={`chip-${chips}`} marker={marker} onSelect={onSelect} />,
+        <CitationChip
+          key={`chip-${chips}`}
+          marker={marker}
+          sourceName={citations.get(marker) ?? "retrieved passage"}
+          onSelect={onSelect}
+        />,
       );
       chips += 1;
       cursor = at + match[0].length;
@@ -242,18 +260,20 @@ function withCitations(
 
 function CitationChip({
   marker,
+  sourceName,
   onSelect,
 }: {
   marker: number;
+  sourceName: string;
   onSelect: (marker: number) => void;
 }) {
   return (
     <button
       type="button"
       data-testid="citation-chip"
-      aria-label={`Show source ${marker}`}
+      aria-label={`Show source ${marker}: ${sourceName}`}
       onClick={() => onSelect(marker)}
-      className="mx-0.5 inline-flex h-4 min-w-4 items-center justify-center rounded border border-sky-800/70 bg-sky-950/60 px-1 align-super font-mono text-[10px] font-semibold text-sky-300 transition hover:border-sky-500 hover:bg-sky-900/60 hover:text-sky-100"
+      className="mx-0.5 inline-flex h-6 min-w-6 items-center justify-center rounded border border-sky-700 bg-sky-950/60 px-1 align-super font-mono text-[11px] font-semibold text-sky-200 transition hover:border-sky-400 hover:bg-sky-900/60 hover:text-sky-50"
     >
       {marker}
     </button>

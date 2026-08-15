@@ -34,6 +34,15 @@ const EVENT_STYLES: Record<string, string> = {
   REFUSE: "border-rose-800/60 bg-rose-950/40 text-rose-300",
 };
 
+const EVENT_DESCRIPTIONS: Record<string, string> = {
+  RETRIEVE: "Searched the indexed document chunks.",
+  SCORE_CHECK: "Checked whether the retrieved evidence was strong enough.",
+  REWRITE: "Rephrased the question to improve retrieval.",
+  RERANK: "Reordered the retrieved passages by relevance.",
+  GENERATE: "Generated the response from the selected context.",
+  REFUSE: "Declined because the retrieved context did not support an answer.",
+};
+
 export default function TracePanel({ queryId }: { queryId: string }) {
   const [open, setOpen] = useState(false);
   // `null` means "never fetched", which is a different state from "fetched and
@@ -42,6 +51,7 @@ export default function TracePanel({ queryId }: { queryId: string }) {
   const [events, setEvents] = useState<TraceEvent[] | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const panelId = `retrieval-details-${queryId}`;
 
   async function load() {
     setLoading(true);
@@ -67,20 +77,29 @@ export default function TracePanel({ queryId }: { queryId: string }) {
         type="button"
         data-testid="trace-toggle"
         aria-expanded={open}
+        aria-controls={panelId}
         onClick={toggle}
-        className="rounded-md border border-slate-700 bg-slate-900 px-2.5 py-1 text-xs text-slate-300 transition hover:border-slate-600 hover:text-slate-100"
+        className="min-h-11 rounded-md border border-slate-700 bg-slate-900 px-2.5 py-2 text-xs text-slate-300 transition hover:border-slate-600 hover:text-slate-100"
       >
-        {open ? "Hide reasoning" : "Why this answer?"}
+        {open ? "Hide retrieval details" : "Retrieval details"}
       </button>
 
       {open && (
-        <div className="mt-3 rounded-lg border border-slate-800 bg-slate-950/50 p-3">
+        <div id={panelId} className="mt-3 rounded-lg border border-slate-800 bg-slate-950/50 p-3">
+          <p className="mb-3 text-xs leading-relaxed text-slate-400">
+            This is an activity log of observable retrieval steps and scores. It does
+            not expose private model reasoning.
+          </p>
           <ErrorBanner error={error} />
 
-          {loading && <Spinner label="Loading trace" />}
+          {loading && (
+            <div role="status" aria-live="polite">
+              <Spinner label="Loading retrieval details" />
+            </div>
+          )}
 
           {!loading && events !== null && events.length === 0 && (
-            <p className="text-xs text-slate-500">
+            <p className="text-xs text-slate-400">
               This turn recorded no trace events. A Stage 1 agent answers without writing
               decisions; only the Stage 2 loop has decisions to write.
             </p>
@@ -99,7 +118,7 @@ export default function TracePanel({ queryId }: { queryId: string }) {
                   className="rounded-md border border-slate-800 bg-slate-900/40 p-2.5"
                 >
                   <div className="flex flex-wrap items-center gap-2">
-                    <span className="font-mono text-xs text-slate-600">
+                    <span className="font-mono text-xs text-slate-400">
                       {String(event.step_index).padStart(2, "0")}
                     </span>
                     <span
@@ -112,10 +131,14 @@ export default function TracePanel({ queryId }: { queryId: string }) {
                         score {formatScore(event.score)}
                       </span>
                     )}
-                    <span className="text-xs text-slate-500">
+                    <span className="text-xs text-slate-400">
                       {formatDuration(event.duration_ms)}
                     </span>
                   </div>
+
+                  <p className="mt-1.5 text-xs text-slate-300">
+                    {EVENT_DESCRIPTIONS[event.event_type] ?? "Recorded an agent activity."}
+                  </p>
 
                   {payload && (
                     <pre className="mt-2 max-h-48 overflow-auto rounded bg-slate-950 p-2 font-mono text-xs leading-relaxed text-slate-400">

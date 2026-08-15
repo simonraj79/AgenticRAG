@@ -20,6 +20,14 @@ body {
   background-color: var(--color-slate-950);
 }
 
+/* A visible keyboard focus indicator is a global interaction guarantee, not a
+   decoration each control should have to remember. Sky-400 stays distinct on
+   the slate surfaces and clears WCAG's 3:1 non-text contrast requirement. */
+:focus-visible {
+  outline: 3px solid var(--color-sky-400) !important;
+  outline-offset: 3px;
+}
+
 /* Tailwind's `list-none` hides the disclosure triangle in Chrome and Firefox
    but not in Safari, which draws it through a -webkit pseudo-element that no
    utility class targets. Left in, it sits beside the caret drawn by `Reveal`

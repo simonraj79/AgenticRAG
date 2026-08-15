@@ -36,6 +36,7 @@ export default function CitationCard({
       tabIndex={-1}
       data-testid="citation-card"
       aria-current={active ? "true" : undefined}
+      aria-label={`Source ${citation.marker}: ${citation.filename}, chunk ${citation.chunk_index}, retrieval rank ${citation.rank}`}
       className={`scroll-mt-4 rounded-lg border p-3 outline-none transition ${
         active
           ? "border-sky-600 bg-sky-950/30 ring-1 ring-sky-600/50"
@@ -47,7 +48,7 @@ export default function CitationCard({
           {citation.marker}
         </span>
         <span className="text-sm font-medium text-slate-200">{citation.filename}</span>
-        <span className="text-xs text-slate-500">
+        <span className="text-xs text-slate-400">
           chunk {citation.chunk_index} &middot; rank {citation.rank}
         </span>
 
@@ -63,7 +64,10 @@ export default function CitationCard({
         </span>
       </div>
 
-      <p className="mt-2 text-xs leading-relaxed text-slate-400">{citation.text_preview}</p>
+      <p className="mt-2 text-[0.7rem] font-medium tracking-wide text-slate-400 uppercase">
+        Retrieved passage preview
+      </p>
+      <p className="mt-1 text-xs leading-relaxed text-slate-300">{citation.text_preview}</p>
     </li>
   );
 }

@@ -144,6 +144,12 @@ export async function api<T>(path: string, init: ApiInit = {}): Promise<T> {
       credentials: "include",
     });
   } catch (cause) {
+    // Cancellation is an intentional user action, not a network failure. Keep
+    // the native AbortError intact so the chat can restore the draft without
+    // showing a misleading "Cannot reach the API" banner.
+    if (cause instanceof DOMException && cause.name === "AbortError") {
+      throw cause;
+    }
     // A network-level failure (backend down, CORS preflight rejected, DNS).
     // `fetch` rejects with a bare "Failed to fetch", which names neither the
     // host nor the cause, so the URL is added here -- a wrong VITE_API_URL is
@@ -232,10 +238,11 @@ export const chat = {
    * question is even embedded. That is why the caller shows elapsed time and a
    * named stage rather than a spinner.
    */
-  ask: (conversationId: string, question: string) =>
+  ask: (conversationId: string, question: string, signal?: AbortSignal) =>
     api<AskResult>(`/api/conversations/${encodeURIComponent(conversationId)}/ask`, {
       method: "POST",
       json: { question },
+      signal,
     }),
 
   /**
@@ -243,10 +250,11 @@ export const chat = {
    * client never has to create an empty conversation up front and then decide
    * what to do with it if the question is never sent.
    */
-  askNew: (agentId: string, question: string) =>
+  askNew: (agentId: string, question: string, signal?: AbortSignal) =>
     api<AskResult>(`/api/agents/${encodeURIComponent(agentId)}/ask`, {
       method: "POST",
       json: { question },
+      signal,
     }),
 
   /** The decision timeline for one turn. */

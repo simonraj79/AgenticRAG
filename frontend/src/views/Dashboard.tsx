@@ -101,7 +101,7 @@ export default function Dashboard({ onOpenAgent }: { onOpenAgent: (agentId: stri
   }
 
   return (
-    <div className="mx-auto max-w-6xl px-6 py-10">
+    <div className="mx-auto max-w-6xl px-4 py-8 sm:px-6 sm:py-10">
       <header className="mb-8 flex flex-wrap items-start justify-between gap-4">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight text-slate-100">Your agents</h1>
@@ -117,7 +117,7 @@ export default function Dashboard({ onOpenAgent }: { onOpenAgent: (agentId: stri
           aria-expanded={createOpen}
           aria-controls="create-agent-panel"
           onClick={() => setCreateOpen((open) => !open)}
-          className={`rounded-md border px-4 py-2 text-sm font-medium transition ${
+          className={`min-h-11 rounded-md border px-4 py-2 text-sm font-medium transition ${
             createOpen
               ? "border-slate-700 bg-slate-900 text-slate-300 hover:border-slate-600"
               : "border-emerald-500 bg-emerald-500 text-emerald-950 hover:bg-emerald-400"
@@ -183,7 +183,7 @@ export default function Dashboard({ onOpenAgent }: { onOpenAgent: (agentId: stri
                     */}
                     <p className="mt-1 truncate text-xs text-slate-400">
                       {agent.persona_role ?? "Custom agent"}
-                      <span className="text-slate-600"> · </span>
+                      <span className="text-slate-400"> · </span>
                       {agent.document_count} {agent.document_count === 1 ? "document" : "documents"}
                     </p>
                   </div>
@@ -198,8 +198,9 @@ export default function Dashboard({ onOpenAgent }: { onOpenAgent: (agentId: stri
                 <button
                   type="button"
                   data-testid="agent-open"
+                  aria-label={`Open ${agent.name}`}
                   onClick={() => onOpenAgent(agent.id)}
-                  className="rounded-md bg-slate-100 px-3 py-1.5 text-sm font-medium text-slate-900 transition hover:bg-white"
+                  className="min-h-11 rounded-md bg-slate-100 px-3 py-2 text-sm font-medium text-slate-900 transition hover:bg-white"
                 >
                   Open
                 </button>
@@ -214,13 +215,15 @@ export default function Dashboard({ onOpenAgent }: { onOpenAgent: (agentId: stri
                 that was aimed at the wrong button in the first place.
               */}
               <div className="flex items-center justify-between gap-3 rounded-b-xl border-t border-slate-800/70 bg-slate-950/40 px-5 py-2">
-                <span className="text-[0.65rem] text-slate-600">
+                <span className="text-[0.65rem] text-slate-400">
                   Deletes the corpus and its vectors
                 </span>
                 <ConfirmDeleteButton
                   testId="agent-delete"
                   label="Delete"
                   confirmLabel="Delete agent + vectors?"
+                  accessibleLabel={`Delete ${agent.name}`}
+                  accessibleConfirmLabel={`Confirm deletion of ${agent.name} and its vectors`}
                   size="sm"
                   busy={deletingId === agent.id}
                   onConfirm={() => void deleteAgent(agent)}
@@ -400,7 +403,7 @@ function CreateAgentForm({
 
         <div>
           <label className="block text-xs font-medium text-slate-400" htmlFor="agent-description">
-            Description <span className="text-slate-600">(optional)</span>
+            Description <span className="text-slate-400">(optional)</span>
           </label>
           <input
             id="agent-description"
@@ -445,7 +448,7 @@ function CreateAgentForm({
         type="submit"
         data-testid="agent-create-submit"
         disabled={busy}
-        className="mt-5 rounded-md bg-emerald-500 px-4 py-2 text-sm font-semibold text-emerald-950 transition hover:bg-emerald-400 disabled:opacity-50"
+        className="mt-5 min-h-11 rounded-md bg-emerald-500 px-4 py-2 text-sm font-semibold text-emerald-950 transition hover:bg-emerald-400 disabled:opacity-50"
       >
         {busy ? "Creating…" : "Create agent"}
       </button>

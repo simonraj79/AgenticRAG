@@ -15,7 +15,8 @@
  * change" is the exercise. Demoted, not deleted.
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import type { KeyboardEvent } from "react";
 import { api } from "../lib/api.ts";
 import type { Agent } from "../lib/types.ts";
 import {
@@ -55,6 +56,11 @@ export default function AgentDetail({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [tab, setTab] = useState<TabId | null>(null);
+  const tabRefs = useRef<Record<TabId, HTMLButtonElement | null>>({
+    chat: null,
+    documents: null,
+    evaluate: null,
+  });
 
   const loadAgent = useCallback(async () => {
     try {
@@ -123,6 +129,20 @@ export default function AgentDetail({
   // don't know". The corpus is the prerequisite, and the landing tab says so.
   const activeTab: TabId = tab ?? "documents";
 
+  function moveTab(event: KeyboardEvent<HTMLButtonElement>, index: number) {
+    let nextIndex: number | null = null;
+    if (event.key === "ArrowRight") nextIndex = (index + 1) % TABS.length;
+    if (event.key === "ArrowLeft") nextIndex = (index - 1 + TABS.length) % TABS.length;
+    if (event.key === "Home") nextIndex = 0;
+    if (event.key === "End") nextIndex = TABS.length - 1;
+    if (nextIndex === null) return;
+
+    event.preventDefault();
+    const nextTab = TABS[nextIndex].id;
+    setTab(nextTab);
+    window.requestAnimationFrame(() => tabRefs.current[nextTab]?.focus());
+  }
+
   const parameterSummary = [
     `${agent.chunk_size}-token chunks`,
     `k=${agent.retrieve_k}`,
@@ -131,12 +151,12 @@ export default function AgentDetail({
   ].join(" · ");
 
   return (
-    <div className="mx-auto max-w-6xl px-6 py-10">
+    <div className="mx-auto max-w-6xl px-4 py-8 sm:px-6 sm:py-10">
       <button
         type="button"
         data-testid="agent-back"
         onClick={onBack}
-        className="mb-5 text-sm text-slate-400 transition hover:text-slate-200"
+        className="mb-5 min-h-11 rounded-md px-1 text-sm text-slate-400 transition hover:text-slate-200"
       >
         &larr; All agents
       </button>
@@ -166,12 +186,12 @@ export default function AgentDetail({
               <p className="mt-2 max-w-3xl text-sm text-slate-400">{agent.description}</p>
             )}
 
-            <p className="mt-3 text-xs text-slate-600">{parameterSummary}</p>
+            <p className="mt-3 text-xs text-slate-400">{parameterSummary}</p>
           </div>
         </div>
 
         {agent.pedagogy && (
-          <p className="mt-4 max-w-3xl border-l-2 border-slate-800 pl-4 text-xs leading-relaxed text-slate-500">
+          <p className="mt-4 max-w-3xl border-l-2 border-slate-800 pl-4 text-xs leading-relaxed text-slate-400">
             <span className="font-medium text-slate-400">Rests on: </span>
             {agent.pedagogy}
           </p>
@@ -192,7 +212,7 @@ export default function AgentDetail({
               <Fact label="Score threshold" value={agent.score_threshold} />
               <Fact label="Max rewrites" value={agent.max_rewrites} />
             </dl>
-            <p className="mt-3 text-xs text-slate-500">
+            <p className="mt-3 text-xs text-slate-400">
               Copied from the template at creation and owned by this agent since. The
               embedding model is <span className="text-slate-300">{agent.embedding_model ?? "unset"}</span>,
               and it cannot change without re-ingesting: a namespace built by one model and
@@ -219,20 +239,27 @@ export default function AgentDetail({
         aria-label="Agent views"
         className="mb-6 flex gap-1 border-b border-slate-800"
       >
-        {TABS.map((entry) => {
+        {TABS.map((entry, index) => {
           const active = activeTab === entry.id;
           return (
             <button
               key={entry.id}
               type="button"
               role="tab"
+              id={`agent-tab-${entry.id}`}
+              ref={(element) => {
+                tabRefs.current[entry.id] = element;
+              }}
               aria-selected={active}
+              aria-controls={`agent-panel-${entry.id}`}
+              tabIndex={active ? 0 : -1}
               data-testid={entry.testId}
               onClick={() => setTab(entry.id)}
-              className={`-mb-px border-b-2 px-4 py-2 text-sm font-medium transition ${
+              onKeyDown={(event) => moveTab(event, index)}
+              className={`-mb-px min-h-11 border-b-2 px-4 py-2 text-sm font-medium transition ${
                 active
                   ? "border-emerald-400 text-slate-100"
-                  : "border-transparent text-slate-500 hover:text-slate-300"
+                  : "border-transparent text-slate-400 hover:text-slate-200"
               }`}
             >
               {entry.label}
@@ -248,10 +275,27 @@ export default function AgentDetail({
         hangs off the citations inside an answer, where the decision it explains
         is actually visible.
       */}
-      {activeTab === "documents" && (
-        <AgentDocuments agentId={agent.id} onCorpusChanged={handleCorpusChanged} />
-      )}
-      {activeTab === "chat" && <AgentChat key={agent.id} agentId={agent.id} />}
+      <div
+        role="tabpanel"
+        id="agent-panel-documents"
+        aria-labelledby="agent-tab-documents"
+        hidden={activeTab !== "documents"}
+        className="min-w-0"
+      >
+        {activeTab === "documents" && (
+          <AgentDocuments agentId={agent.id} onCorpusChanged={handleCorpusChanged} />
+        )}
+      </div>
+
+      <div
+        role="tabpanel"
+        id="agent-panel-chat"
+        aria-labelledby="agent-tab-chat"
+        hidden={activeTab !== "chat"}
+        className="min-w-0"
+      >
+        {activeTab === "chat" && <AgentChat key={agent.id} agentId={agent.id} />}
+      </div>
 
       {/*
         Keyed on the agent for the same reason AgentChat is: an eval run is
@@ -259,7 +303,15 @@ export default function AgentDetail({
         start a fresh component rather than let the old poll write a scorecard
         into the new agent's view.
       */}
-      {activeTab === "evaluate" && <AgentEvaluate key={agent.id} agent={agent} />}
+      <div
+        role="tabpanel"
+        id="agent-panel-evaluate"
+        aria-labelledby="agent-tab-evaluate"
+        hidden={activeTab !== "evaluate"}
+        className="min-w-0"
+      >
+        {activeTab === "evaluate" && <AgentEvaluate key={agent.id} agent={agent} />}
+      </div>
     </div>
   );
 }

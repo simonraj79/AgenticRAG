@@ -63,7 +63,7 @@ export function EmptyState({
   return (
     <div className="rounded-xl border border-dashed border-slate-800 px-6 py-10 text-center">
       <p className="text-sm text-slate-300">{title}</p>
-      {detail && <p className="mx-auto mt-1 max-w-md text-xs text-slate-500">{detail}</p>}
+      {detail && <p className="mx-auto mt-1 max-w-md text-xs text-slate-400">{detail}</p>}
       {children && <div className="mt-4 flex justify-center">{children}</div>}
     </div>
   );
@@ -172,7 +172,7 @@ const CATEGORY_STYLES: Record<string, string> = {
   general: "border-slate-700 bg-slate-900 text-slate-400",
 };
 
-const UNGROUPED = "border-slate-700 bg-slate-900 text-slate-500";
+const UNGROUPED = "border-slate-700 bg-slate-900 text-slate-400";
 
 export function CategoryBadge({ category }: { category?: string | null }) {
   const key = category ?? "";
@@ -195,7 +195,7 @@ export function CategoryBadge({ category }: { category?: string | null }) {
 export function Fact({ label, value }: { label: string; value: string | number }) {
   return (
     <div>
-      <dt className="text-slate-500">{label}</dt>
+      <dt className="text-slate-400">{label}</dt>
       <dd className="mt-0.5 text-slate-200">{value}</dd>
     </div>
   );
@@ -260,14 +260,16 @@ export function Reveal({
 const ARM_TIMEOUT_MS = 5000;
 
 const DELETE_SIZES: Record<"sm" | "md", string> = {
-  sm: "px-2.5 py-1 text-xs",
-  md: "px-3 py-1.5 text-sm",
+  sm: "min-h-11 px-2.5 py-2 text-xs",
+  md: "min-h-11 px-3 py-2 text-sm",
 };
 
 export function ConfirmDeleteButton({
   testId,
   label = "Delete",
   confirmLabel = "Click again to confirm",
+  accessibleLabel,
+  accessibleConfirmLabel,
   busy = false,
   size = "md",
   onConfirm,
@@ -275,6 +277,8 @@ export function ConfirmDeleteButton({
   testId: string;
   label?: string;
   confirmLabel?: string;
+  accessibleLabel?: string;
+  accessibleConfirmLabel?: string;
   busy?: boolean;
   size?: "sm" | "md";
   onConfirm: () => void;
@@ -292,7 +296,11 @@ export function ConfirmDeleteButton({
       type="button"
       data-testid={testId}
       disabled={busy}
-      aria-label={armed ? confirmLabel : label}
+      aria-label={
+        armed
+          ? (accessibleConfirmLabel ?? confirmLabel)
+          : (accessibleLabel ?? label)
+      }
       onClick={() => {
         if (armed) {
           setArmed(false);

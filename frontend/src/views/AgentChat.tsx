@@ -50,6 +50,7 @@ export default function AgentChat({
   );
   const [elapsed, setElapsed] = useState(0);
   const [loadingThread, setLoadingThread] = useState(true);
+  const [historyOpen, setHistoryOpen] = useState(false);
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [draftTitle, setDraftTitle] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -60,9 +61,12 @@ export default function AgentChat({
   // closure's captured `activeId` cannot tell them -- that is the value at the
   // moment the request was sent, and comparing the two is the whole check.
   const activeIdNow = useRef<string | null>(null);
+  const requestController = useRef<AbortController | null>(null);
   useEffect(() => {
     activeIdNow.current = activeId;
   }, [activeId]);
+
+  useEffect(() => () => requestController.current?.abort(), []);
 
   const refreshList = useCallback(async () => {
     setConversations(await chat.list(agentId));
@@ -129,6 +133,7 @@ export default function AgentChat({
     setActiveId(id);
     activeIdNow.current = id;
     setMessages([]);
+    setHistoryOpen(false);
     try {
       const detail = await chat.load(id);
       if (activeIdNow.current !== id) return;
@@ -146,6 +151,7 @@ export default function AgentChat({
     activeIdNow.current = null;
     setMessages([]);
     setLoadingThread(false);
+    setHistoryOpen(false);
     input.current?.focus();
   }
 
@@ -160,14 +166,16 @@ export default function AgentChat({
     if (!text || pending || loadingThread) return;
 
     const threadId = activeId;
+    const controller = new AbortController();
+    requestController.current = controller;
     setPending({ question: text, threadId });
     setQuestion("");
     setError(null);
 
     try {
       const result: AskResult = threadId
-        ? await chat.ask(threadId, text)
-        : await chat.askNew(agentId, text);
+        ? await chat.ask(threadId, text, controller.signal)
+        : await chat.askNew(agentId, text, controller.signal);
 
       // The user moved to another thread while this was generating. The turn is
       // saved; it just does not belong on this screen.
@@ -183,8 +191,9 @@ export default function AgentChat({
         // A stale sidebar is not worth an error banner over a delivered answer.
       });
     } catch (cause) {
+      const cancelled = cause instanceof DOMException && cause.name === "AbortError";
       if (activeIdNow.current === threadId) {
-        setError(errorMessage(cause));
+        if (!cancelled) setError(errorMessage(cause));
         // Handed back rather than swallowed: a 15-second wait that ends in a
         // 500 should not also cost the user their typing. Only into an empty
         // box, though -- they may have started typing the next question while
@@ -193,8 +202,13 @@ export default function AgentChat({
         setQuestion((current) => (current === "" ? text : current));
       }
     } finally {
+      if (requestController.current === controller) requestController.current = null;
       setPending(null);
     }
+  }
+
+  function stopWaiting() {
+    requestController.current?.abort();
   }
 
   async function rename(id: string) {
@@ -235,13 +249,26 @@ export default function AgentChat({
   const showPending = pending !== null && pending.threadId === activeId;
 
   return (
-    <div className="grid gap-4 md:grid-cols-[15rem_1fr]">
-      <aside className="flex max-h-[70vh] flex-col rounded-xl border border-slate-800 bg-slate-900/30 p-2">
+    <div className="grid min-w-0 grid-cols-1 gap-4 md:grid-cols-[15rem_minmax(0,1fr)]">
+      <button
+        type="button"
+        aria-expanded={historyOpen}
+        aria-controls="conversation-history"
+        onClick={() => setHistoryOpen((open) => !open)}
+        className="min-h-11 rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-left text-sm font-medium text-slate-200 transition hover:border-slate-600 md:hidden"
+      >
+        {historyOpen ? "Hide conversations" : `Conversations (${conversations.length})`}
+      </button>
+
+      <aside
+        id="conversation-history"
+        className={`${historyOpen ? "flex" : "hidden"} min-w-0 max-h-[70dvh] flex-col rounded-xl border border-slate-800 bg-slate-900/30 p-2 md:flex md:max-h-[70vh]`}
+      >
         <button
           type="button"
           data-testid="conversation-new"
           onClick={startDraft}
-          className="mb-2 rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-sm text-slate-200 transition hover:border-slate-600"
+          className="mb-2 min-h-11 rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-200 transition hover:border-slate-600"
         >
           + New chat
         </button>
@@ -250,7 +277,7 @@ export default function AgentChat({
           {activeId === null && (
             <li className="rounded-md border border-emerald-800/60 bg-emerald-950/20 px-3 py-2 text-sm text-emerald-300">
               New conversation
-              <span className="block text-xs text-slate-500">saved on your first question</span>
+              <span className="block text-xs text-slate-400">saved on your first question</span>
             </li>
           )}
 
@@ -290,7 +317,7 @@ export default function AgentChat({
                     <span className="block truncate text-sm text-slate-200">
                       {conversation.title ?? "Untitled"}
                     </span>
-                    <span className="block text-xs text-slate-500">
+                    <span className="block text-xs text-slate-400">
                       {conversation.message_count}{" "}
                       {conversation.message_count === 1 ? "turn" : "turns"}
                     </span>
@@ -305,7 +332,8 @@ export default function AgentChat({
                         setDraftTitle(conversation.title ?? "");
                         setRenamingId(conversation.id);
                       }}
-                      className="rounded border border-slate-700 bg-slate-900 px-2 py-0.5 text-xs text-slate-300 transition hover:border-slate-600"
+                      aria-label={`Rename ${conversation.title ?? "untitled conversation"}`}
+                      className="min-h-11 rounded border border-slate-700 bg-slate-900 px-2 py-2 text-xs text-slate-300 transition hover:border-slate-600"
                     >
                       Rename
                     </button>
@@ -313,6 +341,8 @@ export default function AgentChat({
                       testId="conversation-delete"
                       label="Delete"
                       confirmLabel="Confirm"
+                      accessibleLabel={`Delete ${conversation.title ?? "untitled conversation"}`}
+                      accessibleConfirmLabel={`Confirm deletion of ${conversation.title ?? "untitled conversation"}`}
                       onConfirm={() => void remove(conversation.id)}
                     />
                   </div>
@@ -323,7 +353,10 @@ export default function AgentChat({
         </ul>
       </aside>
 
-      <section className="flex h-[70vh] flex-col rounded-xl border border-slate-800 bg-slate-900/30">
+      <section
+        aria-busy={showPending}
+        className="flex h-[70dvh] min-w-0 max-w-full flex-col rounded-xl border border-slate-800 bg-slate-900/30 md:h-[70vh]"
+      >
         <div className="min-h-0 flex-1 overflow-y-auto p-4">
           <div className="mb-4">
             <ErrorBanner error={error} />
@@ -332,7 +365,7 @@ export default function AgentChat({
           {loadingThread && <Spinner label="Loading conversation" />}
 
           {!loadingThread && messages.length === 0 && !showPending && (
-            <p className="rounded-lg border border-dashed border-slate-800 px-4 py-10 text-center text-sm text-slate-500">
+            <p className="rounded-lg border border-dashed border-slate-800 px-4 py-10 text-center text-sm text-slate-400">
               Ask this agent a question. Follow-ups can refer back to earlier turns -- the
               question that gets embedded is shown above each answer whenever it differs
               from what you typed.
@@ -347,7 +380,7 @@ export default function AgentChat({
             {showPending && pending && (
               <li className="space-y-2.5">
                 <div className="flex justify-end">
-                  <div className="max-w-[85%] rounded-2xl rounded-br-sm border border-slate-700 bg-slate-800/70 px-4 py-2.5 text-sm whitespace-pre-wrap text-slate-100">
+                  <div className="max-w-[85%] break-words rounded-2xl rounded-br-sm border border-slate-700 bg-slate-800/70 px-4 py-2.5 text-sm whitespace-pre-wrap text-slate-100">
                     {pending.question}
                   </div>
                 </div>
@@ -374,8 +407,10 @@ export default function AgentChat({
                   against it at 16 s and concludes it has hung.
                 */}
                 <div className="rounded-2xl rounded-bl-sm border border-slate-800 bg-slate-900/50 p-4">
-                  <Spinner label={`${stageFor(elapsed, messages.length > 0)}...`} />
-                  <p className="mt-2 text-xs text-slate-500">
+                  <div role="status" aria-live="polite" aria-atomic="true">
+                    <Spinner label={`${stageFor(elapsed, messages.length > 0)}...`} />
+                  </div>
+                  <p className="mt-2 text-xs text-slate-400">
                     {elapsed}s elapsed &middot; retrieval takes under a second; the rest is the
                     model writing. Coaching personas answer at length, so 30-60 s is normal
                     for them.
@@ -392,7 +427,7 @@ export default function AgentChat({
           <label className="sr-only" htmlFor="chat-question">
             Question
           </label>
-          <div className="flex items-end gap-2">
+          <div className="flex min-w-0 items-end gap-2">
             <textarea
               id="chat-question"
               ref={input}
@@ -402,16 +437,27 @@ export default function AgentChat({
               onChange={(event) => setQuestion(event.target.value)}
               onKeyDown={onKeyDown}
               placeholder="Ask a question. Enter sends, Shift+Enter adds a line."
-              className="min-h-[3rem] flex-1 resize-y rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 outline-none focus:border-slate-500"
+              className="min-h-12 min-w-0 flex-1 resize-y rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 outline-none focus:border-slate-500"
             />
-            <button
-              type="submit"
-              data-testid="chat-send"
-              disabled={pending !== null || loadingThread || question.trim() === ""}
-              className="rounded-md bg-emerald-500 px-4 py-2 text-sm font-semibold text-emerald-950 transition hover:bg-emerald-400 disabled:opacity-50"
-            >
-              {pending ? "Thinking..." : "Send"}
-            </button>
+            {pending ? (
+              <button
+                type="button"
+                data-testid="chat-stop"
+                onClick={stopWaiting}
+                className="min-h-11 shrink-0 rounded-md border border-amber-700 bg-amber-950/50 px-3 py-2 text-sm font-semibold text-amber-200 transition hover:border-amber-500 hover:bg-amber-950"
+              >
+                Stop waiting
+              </button>
+            ) : (
+              <button
+                type="submit"
+                data-testid="chat-send"
+                disabled={loadingThread || question.trim() === ""}
+                className="min-h-11 shrink-0 rounded-md bg-emerald-500 px-4 py-2 text-sm font-semibold text-emerald-950 transition hover:bg-emerald-400 disabled:opacity-50"
+              >
+                Send
+              </button>
+            )}
           </div>
         </form>
       </section>
