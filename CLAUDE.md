@@ -18,6 +18,8 @@ time and would cost it again.
 | Frontend build | `cd frontend && npm run build` |
 | Provision Pinecone | `python scripts/create_index.py [--dry-run]` |
 | Provision Postgres | `python scripts/create_render_db.py [--dry-run]` |
+| RAG end-to-end check | `backend/.venv/Scripts/python.exe scripts/slice_check.py` |
+| Tear down that check | `backend/.venv/Scripts/python.exe scripts/slice_check.py --cleanup` |
 
 ---
 
@@ -31,6 +33,14 @@ time and would cost it again.
   is always safe.
 - **Secrets go into `.env` by script, never through a terminal.** `create_render_db.py`
   writes connection strings straight to the file and prints only masked confirmations.
+- **Consult the LangChain MCP servers before writing or changing LangChain code.** Not
+  after an import fails — before. `docs-langchain` answers *how and why*,
+  `reference-langchain` gives exact signatures and module paths. LangChain 1.x moved
+  symbols without deprecation shims, so training data and tutorials confidently describe
+  imports that no longer resolve, and the resulting `ModuleNotFoundError` reads like a
+  missing dependency rather than a moved class. Two relocations in this repo were found the
+  slow way; both were one query. This outranks memory and outranks a plausible-looking
+  example found anywhere else.
 - **The retriever is constructed in exactly one place** (`backend/app/rag/retriever.py`).
   That is what keeps the Stage 1 → Stage 2 change a one-liner. Do not call
   `similarity_search()` anywhere else.
@@ -131,6 +141,106 @@ another. Nothing is deleted until a human has confirmed the replacement works.
 truth. A dimension or model change re-embeds from the database — it never re-parses
 original uploads. That is what makes "we do not store original files" a safe design rather
 than a corner we painted ourselves into.
+
+### LangChain 1.x packaging
+
+**Ask the official docs MCP servers before guessing where something moved.** The 1.x split
+relocated several classes with no deprecation shim, so a stale import fails as
+`ModuleNotFoundError` and reads like a missing dependency rather than a moved symbol. Two
+servers, worth adding both — the guides say *why*, the reference gives exact signatures:
+
+```bash
+claude mcp add --transport http docs-langchain --scope user https://docs.langchain.com/mcp
+```
+
+```bash
+claude mcp add --transport http reference-langchain --scope user https://reference.langchain.com/mcp
+```
+
+**`langchain` 1.x no longer bundles the text splitters.** Under 0.x,
+`from langchain.text_splitter import RecursiveCharacterTextSplitter` worked because
+`langchain-text-splitters` arrived transitively. Under 1.x it does not, and the import
+raises `ModuleNotFoundError`. It is listed explicitly in `requirements.in`.
+
+**`ContextualCompressionRetriever` moved to `langchain-classic`.** PRD §3.5 names this
+class as the Stage 1 → Stage 2 wrapper, and it is in neither `langchain` nor
+`langchain-core` in 1.x — `langchain.retrievers` does not exist as a module at all. It now
+lives at `langchain_classic.retrievers`. Keeping the canonical class is worth the extra
+package: hand-rolling the equivalent would make the stage change read as bespoke code
+rather than the one-liner the workshop is teaching.
+
+**`langchain-pinecone` pins `pinecone<8.0.0`, so two SDK versions coexist.** The backend
+venv resolves to pinecone 7.3.0; the global interpreter that runs `scripts/` has 8.0.0.
+That split is tolerable — the app only ever queries and upserts, while the admin API calls
+(`describe_index`, `IndexTags.to_dict()`, the stale `AwsRegion` enum) live exclusively in
+`scripts/` — but the two environments are genuinely different and a gotcha verified in one
+is not automatically true in the other.
+
+`langchain-pinecone` also drags in `langchain-openai` (and `tiktoken`) as hard
+dependencies. Nothing calls OpenAI; no `OPENAI_API_KEY` is needed. `tiktoken` is used
+deliberately, for chunk sizing.
+
+**`pip freeze` strips environment markers, and that breaks the Render build.**
+`langchain-mcp-adapters` pulls in `mcp`, which requires `pywin32` **only** under
+`sys_platform == 'win32'`. Freeze on a Windows machine and `requirements.txt` gains a bare
+`pywin32==312` with the marker gone — an unconditional requirement that Render, building on
+Linux, cannot satisfy. The failure is at build time, in CI, caused by a dependency added
+successfully on a developer laptop.
+
+The line is kept as `pywin32==312; sys_platform == "win32"`. **Re-check it after every
+`pip freeze`**, because freezing will silently flatten it again. Any future Windows-only
+transitive dependency has the same problem.
+
+### Gemma 4 on the Gemini API
+
+**Structured output works, but only through a tolerant parser.** PRD §2 recorded it as
+undocumented and hedged Stage 2's rewrite decision to Gemini Flash. Measured 2026-08-15,
+5 trials per configuration:
+
+| Path | T=1.0 | T=0.2 | p50 |
+|---|---|---|---|
+| raw `google-genai` `response_schema` | **4/5** | 5/5 | 2.2 s |
+| LangChain `with_structured_output(method="function_calling")` | 5/5 | 5/5 | 3.5 s |
+| LangChain `with_structured_output(method="json_mode")` | 5/5 | 5/5 | 2.6 s |
+| `gemini-flash-latest`, function calling (control) | 5/5 | — | 2.3 s |
+
+Gemma emits schema-correct JSON but sometimes wraps it in a markdown fence.
+`response.parsed` is strict and returns **`None`** on that — not an exception, a `None`,
+which is the worst possible failure shape for a decision the Stage 2 loop branches on.
+LangChain strips the fence, and that is the entire difference between the failing row and
+the passing ones; it is not a different API capability. `function_calling` avoids the text
+channel altogether, so no fence can appear. **Use `function_calling`.** `DECISION_MODEL` is
+now `gemma-4-31b-it`; Flash is one env var away if this ever regresses.
+
+**Sampling defaults come from the model card, not from RAG instinct.** Gemma 4 specifies
+`temperature=1.0, top_p=0.95, top_k=64` as a "standardized sampling configuration across
+all use cases". The reflex for grounded RAG is temperature 0; Gemma is not calibrated for
+it, and squeezing sampling far below the card's values risks repetition loops for a
+determinism gain that grounding already provides. Structured-output reliability was
+unaffected by temperature in the table above.
+
+**Gemma 4 supports the system role natively.** Gemma 3 did not, which is why so much
+example code sets `convert_system_message_to_human=True`. Doing that here would flatten
+the grounding rules into the user turn, where they carry less weight. It stays `False`.
+
+### Retrieval calibration (measured on one corpus file)
+
+**The 0.5 rewrite threshold sits inside the noise, not above it.** On `3.1-lesson-gist.md`,
+on-topic questions score 0.61–0.67 and off-topic ones 0.49–0.58 — a narrow band with no
+clean separation. "What is the refund policy for this course?" scored **0.5765**, above
+threshold, so Stage 2 would not have rewritten it.
+
+**Refusal comes from the prompt, not the threshold.** That refund question was refused
+correctly anyway, because the system prompt forbids answering outside the context. Worth
+knowing which mechanism is actually doing the work: the threshold governs *rewriting*, the
+prompt governs *refusing*, and only the second one was load-bearing in every case tested.
+Do not treat `score_threshold` as a safety control. Stage 3 exists to turn 0.5 into a
+measured number.
+
+**Latency is dominated by generation, not by the cross-Pacific hop.** PRD §6 flags Cohere
+as the only Singapore → US round trip. Measured: embed 365 ms, Pinecone k=20 394 ms,
+Cohere rerank ~830 ms, **Gemma generation 13.2 s — 89% of the total**. The hop the PRD
+worried about costs a twentieth of what generation does. Optimise there or nowhere.
 
 ### Render
 

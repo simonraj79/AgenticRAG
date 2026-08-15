@@ -42,9 +42,49 @@ class Settings(BaseSettings):
     cohere_api_key: str = ""
 
     generation_model: str = "gemma-4-31b-it"
-    decision_model: str = "gemini-flash-latest"
+
+    # Stage 2's rewrite decision must come back as a typed object. The PRD hedged
+    # this to Gemini Flash because structured output is undocumented for Gemma,
+    # and said to collapse to one model if it turned out to work. Measured
+    # 2026-08-15, 5 trials per configuration:
+    #
+    #   gemma  raw google-genai response_schema  T=1.0   4/5   ~2.2s
+    #   gemma  raw google-genai response_schema  T=0.2   5/5   ~2.2s
+    #   gemma  langchain function_calling        T=1.0   5/5   ~3.5s
+    #   gemma  langchain json_mode               T=1.0   5/5   ~2.6s
+    #   flash  langchain function_calling        T=1.0   5/5   ~2.3s
+    #
+    # Gemma emits schema-correct JSON but occasionally wraps it in a markdown
+    # fence at its recommended temperature. `response.parsed` is strict and
+    # returns None on that; LangChain's parser strips the fence, which is the
+    # entire difference between the failing row and the passing ones -- not a
+    # different API capability. `function_calling` sidesteps the text channel
+    # altogether, so it cannot be broken by a stray fence, and it is the path
+    # Gemma's model card actually documents.
+    #
+    # So: collapsed to one model. Flash remains one env var away.
+    decision_model: str = "gemma-4-31b-it"
+    structured_output_method: str = "function_calling"
     embedding_model: str = "models/gemini-embedding-2"
     embedding_dimension: int = 768
+
+    # PRD section 2 says "Cohere rerank-v3". That is a family, not a model id --
+    # the API rejects it. The live ids are rerank-english-v3.0,
+    # rerank-multilingual-v3.0, rerank-v3.5, rerank-v4.0-fast and
+    # rerank-v4.0-pro; v3.5 is the multilingual v3 successor and the closest
+    # real id to what the workshop specifies.
+    rerank_model: str = "rerank-v3.5"
+
+    # Gemma 4's model card gives one "standardized sampling configuration across
+    # all use cases": temperature 1.0, top_p 0.95, top_k 64. That reads oddly for
+    # grounded RAG, where the instinct is temperature 0 -- but the instinct is
+    # borrowed from models calibrated differently, and Gemma degenerates into
+    # repetition when sampling is squeezed far below what it was tuned for. Start
+    # at the documented values and change them only against a measurement.
+    generation_temperature: float = 1.0
+    generation_top_p: float = 0.95
+    generation_top_k: int = 64
+    generation_max_tokens: int = 2048
 
     @property
     def async_database_url(self) -> str:

@@ -23,3 +23,29 @@ alembic
 authlib
 itsdangerous
 httpx
+
+# RAG: chains, splitters, and the three provider integrations.
+#
+# langchain-text-splitters is listed explicitly on purpose. Under langchain 0.x
+# it arrived as a transitive dependency of `langchain`; under 1.x it does not,
+# and `from langchain.text_splitter import ...` raises ModuleNotFoundError.
+langchain
+langchain-text-splitters
+langchain-google-genai
+langchain-pinecone
+langchain-cohere
+
+# ContextualCompressionRetriever -- the class PRD section 3.5 names as the Stage 1
+# -> Stage 2 wrapper -- moved out of `langchain` in the 1.x split and now lives
+# here. Keeping the canonical class is worth one extra package: the workshop
+# teaches this exact wrapping, and hand-rolling the equivalent would make the
+# stage change look like bespoke code rather than the one-liner it is.
+langchain-classic
+
+# Document loading. Only pypdf is needed on top of the stdlib: markdown and
+# text are read directly, and we deliberately do not store original uploads.
+pypdf
+
+# MCP tools as LangChain tools. Nothing imports this yet -- it is here so the
+# Stage 2 agent can be given real tools without a dependency change mid-build.
+langchain-mcp-adapters
