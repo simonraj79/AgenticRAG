@@ -5,13 +5,20 @@ and **the RAG vertical slice runs end to end**. Auth, the API layer and every re
 view are still unwritten. This document is the orientation for picking the work back up in
 a fresh session.
 
-## The three documents
+## The documents
 
 | File | What it is | When to read it |
 |---|---|---|
 | **HANDOFF.md** | This file — current state and what to do next | First |
 | **[PRD.md](PRD.md)** | The specification: stack, architecture, schema, deployment | Before designing anything |
 | **[CLAUDE.md](CLAUDE.md)** | Conventions and platform gotchas that cost debugging time | Before touching infra or the DB driver |
+| **[EVAL.md](EVAL.md)** | The operator's guide to Stage 3 | Before running or reading an evaluation |
+| **[new features/loop.md](new%20features/loop.md)** | The design pattern for anything the **model** decides — tools, retries, detectors over model output | **Before** writing such a feature, not after it fails to fire |
+
+**`CLAUDE.md` is gitignored** (deliberately, since commit `aaa381f`), so a fresh clone does
+not have it. That is why `loop.md` is listed here as well: it is tracked, and it is the one
+document in `new features/` that is a living reference rather than the record of a change
+that has shipped.
 
 Do not re-derive decisions already recorded in PRD §7 (hard constraints) or the decisions
 table in §10. They were made deliberately, and several are expensive to reverse.

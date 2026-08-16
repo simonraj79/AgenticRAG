@@ -2,12 +2,18 @@
 
 Planning documents for one change set: **agentic tools + Handouts**.
 
-Read [00-IMPLEMENTATION-PLAN.md](00-IMPLEMENTATION-PLAN.md) first. It holds the audit, the
-shared contracts every other document depends on, and the build sequence. The five feature
-documents assume it and do not repeat it.
+**[loop.md](loop.md) is the one living document here.** Everything else records a change that
+has shipped; that one is the design pattern extracted from it, and it is what to read before
+adding a tool, a retry, or any feature where the model decides something rather than the code
+deciding it. CLAUDE.md points at it.
+
+For the history: read [00-IMPLEMENTATION-PLAN.md](00-IMPLEMENTATION-PLAN.md) first. It holds
+the audit, the shared contracts every other document depends on, and the build sequence. The
+five feature documents assume it and do not repeat it.
 
 | Document | What it covers |
 |---|---|
+| **[loop.md](loop.md)** | **The agent loop as a reusable pattern — living reference, read before adding a tool** |
 | [00-IMPLEMENTATION-PLAN.md](00-IMPLEMENTATION-PLAN.md) | Audit, contracts, sequencing, risks, definition of done |
 | [01-agentic-tool-loop.md](01-agentic-tool-loop.md) | The bounded loop, `ContextLedger`, trace events, termination |
 | [02-code-interpreter.md](02-code-interpreter.md) | `run_python`, the sandbox, and **what it does not protect against** |
@@ -19,11 +25,15 @@ documents assume it and do not repeat it.
 ---
 
 **Relationship to the repository's other documents.** [PRD.md](../PRD.md) remains the
-specification and [CLAUDE.md](../CLAUDE.md) the operational companion; these are neither.
-They are a plan for one change, and once it has shipped the durable half moves out:
+specification and [CLAUDE.md](../CLAUDE.md) the operational companion; the numbered files
+here are neither. They are a plan for one change, and once it shipped the durable half moved
+out:
 
 - gotchas discovered while building -> `CLAUDE.md`
-- open items resolved or superseded (7, 13) -> `PRD.md` §10
+- open items resolved or superseded (7) and opened (21-25) -> `PRD.md` §10
 - anything that changes how an evaluation is run or read -> `EVAL.md`
+- **the reusable shape of the change itself -> [loop.md](loop.md)**, which stays here
 
-This folder is then a record of how the change was sequenced, not a live reference.
+That last line is why this folder is not purely an archive. The numbered documents are a
+record of how one change was sequenced; `loop.md` is what that change taught, written for the
+next one. If a future build makes it wrong, edit it — do not add a second copy beside it.
