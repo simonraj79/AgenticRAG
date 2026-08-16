@@ -1,6 +1,6 @@
 # Feature 6 — test plan
 
-Three layers, run in this order. Each catches what the next cannot see.
+Four layers, run in this order. Each catches what the next cannot see.
 
 ```
 1. offline harnesses      no DB, no API, no model, no network.
@@ -8,23 +8,24 @@ Three layers, run in this order. Each catches what the next cannot see.
      scripts/ledger_check.py     the citation-marker contract
      scripts/refusal_check.py    the refusal and gap detectors      (added by 09)
      scripts/llm_check.py        the OpenRouter request body        (added by 09)
-2. agentic harness        real DB, real model, no browser. scripts/agentic_check.py
-3. Playwright             real browser, three viewports.
+2. frontend unit tests    jsdom, no backend. cd frontend && npm test
+3. agentic harness        real DB, real model, no browser. scripts/agentic_check.py
+4. Playwright             real browser, four viewports.
      scripts/ui_check.py         scripted, GLOBAL interpreter       (added by 07)
      Playwright MCP              exploratory, for what a script cannot judge
 ```
 
-**Layer 1 grew twice, and both additions came from the same realisation.** Layer 2
+**Layer 1 grew twice, and both additions came from the same realisation.** Layer 3
 needs a database, a live model, a Pinecone namespace and several minutes; anything
 it is the *only* check for is a thing nobody verifies while iterating. So when
 [09](09-deepseek-agentic.md) found the refusal markers wrong a fourth time and the
-request body carrying a parameter it should not, neither got a layer-2 scenario —
+request body carrying a parameter it should not, neither got a layer-3 scenario —
 both are pure functions of their inputs, and a pure function tested through a
 20-minute integration suite is a pure function that is not tested.
 
-The rule that follows: **before writing a layer-2 scenario, ask what part of the
+The rule that follows: **before writing a layer-3 scenario, ask what part of the
 property is decidable offline, and move that part down.** `refusal_check.py` runs
-27 cases in under a second; the layer-2 scenario that would have covered one of
+27 cases in under a second; the layer-3 scenario that would have covered one of
 them costs a full agent turn.
 
 ---
@@ -46,7 +47,26 @@ Exit code 1 on any failure, so it can gate a commit.
 
 ---
 
-## 2. Agentic harness — `scripts/agentic_check.py`
+## 2. Frontend unit tests — `cd frontend && npm test`
+
+Vitest runs in jsdom with Testing Library and `@testing-library/jest-dom`. It needs no
+backend, session or model and is the first gate for a frontend change.
+
+| File | Contract |
+|---|---|
+| `EmptyAgentWorkspace.test.tsx` | Renders the source-first explanation and CTA, exposes no textbox, and calls the Sources navigation callback |
+| `CreateAgentWizard.test.tsx` | Name owns focus, **Next** starts disabled, and duplicate-name validation appears as soon as the user types a duplicate |
+
+The suite deliberately does not pretend jsdom is a browser. The wizard focus test passed in
+isolation while the integrated Drawer still focused its heading. Playwright found that race;
+the fix was a shared `initialFocusRef` owned by the focus-trap primitive. Component tests
+protect the local contract, and layer 4 protects composition, layout and accessibility.
+
+Exit code 1 on failure, so `npm test` can gate a commit.
+
+---
+
+## 3. Agentic harness — `scripts/agentic_check.py`
 
 Real database, real OpenRouter, real Pinecone. Follows the shape of the existing
 `scripts/slice_check.py`, including its `--cleanup`.
@@ -85,9 +105,9 @@ Builder plan's 1,000-namespace cap is the ceiling on agents.
 
 ---
 
-## 3. Playwright MCP
+## 4. Playwright MCP
 
-Three viewports, run against a locally running stack.
+Four viewports, run against a locally running stack.
 
 ```
 backend   cd backend && uvicorn app.main:app --reload --port 8000
@@ -99,18 +119,19 @@ The dev-login shim exists because a Google consent screen cannot be automated. I
 three ways — flag, environment, loopback client address — and returns **404** (not 403) when
 any gate fails, so a failure here looks like a missing route. Check `.env` first.
 
-### 3.1 Viewports
+### 4.1 Viewports
 
 | Name | Size | Represents |
 |---|---|---|
 | desktop | 1440 x 900 | Panel docked, three columns |
 | tablet | 834 x 1112 | Panel is a drawer, two columns behind it |
 | mobile | 390 x 844 | Panel is a full-width drawer, one column |
+| narrow mobile | 320 x 844 | Overflow and compact-navigation stress pass |
 
-Plus a **320 x 568** pass for horizontal-overflow only — narrow enough to catch the
-`min-w-[18rem]` class of bug, not a layout we optimise for.
+The 320 px pass is narrow enough to catch the `min-w-[18rem]` class of bug. It is a stress
+pass, not a separate product layout.
 
-### 3.2 Journeys
+### 4.2 Journeys
 
 | # | Journey | Run at |
 |---|---|---|
@@ -122,8 +143,10 @@ Plus a **320 x 568** pass for horizontal-overflow only — narrow enough to catc
 | J6 | Delete a handout; confirm the two-step `ConfirmDeleteButton` behaves | tablet |
 | J7 | Keyboard only: Tab to the Handouts toggle, Enter, Tab through the panel, Escape, confirm focus returned | mobile |
 | J8 | Documents tab: cards below `sm`, table at `sm`+, delete reachable without sideways scroll | mobile, desktop |
+| J9 | Open a zero-document agent: source-first explanation and CTA are present, no chat textbox exists, CTA opens Sources | desktop, mobile |
+| J10 | Open New agent: dashboard is inert, Name owns focus, Next is initially disabled, actions remain visible inside the 390x844 viewport | desktop, mobile |
 
-### 3.3 Assertions run as page script
+### 4.3 Assertions run as page script
 
 ```js
 // zero horizontal overflow
@@ -139,11 +162,15 @@ document.documentElement.scrollWidth <= document.documentElement.clientWidth
 
 // exactly one scroll region in the chat column
 [...document.querySelectorAll('*')].filter(el => el.scrollHeight > el.clientHeight + 2)
+
+// source-first empty state
+document.querySelector('[data-testid="empty-agent-workspace"]') !== null &&
+document.querySelector('textarea, input[type="text"], [role="textbox"]') === null
 ```
 
 `browser_console_messages` after every journey: **zero errors, zero React key warnings.**
 
-### 3.4 Reduced motion
+### 4.4 Reduced motion
 
 One pass with `prefers-reduced-motion: reduce` forced. The drawer must still open and close.
 The global `!important` rule in `index.css` kills every transition, so anything gated on
@@ -152,27 +179,28 @@ assumed.
 
 ---
 
-## 4. Iteration protocol
+## 5. Iteration protocol
 
 Findings are fixed in this order, because a fix at a lower layer invalidates the layers
 above it:
 
 ```
-sandbox harness  ->  agentic harness  ->  Playwright
-      ^                    ^                  |
-      +--------------------+------------------+
-                    re-run from the lowest layer touched
+offline harnesses  ->  frontend unit  ->  agentic harness  ->  Playwright
+       ^                    ^                  ^                  |
+       +--------------------+------------------+------------------+
+                          re-run from the lowest layer touched
 ```
 
-A frontend-only fix re-runs Playwright alone. Anything touching `app/tools/` or
-`app/rag/` re-runs from layer 1.
+A frontend-only fix runs `npm test`, `npm run build`, then Playwright. Anything touching
+`app/tools/` or `app/rag/` re-runs from layer 1. Start at the lowest layer that can decide
+the property, but always finish with the first real-browser layer for UI changes.
 
 **Stop condition** is the [00-IMPLEMENTATION-PLAN.md §7](00-IMPLEMENTATION-PLAN.md)
 checklist, not a feeling that it looks finished.
 
 ---
 
-## 5. What is not tested, and why
+## 6. What is not tested, and why
 
 - **Ragas scoring of tool use.** Ragas scores whether an answer is faithful to its context.
   It has no opinion on whether the right tool was called, and inventing a faithfulness-like

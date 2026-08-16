@@ -11,7 +11,7 @@ build follows.
 | 3 | `search_corpus` — retrieval the model drives itself | [03-corpus-search-tool.md](03-corpus-search-tool.md) |
 | 4 | **Handouts** — the generated-asset panel | [04-handouts-panel.md](04-handouts-panel.md) |
 | 5 | UI/UX overhaul, desktop and mobile | [05-ui-ux-overhaul.md](05-ui-ux-overhaul.md) |
-| 6 | Test plan — backend harness + Playwright | [06-test-plan.md](06-test-plan.md) |
+| 6 | Test plan — offline, frontend unit, agentic and Playwright layers | [06-test-plan.md](06-test-plan.md) |
 
 ---
 
@@ -360,13 +360,15 @@ PHASE E  frontend  (needs the 4.5/4.6 contracts only -- can START during C/D)
                           v
 PHASE F  test, iterate, document
   F1 backend harness: scripts/agentic_check.py end-to-end
-  F2 Playwright MCP: desktop 1440x900, tablet 834x1112, mobile 390x844
-  F3 fix, re-run, repeat until clean
-  F4 CLAUDE.md / PRD.md / EVAL.md / README.md updates
-  F5 commit + push
+  F2 frontend unit tests: Vitest + Testing Library
+  F3 Playwright MCP: desktop 1440x900, tablet 834x1112, mobile 390x844,
+     narrow mobile 320x844
+  F4 fix, re-run from the lowest layer touched, repeat until clean
+  F5 CLAUDE.md / PRD.md / EVAL.md / README.md updates
+  F6 commit + push
 ```
 
-**Critical path**: A1 -> B1 -> C4 -> C6 -> E4 -> F2. Everything else has slack.
+**Critical path**: A1 -> B1 -> C4 -> C6 -> E4 -> F3. Everything else has slack.
 
 **Parallelisation actually used**: E1/E2/E6 run alongside C and D, because they depend only
 on the contracts in §4 and on files no backend task touches.
@@ -384,8 +386,8 @@ on the contracts in §4 and on files no backend task touches.
 | matplotlib import cost dominates latency | High — ~1.5 s cold | Only pre-import what the code's AST actually names; document the floor | F1 timings |
 | Render build gets slower / larger | Certain, ~55 MB | Accepted and recorded; matplotlib uses the `Agg` backend, no GUI toolkit | build log |
 | `pip freeze` flattens the `pywin32` marker again | **Certain — it has happened twice** | `grep -n pywin32 backend/requirements.txt` is step two of the freeze, not a thing to remember | A4 |
-| Three-column chat squeezes the thread | High if done at `md` | Dock only at `xl` (1280px); drawer below. Chat tab container widens to `xl:max-w-[90rem]` unconditionally | F2 tablet run |
-| Drawer traps focus badly / no Escape | High — none of these primitives exist | `Drawer.tsx` writes focus trap, Escape, scroll lock and restore-focus once, tested in isolation | F2 |
+| Three-column chat squeezes the thread | High if done at `md` | Dock only at `xl` (1280px); drawer below. Chat tab container widens to `xl:max-w-[90rem]` unconditionally | F3 tablet run |
+| Drawer traps focus badly / no Escape | High — none of these primitives exist | `Drawer.tsx` writes focus trap, Escape, scroll lock and restore-focus once, tested in isolation | F2, F3 |
 | bytea rows bloat the list query | Certain if missed | `content` is `deferred()`; `HandoutOut` has no `content` field at all | F1 |
 | Deleting a conversation destroys its handouts | By design (CASCADE) | Documented; handouts survive *document* deletion, which is the case PRD item 18 is about | — |
 
@@ -401,7 +403,8 @@ on the contracts in §4 and on files no backend task touches.
 - [ ] Handouts panel: docked at 1440px, drawer at 834px and 390px, keyboard-operable, Escape closes, focus returns
 - [ ] Zero horizontal scroll at 320px on every view
 - [ ] Every interactive control is >= 44px (the 9 known violations fixed)
-- [ ] Playwright run clean at three viewports with no console errors
+- [ ] Frontend unit tests and production build clean
+- [ ] Playwright run clean at four viewports with no console errors
 - [ ] CLAUDE.md gains the gotchas this build discovered; PRD open items 7 and 13 updated
 - [ ] Committed and pushed
 

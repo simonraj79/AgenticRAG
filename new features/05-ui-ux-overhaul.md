@@ -234,3 +234,34 @@ Measured in Playwright, not judged by eye. Three viewports: **1440x900**, **834x
 6. Focus ring is visible on every interactive element and is not clipped by an `overflow` ancestor — the global rule is `outline: 3px` with `outline-offset: 3px`, so a scroll container needs internal padding.
 7. Zero console errors and zero React key warnings across all three runs.
 8. With `prefers-reduced-motion: reduce` forced, the drawer still opens and closes correctly.
+
+---
+
+## 6. Post-deployment audit — 2026-08-16
+
+The production site was audited again with Playwright after the broader overhaul. Two
+remaining UX problems were selected because they blocked the beginning of the user's task,
+not because they were cosmetic:
+
+1. **A zero-document agent still offered an active chat composer.** The interface invited a
+   question that could not be grounded. It now renders `EmptyAgentWorkspace`, explains that a
+   source is required, and sends **Add your first source** directly to Sources. No textbox is
+   present in this state.
+2. **The New agent form expanded inside the dashboard and became a 1,697 px page on a
+   390x844 phone.** It now opens in the shared `Drawer` primitive. The dashboard is inert and
+   `aria-hidden`, Name receives initial focus, actions are sticky, and **Next** stays disabled
+   until the name is non-empty, within the length limit and unique.
+
+The refinement loop caught one integration-only failure: the wizard's isolated focus test
+passed, but Drawer's default heading focus won when the two were composed. `Drawer` now takes
+an `initialFocusRef`, so the focus trap and the wizard establish one owner instead of racing
+two effects.
+
+Evidence at handoff:
+
+- `npm test`: **2 test files / 2 tests passed**.
+- `npm run build`: passed (the existing Vite large-chunk advisory remains non-blocking).
+- `python scripts/ui_check.py`: **15 passed / 0 failed / 0 unmeasured**.
+- Mobile 390x844: drawer fits the viewport, actions remain inside it, and horizontal overflow
+  is zero.
+- Render: frontend commit `1874950` verified live; backend health/config remained 200.

@@ -58,6 +58,21 @@ Both 202 routes stage a row and return immediately; the client polls
 `progress_done` / `progress_total`. A run that dies mid-way keeps the questions it already
 paid for — progress is committed per question, not once at the end.
 
+### 2.1 Evaluation UI checks are not metric checks
+
+The frontend now has two fast regression layers:
+
+| Check | Command | What it establishes |
+|---|---|---|
+| Component behavior | `cd frontend && npm test` | Vitest + Testing Library; currently covers source-first empty agents and create-wizard validation/focus |
+| Browser layout and accessibility | `python scripts/ui_check.py` | Playwright against both local servers; viewport fit, focus/inert behavior, tap targets, overflow and console errors |
+
+These checks protect the interface used to author and read evaluations; they do **not** prove
+that the four metrics are correct. Metric correctness still belongs to the real pipeline,
+stored contexts and Ragas checks described below. Conversely, a trustworthy score does not
+prove the scorecard is reachable or usable on a phone, so both layers are required before a
+frontend-affecting evaluation change is considered done.
+
 ---
 
 ## 3. The four metrics

@@ -511,3 +511,29 @@ EXIT=0
 ```
 
 Restored, the run reads `1 chips, 1 at 44x44` and **15 passed / 0 failed / 0 not measured**.
+
+### 7.7 Post-deployment refinement — source first, one focus owner
+
+The 2026-08-16 production audit found one state the original shell proof did not exercise:
+an agent with **zero documents**. The two-track workspace was structurally healthy, but the
+chat composer still promised an action the retrieval system could not fulfill. `AgentDetail`
+now replaces the entire workspace body with `EmptyAgentWorkspace` in that state. Its only
+primary action changes the view to Sources; the composer is not mounted.
+
+The same audit moved the dashboard's create wizard into `Drawer`. Reusing the primitive
+exposed a composition bug that the isolated wizard test could not see: the Drawer focused its
+heading after the wizard focused Name. `Drawer` now accepts `initialFocusRef`, and the focus
+trap uses that target itself. The rule is now explicit: **a trapped surface has one initial
+focus owner, the trap primitive**.
+
+The proof spans both layers:
+
+```
+cd frontend && npm test           # 2/2 component contracts
+python scripts/ui_check.py        # 15/15 browser assertions
+```
+
+The 390x844 browser pass verified the creation Drawer at 390x844 with its action bar fully
+inside the viewport and zero horizontal overflow. Commit `1874950` was then verified on the
+live Render static site; the backend remained healthy and was not rebuilt for the
+frontend-only change.

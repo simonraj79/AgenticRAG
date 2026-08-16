@@ -25,6 +25,9 @@ performance on four measures, question by question, and names the weakest one.
 recorded per answer and readable in one place. Nothing about how an answer was produced is
 hidden.
 
+**Starts with evidence.** A new agent cannot present a question box before it has a source;
+the empty workspace explains the dependency and takes the user straight to upload.
+
 ## Personas
 
 An agent is a corpus plus a teaching style. The Feynman Explainer answers with an analogy, a
@@ -38,6 +41,7 @@ claim.
 |---|---|
 | Backend | FastAPI · SQLAlchemy 2.0 (async) · Alembic |
 | Frontend | React 19 · Vite · Tailwind CSS 4 |
+| Frontend tests | Vitest · Testing Library · Playwright |
 | Database | Render Postgres 18 |
 | Vector DB | Pinecone serverless, 768d cosine |
 | Embeddings | `gemini-embedding-2` @ 768 dims |
@@ -78,6 +82,18 @@ cd frontend && npm install && npm run dev
 
 Then open http://localhost:5173. The landing page reports whether it can reach the backend
 and the database.
+
+Frontend verification:
+
+```bash
+cd frontend && npm test && npm run build
+```
+
+With both local servers running, the browser layout and accessibility harness is:
+
+```bash
+python scripts/ui_check.py
+```
 
 ## Repository layout
 

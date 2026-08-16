@@ -130,6 +130,7 @@ retriever, the chain and everything downstream are identical.
 |---|---|---|
 | Backend | FastAPI | Owns all secrets and all LangChain calls |
 | Frontend | React + Tailwind CSS (Vite) | **Login · Dashboard · Chat · Documents · Evaluate** |
+| Frontend verification | Vitest + Testing Library + Playwright | Component contracts first; real-browser layout, focus and accessibility second |
 | Answer transport | **JSON (SSE deferred)** | See below |
 | **Auth** | **Google OAuth 2.0** via Authlib | Authorization Code flow, server-side |
 | **Session** | **Server-side, DB-backed** | httpOnly cookie carrying an opaque token |
@@ -146,6 +147,13 @@ Evaluate — assumed one corpus and one-shot questions. Tenancy moved to agents 
 questions became conversations (§3.7), so Ingest and Ask became *tabs on an agent*, and
 Trace stopped being a view at all: it is now opened inline from the message it explains,
 because provenance a click and a screen away is provenance nobody checks.
+
+**The source-first boundary is part of the product contract.** As of 2026-08-16, an agent
+with zero documents does not render a chat composer; it explains the dependency and offers
+one direct action into Sources. Agent creation is a modal Drawer rather than an expanding
+dashboard card: background content is inert, Name owns initial focus, actions remain visible,
+and progress is gated on a valid, unique name. These are behavior and accessibility
+requirements, not presentation details.
 
 **SSE streaming is specified but not built.** Streaming and durable recording pull in
 opposite directions — the `queries` row is only complete once the last token has landed —
@@ -833,6 +841,10 @@ Both Render services deploy from https://github.com/simonraj79/AgenticRAG.
 | Start / publish | `alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port $PORT` | Publish `dist` |
 | Health check path | `/api/health` | — |
 
+The frontend was last verified live on 2026-08-16 at commit `1874950` (`Improve empty-agent
+and creation UX`). Render published the static site from that commit. The backend skipped the
+frontend-only rebuild as intended and continued returning 200 from health/config checks.
+
 **Binding.** The backend must bind Render's injected `$PORT` on `0.0.0.0`. Binding
 localhost passes local testing and fails Render's health check.
 
@@ -930,16 +942,18 @@ truncate the last octet or omit it unless there is a stated reason to keep it.
 
 ## 8. Provisioning status
 
-As of 2026-08-15. Scripts under `scripts/` are idempotent and safe to re-run.
+As of 2026-08-16. Provisioning scripts under `scripts/` are idempotent and safe to re-run;
+test harnesses have the setup/cleanup contracts documented in
+[`new features/06-test-plan.md`](new%20features/06-test-plan.md).
 
 | Resource | Status | Detail |
 |---|---|---|
 | Render Postgres | ✅ **Live** | `agentic-rag-db` · `dpg-d9vt7v1t0dsc738c8kpg-a` · `basic_256mb` · **singapore** · PG **18** · `available` |
 | Pinecone index | ✅ **Live** | `agentic-rag-ntu` · **768d** · cosine · serverless aws **ap-southeast-1** · Builder plan · `Ready` |
 | Google OAuth client | ✅ **Live** | `Agentic RAG Web` · Web application · `dsai-mod-2-group-project` · **In production** · External · consent brand `Groundwork`, **shared with the `Bedtime Story Web` client in the same project** and unverified, so the screen shows the redirect host rather than either name |
-| GitHub repo | ✅ **Live** | https://github.com/simonraj79/AgenticRAG (public) |
+| GitHub repo | ✅ **Live** | https://github.com/simonraj79/AgenticRAG (public) · `main` synced at `1874950` |
 | Render web service | ✅ **Live** | `agentic-rag-api` · `srv-d9vtuhpt0dsc738dmgsg` · `starter` · **singapore** · https://agentic-rag-api-6x6b.onrender.com |
-| Render static site | ✅ **Live** | `agentic-rag-web` · `srv-d9vtuj61egvs73fdfang` · free · https://agentic-rag-web-e9e9.onrender.com |
+| Render static site | ✅ **Live** | `agentic-rag-web` · `srv-d9vtuj61egvs73fdfang` · free · https://agentic-rag-web-e9e9.onrender.com · commit `1874950` verified |
 
 **All six resources are provisioned.** Verified end to end: `/api/health` returns
 `{"status":"ok","database":"ok"}` from Singapore against the private-network Postgres, and
@@ -1103,6 +1117,18 @@ Frontend:
 cd frontend && npm install && npm run dev
 ```
 
+Frontend verification:
+
+```bash
+cd frontend && npm test && npm run build
+```
+
+With the backend and frontend running on their required local ports:
+
+```bash
+python scripts/ui_check.py
+```
+
 Local defaults assume the backend on `http://localhost:8000` and the frontend on
 `http://localhost:5173`, which are the values in `.env.example` and the registered
 localhost redirect URI.
@@ -1149,7 +1175,7 @@ Infrastructure is complete. Stages 1 and 3 are built; Stage 2 is half-built.
 | 6 | Retriever seam + Stage 1 chain | ✅ done |
 | ~~7~~ | ~~**Stage 2 loop** + trace writing~~ | ✅ **done, and deliberately not as specified.** The score-triggered rewrite loop was **superseded** by the agent loop (§3.5a). A threshold could not have worked: on-topic questions measured 0.61–0.67 and off-topic 0.49–0.58, so 0.5 sits *inside* the overlap and fires late on bad retrievals and early on good ones. The loop now triggers on the model's own admission that something is missing, read off the answer text with the same marker list `queries.refused` uses |
 | 8 | 10-question golden set + Ragas wiring | ✅ done, with authoring and editing (§3.6.1) |
-| 9 | React views | ✅ done — Login · Dashboard · Chat · Documents · Evaluate |
+| 9 | React views | ✅ done — Login · Dashboard · Chat · Documents · Evaluate; source-first empty workspace and modal creation flow audited 2026-08-16 |
 | 10 | Object storage for slide images (R2/S3) | Open — only gates citation images |
 | 11 | Does `gemma-4-31b-it` support structured output? | ✅ **yes**, via `function_calling`; `DECISION_MODEL` collapsed onto it |
 | 12 | Workshop PDFs in a public repo | Open — see below |

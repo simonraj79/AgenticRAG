@@ -55,7 +55,7 @@ example found elsewhere.
 
 ---
 
-## Current state — verified live 2026-08-15
+## Current state — verified live 2026-08-16
 
 ### Infrastructure: complete
 
@@ -67,53 +67,50 @@ example found elsewhere.
 | Render backend | `srv-d9vtuhpt0dsc738dmgsg` | https://agentic-rag-api-6x6b.onrender.com |
 | Render static site | `srv-d9vtuj61egvs73fdfang` | https://agentic-rag-web-e9e9.onrender.com |
 | Google OAuth client | `Agentic RAG Web` | project `dsai-mod-2-group-project` · **in production** |
-| GitHub | https://github.com/simonraj79/AgenticRAG | public · clean tree · **`main` is 1 commit ahead of `origin`** |
+| GitHub | https://github.com/simonraj79/AgenticRAG | public · `main` synced at `1874950` |
 
 Health check returns `{"status":"ok","version":"0.1.0","database":"ok"}`. Cost is roughly
 **$33–34/mo** (Render backend ~$7, Postgres ~$6–7, Pinecone Builder ~$20).
 
-> **The RAG slice is committed but not pushed.** `04f89a6` holds `backend/app/rag/`,
-> `scripts/slice_check.py`, the `config.py` model decisions and the dependency additions.
-> The working tree is clean; `main` sits one commit ahead of `origin/main`. Push when you
-> are ready — the repository is public, so the push is what makes this code readable by
-> anyone, not the commit.
+### 2026-08-16 frontend audit and deployment
 
-### Code: scaffold plus a working RAG slice
+The production frontend is live on commit `1874950` (`Improve empty-agent and creation UX`).
+Render built and published the static site from that commit; the backend correctly skipped a
+rebuild because the change was frontend-only and its health/config endpoints remained 200.
+
+Two changes shipped from the Playwright audit:
+
+1. An agent with no documents shows a source-first workspace with **Add your first source**;
+   the chat composer is absent until the corpus exists.
+2. New-agent creation opens in an accessible Drawer with an inert background, Name autofocus,
+   sticky actions and **Next** disabled until the name is valid and unique.
+
+Verification is green: `npm test` **2/2**, `npm run build`, and `scripts/ui_check.py`
+**15/15**. The 390x844 pass specifically verified that the creation panel fits the viewport,
+its action bar remains visible, and the page has zero horizontal overflow.
+
+### Code: full RAG product, evaluation and handouts
 
 **Exists:**
 
 ```
 backend/app/
-├── config.py      settings; URL rewriting + TLS fixes (do not "simplify" these);
-│                  model ids, sampling defaults, rerank model
-├── main.py        /api/health, /api/config, CORS, SessionMiddleware
-├── db/
-│   ├── models.py  all 16 tables from PRD §4
-│   └── session.py async engine
-└── rag/
-    ├── retriever.py  THE SEAM - embeddings, vector store, retriever, scored search
-    ├── ingest.py     load -> split -> embed -> upsert + documents/chunks/ingestion_runs
-    └── pipeline.py   Stage 1 chain: retrieve -> prompt -> answer
-frontend/src/      3 files: status card + four placeholder tiles
-scripts/           create_index · create_render_db · create_render_services ·
-                   migrate_index · slice_check
+├── api/           agents, conversations, documents, evaluation, handouts
+├── auth/          Google OAuth plus the gated local dev-login shim
+├── db/            SQLAlchemy models and async sessions
+├── eval/          golden-set generation, Ragas scoring, background jobs
+├── rag/           ingest, retrieval seam, pipeline, bounded agent loop, traces
+└── tools/         corpus search and the sandboxed Python tool
+frontend/src/
+├── views/         Login, Dashboard, Chat, Sources and Evaluate
+├── components/    workspace shell, drawers, messages, citations, traces, handouts
+└── lib/           API/types/hooks; the frontend's only door to the backend
+scripts/           provisioning plus offline, agentic and browser harnesses
 ```
 
-**Does not exist:** `app/auth/`, `app/api/`, `app/eval/`, `rag/trace.py`, the Stage 2 loop,
-and every real React view.
-
-**Verified working** (`scripts/slice_check.py`, 2026-08-15): a 12.5 KB markdown file
-ingests to 5 chunks of 592–777 tokens, upserts into `agent_{id}`, retrieves at 0.61–0.67,
-reranks through Cohere and produces a grounded, correctly-cited answer. Off-corpus
-questions are refused. Run `--cleanup` to drop the namespace and seed rows — those are the
-5 vectors currently in the index.
-
-**Dependencies added this session:** `langchain`, `langchain-text-splitters`,
-`langchain-classic`, `langchain-google-genai`, `langchain-pinecone`, `langchain-cohere`,
-`pypdf`, `langchain-mcp-adapters`. The last one is installed but **nothing imports it yet** —
-it is present so the Stage 2 agent can be given real MCP tools without a dependency change
-mid-build. `langchain-text-splitters` and `langchain-classic` are explicit because 1.x
-stopped providing them transitively.
+The original RAG slice remains a useful low-cost smoke test, but it is no longer the product
+boundary. The live system includes multi-turn conversations, model-driven corpus search,
+sandboxed Python handouts, stored traces, golden-set authoring and Ragas scorecards.
 
 ---
 
@@ -169,13 +166,16 @@ authoritative tracker.
 | 5 | **Faithfulness penalises a teaching persona** (PRD 20) | The weakest-metric pointer currently advises deleting the pedagogy |
 | 6 | Object storage for handouts and slide images (PRD 10, 25) | Handout bytes are in Postgres, capped at 5 MB and 200 per agent |
 
-Verify anything you change with the three harnesses, lowest layer first — a fix in
+Verify anything you change with the four layers, lowest layer first — a fix in
 `app/tools/` or `app/rag/` invalidates the layers above it:
 
 ```bash
 backend/.venv/Scripts/python.exe scripts/sandbox_check.py    # 16 cases, no DB, seconds
 backend/.venv/Scripts/python.exe scripts/ledger_check.py     # citation markers, no DB
+cd frontend && npm test                                     # component behavior
 backend/.venv/Scripts/python.exe scripts/agentic_check.py --setup   # then --run, then --cleanup
+cd frontend && npm run build
+python scripts/ui_check.py                                  # both servers running
 ```
 
 `--cleanup` matters more than usual: a leaked Pinecone namespace is a real cost, and the
@@ -273,10 +273,19 @@ cd backend && python -m alembic revision --autogenerate -m "..."
 backend/.venv/Scripts/python.exe scripts/slice_check.py --cleanup   # drop the slice data
 ```
 
+```bash
+cd frontend && npm test && npm run build          # fast frontend gate
+```
+
+```bash
+python scripts/ui_check.py                        # browser UI/accessibility gate
+```
+
 ## Notes for whoever picks this up
 
-- **All four `scripts/` are idempotent.** They detect existing resources, verify config
-  against the PRD, and report drift rather than recreating. Re-running one is always safe.
+- **The provisioning scripts are idempotent.** They detect existing resources, verify config
+  against the PRD, and report drift rather than recreating. Test harnesses document their own
+  setup/cleanup contract; `agentic_check.py --cleanup` is not optional after a throwaway run.
 - **`create_index.py --recreate` refuses to delete a populated index.** That is not an
   obstacle — the destructive path was never correct. Use `migrate_index.py`, which builds
   the replacement alongside the original. See CLAUDE.md, "Changing something immutable".
