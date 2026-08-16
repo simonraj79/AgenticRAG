@@ -1,33 +1,36 @@
 # Groundwork
 
-**An agentic RAG harness.** Retrieval over your own documents that tells you when it is
-wrong — multi-user, deployed on Render, and scored on a golden set rather than on vibes.
+**Ask questions about your own documents, and see exactly where every answer came from.**
 
-Ingest → embed → retrieve → rerank → generate → **measure**. The last stage is the point:
-four Ragas metrics, a per-question breakdown, and a weakest-metric pointer that names the
-next thing to fix.
+Groundwork is a teaching agent. You give it a set of documents, pick a persona, and talk to
+it — and it answers only from what you gave it. When your documents do not cover the
+question, it says so instead of inventing something.
 
-**The agent has tools.** Generation is a bounded loop rather than a single call: the model
-can search its own corpus again mid-answer when one retrieval did not cover the question,
-and it can write and run Python in a sandbox to produce a chart, a slide deck or a table.
-Every tool call is a row in the same trace as every other decision, including the program it
-wrote — a pipeline that claims to be inspectable should not hide the step that generates
-your files.
+## What it does
 
-**Handouts** is where those files land: charts, `.pptx` decks, `.csv` tables and markdown
-study sheets, produced either as a side effect of a conversation or straight from a recipe
-button. Each one keeps the code that made it.
+**Answers with receipts.** Every claim carries a numbered citation you can click to read the
+exact passage it came from, with its retrieval and reranking scores.
 
-*Source material for the corpus and the design brief: the "Agentic RAG Harness Engineering"
-workshop (Topics 10–11). See [PRD.md](PRD.md) §8 open item 6 for the licensing question on
-the workshop PDFs.*
+**Searches again when it needs to.** If one search does not cover a two-part question, the
+agent goes back to your documents mid-answer rather than guessing at the rest.
 
-**New here, or resuming work? Start with [HANDOFF.md](HANDOFF.md)** — current state, what
-exists, and what to do next.
+**Makes handouts.** Charts, slide decks, spreadsheets and study sheets, generated from your
+material — either on request, or as a by-product of a conversation. Each one keeps the code
+that produced it.
 
-**[PRD.md](PRD.md) is the specification** — tech stack, architecture, database schema,
-deployment configuration, and the constraints that cannot be reversed. Read §7 before
-changing anything infrastructural.
+**Scores itself.** Build a set of questions with known answers and Groundwork grades its own
+performance on four measures, question by question, and names the weakest one.
+
+**Shows its working.** Retrieval, reranking, generation, tool calls and refusals are all
+recorded per answer and readable in one place. Nothing about how an answer was produced is
+hidden.
+
+## Personas
+
+An agent is a corpus plus a teaching style. The Feynman Explainer answers with an analogy, a
+worked example, and an explicit note about anything the material does not cover. Others
+answer plainly. The persona changes how you are taught, never what the agent is allowed to
+claim.
 
 ## Stack
 
@@ -35,14 +38,14 @@ changing anything infrastructural.
 |---|---|
 | Backend | FastAPI · SQLAlchemy 2.0 (async) · Alembic |
 | Frontend | React 19 · Vite · Tailwind CSS 4 |
-| Database | Render Postgres 18 (Singapore) |
-| Vector DB | Pinecone serverless, 768d cosine (`ap-southeast-1`, Singapore) |
-| Embeddings | `gemini-embedding-2` @ 768 dims, via Google directly |
-| Generation | `google/gemma-4-31b-it` **via OpenRouter** — every chat model goes through one gateway; embeddings deliberately do not |
-| Agent tools | `search_corpus` (the retriever, model-driven) · `run_python` (sandboxed subprocess: matplotlib, python-pptx, pandas) |
+| Database | Render Postgres 18 |
+| Vector DB | Pinecone serverless, 768d cosine |
+| Embeddings | `gemini-embedding-2` @ 768 dims |
+| Generation | `google/gemma-4-31b-it` via OpenRouter |
+| Agent tools | `search_corpus` · `run_python` (sandboxed) |
 | Reranker | Cohere `rerank-v3.5` |
-| Evaluation | Ragas, judged by `google/gemini-3.7-flash` — **not** the generation model, so a run is not self-assessment |
-| Auth | Google OAuth 2.0 via Authlib |
+| Evaluation | Ragas, judged by `google/gemini-3.7-flash` |
+| Auth | Google OAuth 2.0 |
 
 ## Getting started
 
@@ -72,36 +75,26 @@ Frontend:
 cd frontend && npm install && npm run dev
 ```
 
-Then open http://localhost:5173. The landing page reports whether it can reach the
-backend and the database.
-
-## Infrastructure
-
-Cloud resources are provisioned by idempotent scripts — safe to re-run, and they verify
-existing resources against the PRD rather than recreating them:
-
-```bash
-python scripts/create_index.py --dry-run
-```
-
-```bash
-python scripts/create_render_db.py --dry-run
-```
-
-Drop `--dry-run` to actually create. Current provisioning status is tracked in PRD §8.
+Then open http://localhost:5173. The landing page reports whether it can reach the backend
+and the database.
 
 ## Repository layout
 
 ```
 backend/    FastAPI app, SQLAlchemy models, Alembic migrations
 frontend/   React + Vite + Tailwind SPA
-scripts/    Idempotent cloud provisioning
-PRD.md      The specification
-CLAUDE.md   Working notes: conventions, insights, and hard-won gotchas
-EVAL.md     Stage 3 operator's guide: settings, parameters, reading a scorecard
+scripts/    Provisioning and end-to-end checks
 ```
 
-## Notes
+## Documentation
 
-The workshop PDFs are gitignored pending a decision on whether redistributing them in a
-public repository is permitted (PRD open item 6).
+| File | What it is |
+|---|---|
+| [PRD.md](PRD.md) | The specification: architecture, schema, deployment |
+| [EVAL.md](EVAL.md) | How to run an evaluation and read a scorecard |
+| [HANDOFF.md](HANDOFF.md) | Current state and what to do next |
+| [new features/](new%20features/) | Design notes for each major change |
+
+---
+
+*Built against the "Agentic RAG Harness Engineering" workshop (Topics 10–11).*
