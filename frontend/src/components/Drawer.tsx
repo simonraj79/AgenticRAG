@@ -25,7 +25,7 @@
  */
 
 import { useId, useRef } from "react";
-import type { ReactNode } from "react";
+import type { ReactNode, RefObject } from "react";
 import { useFocusTrap } from "../lib/useFocusTrap.ts";
 
 /**
@@ -45,6 +45,7 @@ export function Drawer({
   children,
   testId,
   width = "md",
+  initialFocusRef: requestedInitialFocusRef,
 }: {
   open: boolean;
   onClose: () => void;
@@ -52,15 +53,18 @@ export function Drawer({
   children: ReactNode;
   testId?: string;
   width?: "md" | "lg";
+  /** Optional first control for task-focused drawers such as a wizard. */
+  initialFocusRef?: RefObject<HTMLElement | null>;
 }) {
   const headingId = useId();
   const panelRef = useRef<HTMLDivElement>(null);
   const headingRef = useRef<HTMLHeadingElement>(null);
+  const initialFocusRef = requestedInitialFocusRef ?? headingRef;
 
   // Escape, the Tab cycle, focus in and back out, and the body scroll lock.
   // The heading is what receives focus on open -- see the `tabIndex={-1}` note
   // on it below.
-  useFocusTrap({ open, onClose, panelRef, initialFocusRef: headingRef });
+  useFocusTrap({ open, onClose, panelRef, initialFocusRef });
 
   return (
     <div
@@ -98,6 +102,7 @@ export function Drawer({
       <div
         ref={panelRef}
         role="dialog"
+        id={testId}
         aria-modal="true"
         aria-labelledby={headingId}
         data-testid={testId ?? "drawer"}

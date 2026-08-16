@@ -52,6 +52,7 @@ import { ErrorBanner, Spinner, errorMessage } from "../components/ui.tsx";
 import AgentBar from "../components/AgentBar.tsx";
 import type { ViewId } from "../components/AgentBar.tsx";
 import AgentSettingsSheet from "../components/AgentSettingsSheet.tsx";
+import EmptyAgentWorkspace from "../components/EmptyAgentWorkspace.tsx";
 import AgentChat from "./AgentChat.tsx";
 import AgentDocuments from "./AgentDocuments.tsx";
 import AgentEvaluate from "./AgentEvaluate.tsx";
@@ -241,18 +242,17 @@ export default function AgentDetail({
           fresh component rather than let the old poll write a scorecard into the
           new agent's view.
         */}
-        {view === "workspace" && (
-          <AgentChat
-            key={agent.id}
-            agentId={agent.id}
-            onCorpusChanged={handleCorpusChanged}
-            // An agent with no corpus refuses every question, so the rail opens
-            // on the thing that has to be fixed first. With a corpus, threads
-            // are the more useful default -- the sources are one tap away and
-            // are not going anywhere.
-            initialRailTab={agent.document_count > 0 ? "threads" : "sources"}
-          />
-        )}
+        {view === "workspace" &&
+          (agent.document_count === 0 ? (
+            <EmptyAgentWorkspace onAddSource={() => setView("sources")} />
+          ) : (
+            <AgentChat
+              key={agent.id}
+              agentId={agent.id}
+              onCorpusChanged={handleCorpusChanged}
+              initialRailTab="threads"
+            />
+          ))}
 
         {/*
           The two document-shaped views get their own scroll container, which
