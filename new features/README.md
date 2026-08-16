@@ -33,6 +33,7 @@ the shape of the screen.
 | [05-ui-ux-overhaul.md](05-ui-ux-overhaul.md) | Five real layout and tap-target defects, with file:line |
 | [06-test-plan.md](06-test-plan.md) | Three test layers and the iteration protocol between them |
 | [07-workspace-shell.md](07-workspace-shell.md) | The workspace shell, the editable settings sheet, and the de-NotebookLM pass — plus `scripts/ui_check.py`, which finally executes 05's acceptance criteria |
+| [08-streaming-and-followups.md](08-streaming-and-followups.md) | SSE streaming, and the two defects that came from how the work was divided rather than how it was written — including why an unadvertised parameter sometimes 404s and sometimes does not |
 
 ---
 

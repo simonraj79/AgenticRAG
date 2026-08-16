@@ -133,6 +133,7 @@ different parts of the build:
 | Agent loop | `detect_refusal` — did the turn decline? | The turn that answered *half* and gave up on the rest. Not a refusal, and precisely the turn that needed a search. | `detect_gap` — any admission of a gap, anywhere in the text |
 | Handout retry | `SandboxResult.ok` — did the code crash? | Code that computes the chart correctly and forgets `savefig`. Exit 0, no file. Among the *most* recoverable failures there is. | "the expected artefact is absent" |
 | **Layout** ([07](07-workspace-shell.md)) | console errors, failed requests, horizontal overflow — did the page break? | The agent header growing past the viewport, so `calc(100dvh - top)` went negative and the chat pane collapsed to **24px with 0px of thread**. Rendered perfectly. Threw nothing. | "is the thread taller than zero?" |
+| **Forced upload** ([08](08-streaming-and-followups.md)) | the POST returned **202** and nothing raised | `force` was dropped at the background handoff, so the job re-deduplicated the upload and wrote `failed` a minute later — telling the user to do the thing they had just done | "is there a second copy in the corpus?" |
 
 In all three the error-shaped test **passed while the thing we wanted had not happened**.
 That is the failure mode to design against, and the question to ask is always *"did the goal
@@ -289,6 +290,7 @@ means "wait sixty seconds" sends its reader to debug working code — the same c
 | The same trigger idea in a background job | [`app/handouts/jobs.py`](../backend/app/handouts/jobs.py) |
 | Scenarios S1–S12 | [`scripts/agentic_check.py`](../scripts/agentic_check.py) |
 | T2 applied to layout, and the harness for it | [07-workspace-shell.md](07-workspace-shell.md) · [`scripts/ui_check.py`](../scripts/ui_check.py) |
+| Streaming the loop without forking it — the `emit` seam | [08-streaming-and-followups.md](08-streaming-and-followups.md) · [`app/rag/events.py`](../backend/app/rag/events.py) · [`app/api/stream.py`](../backend/app/api/stream.py) |
 
 ---
 
