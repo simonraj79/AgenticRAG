@@ -189,11 +189,17 @@ class AskOut(BaseModel):
     never calls the explicit create route, so every thread comes into existence
     through an ask and this field is the only way the client learns its id.
 
-    `rewritten_question` is null when contextualisation did not run, and a string
+    `rewritten_question` is null when the rewrite produced nothing, and a string
     when it did -- **even if that string equals `question`.** Null and unchanged
-    are different facts (`pipeline.contextualize_question` explains why), and a
-    client showing "searched for: ..." must be able to tell "the model read this
-    and left it alone" from "the model was never asked".
+    are different facts (`pipeline.contextualize_question` explains why), and
+    since 2026-08-16 the rewriter runs on every turn, so a null here now means
+    "the rewrite failed or was switched off" rather than "this was a first turn".
+
+    `rewritten_changed` is what a client should actually render on. Once every
+    turn carries a rewrite, a banner gated on `rewritten_question` being truthy
+    fires on every message in every thread, usually quoting a sentence a word
+    away from the one the user just typed -- which spends the single most useful
+    explanatory affordance in the product on saying nothing.
 
     `tool_steps` and `handouts` both default to empty, so an agent with tools off
     serialises exactly as it did before the loop existed. That is not tidiness:
@@ -212,6 +218,10 @@ class AskOut(BaseModel):
     latency_ms: int
     model_used: str
     rewritten_question: str | None = None
+    # Null on a turn where the rewriter was not asked at all; False when it read
+    # the question and left it alone. Three states, because a client that
+    # collapses the first two renders "Searched for" over an unrewritten turn.
+    rewritten_changed: bool | None = None
     citations: list[CitationOut]
     tool_steps: int = 0
     # Round-TRIPS, where `tool_steps` counts ROUNDS. They were the same number
@@ -514,9 +524,15 @@ async def run_turn(
     session: Session | None,
     conversation: Conversation,
     question: str,
+    rewrite: bool | None = None,
     emit: events.Emit | None = None,
 ) -> AskOut:
     """Answer one question inside one thread, and record everything about it.
+
+    `rewrite` is threaded straight through to `pipeline.answer_question` and
+    `None` means "use `settings.rewrite_every_turn`". The one caller that passes
+    it is `app/eval/jobs.py`, which needs its golden questions embedded verbatim
+    or every EVAL.md baseline stops being comparable -- see the note there.
 
     Commits. The caller hands over a `conversation` that is already in the
     session (flushed, so it has an id) and gets back a completed turn; every row
@@ -610,36 +626,50 @@ async def run_turn(
     # asyncio Pinecone client, so the event loop stays free -- which matters
     # because Render runs a single uvicorn worker and a blocked loop queues every
     # other in-flight request behind a 13-second generation.
-    result = await answer_question(agent, question, history=history, emit=emit)
+    result = await answer_question(
+        agent, question, history=history, rewrite=rewrite, emit=emit
+    )
 
     # ------------------------------------------------------------------
     # 2. REWRITE -- contextualisation, if it fired
     # ------------------------------------------------------------------
     # PRD section 4.3 lists REWRITE as an event type; this is its first producer.
     #
-    # Recorded on `is not None`, NOT on the string having changed. A rewriter
-    # that read six turns of history and concluded the question already stood on
-    # its own made a decision, and a trace that shows nothing for it is
-    # indistinguishable from a first turn where the rewriter was never called.
-    # `changed` carries the difference for anyone who only wants the interesting
-    # ones.
+    # **Recorded on `rewrite_attempted`, not on `rewritten_question is not
+    # None`.** Those were the same condition until first turns started being
+    # rewritten; now they differ on exactly the turn worth seeing, the one where
+    # the rewriter was called and came back with nothing. A rewriter that read
+    # six turns of history and concluded the question already stood on its own
+    # made a decision too, and a trace showing nothing for it is
+    # indistinguishable from a turn where it was never called. `changed` carries
+    # the difference for anyone who only wants the interesting ones.
     #
     # This payload is also the only durable home for the rewrite. There is no
     # `queries.rewritten_question` column, so `conversations._load_messages`
     # reads `after` back out of here to fill `MessageOut.rewritten_question` --
-    # which is why the key name is part of the contract, not an implementation
-    # detail.
-    if result.rewritten_question is not None:
+    # which is why the key names are part of the contract, not implementation
+    # details.
+    if result.rewrite_attempted:
+        rewritten = result.rewritten_question
         trace.record(
             REWRITE,
             payload={
-                # Distinguishes this from the score-triggered rewrite PRD 3.5
-                # specifies for Stage 2. Both will write REWRITE rows; only the
-                # trigger says which machinery fired.
-                "trigger": "conversation_history",
+                # Was hardcoded "conversation_history", which mislabels every
+                # first-turn rewrite. Still distinguishes this machinery from
+                # the score-triggered rewrite PRD 3.5 specifies for Stage 2 --
+                # that will write REWRITE rows too, and only the trigger says
+                # which one fired.
+                "trigger": "conversation_history" if history else "first_turn",
                 "before": question,
-                "after": result.rewritten_question,
-                "changed": result.rewritten_question != question,
+                "after": rewritten,
+                "changed": rewritten is not None and rewritten != question,
+                # **The new key, and the reason it exists.** With the rewriter on
+                # every turn a failure is no longer "it did not run" -- it is a
+                # silently worse search on a turn that expected help.
+                # `contextualize_question` swallows every exception by design, so
+                # without this the degradation is invisible in the trace as well
+                # as in the logs.
+                "failed": rewritten is None,
                 "history_turns": len(history),
                 "model": settings.decision_model,
             },
@@ -1069,6 +1099,17 @@ async def run_turn(
         latency_ms=latency_ms,
         model_used=result.model,
         rewritten_question=result.rewritten_question,
+        # None when the rewriter was never asked, so the client can tell that
+        # apart from "asked, and it changed nothing". The banner renders on True
+        # alone -- see `AskOut`.
+        rewritten_changed=(
+            (
+                result.rewritten_question is not None
+                and result.rewritten_question != question
+            )
+            if result.rewrite_attempted
+            else None
+        ),
         citations=citations,
         tool_steps=result.tool_steps,
         tool_calls=len(result.tool_calls),

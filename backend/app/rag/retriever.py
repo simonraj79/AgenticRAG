@@ -21,8 +21,10 @@ from functools import lru_cache
 from langchain_classic.retrievers import ContextualCompressionRetriever
 from langchain_cohere import CohereRerank
 from langchain_core.documents import Document
+from langchain_core.embeddings import Embeddings
 from langchain_core.retrievers import BaseRetriever
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from langchain_openai import OpenAIEmbeddings
 from langchain_pinecone import PineconeVectorStore
 from pinecone import Pinecone
 
@@ -47,25 +49,102 @@ RERANK_SCORE_KEY = "relevance_score"
 
 
 @lru_cache(maxsize=1)
-def get_embeddings() -> GoogleGenerativeAIEmbeddings:
-    """The embedding model. One instance, shared.
+def get_embeddings() -> Embeddings:
+    """The embedding model. One instance, shared. Two roads to one space.
 
-    Two things are deliberately absent:
+    `embedding_route` picks the gateway. The SPACE is identical either way --
+    verified 2026-08-16, three strings through both routes at cosine 1.000000 on
+    `embed_documents` AND on `embed_query`, all vectors L2-normalised, against a
+    cross-string control of 0.616566 -- which is why `settings.embedding_model`,
+    the string stamped onto `agents.embedding_model` and onto every
+    `ingestion_runs` row, does not change with it. No re-ingest, no index change.
+    `scripts/embed_check.py` is that measurement, kept runnable.
 
-    `task_type` is not set. `gemini-embedding-001` had it, and nearly every
-    tutorial still passes `task_type="RETRIEVAL_DOCUMENT"` when indexing and
-    `"RETRIEVAL_QUERY"` when querying. `gemini-embedding-2` has no such
-    parameter. Retrieval intent belongs in the prompt text instead.
+    The return type is the `Embeddings` INTERFACE, not either concrete class.
+    Both consumers -- `get_vector_store` below and
+    `app/eval/ragas_runner.py:_judge_embeddings` -- only ever call
+    `embed_documents` / `embed_query` / `aembed_query`, so widening costs nothing
+    and stops the route from leaking into a caller's type.
 
-    There is no manual L2 normalization. `embedding-001` needed it after MRL
-    truncation and silently degraded cosine similarity without it;
-    `gemini-embedding-2` renormalizes on its own. Re-adding that step would
-    double-normalize.
+    THE FOUR KWARGS BELOW ARE NOT STYLE. Each one is a different 400, and you
+    only see the next after fixing the one before it.
 
-    `output_dimensionality` must equal the index dimension exactly. The index is
-    768d and a mismatched vector is rejected at upsert, which is the one failure
-    in this file that is loud rather than silent.
+    `model_kwargs={"encoding_format": "float"}` -- openai-python injects
+    `encoding_format="base64"` unconditionally when the caller does not set it
+    (`openai/resources/embeddings.py:111-112`), and OpenRouter's Google backend
+    answers that with `400 ... do not support base64 encoding_format`. Without
+    this line EVERY call fails. This is a fourth distinct OpenRouter parameter
+    mechanism, and CLAUDE.md's taxonomy of three did not cover it: not
+    unadvertised-and-404, not unadvertised-and-fine, not advertised-then-rejected
+    -- INJECTED BY THE CLIENT LIBRARY WITHOUT BEING ASKED FOR. That is now the
+    third time langchain-openai/openai-python has done this here, after
+    `max_completion_tokens` and `parallel_tool_calls`. It is a property of the
+    library, not three coincidences.
+
+    `check_embedding_ctx_length=False` -- the default True routes through
+    `_get_len_safe_embeddings`, which tiktoken-encodes the input and sends
+    ARRAYS OF INTEGERS (`base.py:560, 624`). Observed on the wire as
+    `input[0]=[791, 15690, 13941, ...]` and rejected with `400 Invalid input
+    format`. It also means one flag governs both write and read paths, because
+    `embed_query` is literally `embed_documents([text])[0]` (`base.py:807`) --
+    which is what keeps ingest and query in one space by construction. Do NOT
+    reach for `tiktoken_enabled=False` instead: that branch imports
+    `transformers.AutoTokenizer`, which is not installed, and raises.
+
+    `chunk_size` -- a hard provider ceiling of 100 inputs per request, not a
+    tuning knob. `OpenAIEmbeddings` defaults to 1000 and `langchain-google-genai`
+    re-batched at 100 internally, so this is the one kwarg whose absence passes
+    every small probe: 25 or 100 texts go in a single request and certify a
+    broken config. See `settings.embedding_batch_size` and case 5 of
+    `embed_check.py`.
+
+    `dimensions` -- omit it and the model returns its 3072d default (measured).
+    The index is 768d. Unlike the chat path, this request carries no `provider`
+    block at all, so `require_parameters` never applies to it and `dimensions`
+    is not filtered at routing -- verified live, 768d came back. **Do not add a
+    provider block here.**
+
+    Two things stay deliberately absent on BOTH routes. There is no `task_type`:
+    `gemini-embedding-001` had one and every tutorial still passes
+    `RETRIEVAL_DOCUMENT`/`RETRIEVAL_QUERY`, but `gemini-embedding-2` has no such
+    constructor parameter and the cosine measurement above shows it is inert on
+    the wire too. And there is no manual L2 normalisation: `embedding-001` needed
+    it after MRL truncation and silently degraded cosine similarity without it,
+    while `gemini-embedding-2` renormalises on its own -- re-adding that step
+    would double-normalise. `embed_check.py` case 6 asserts the norm is 1.0 so
+    that a re-added step is caught rather than absorbed.
     """
+    if settings.embedding_route == "openrouter":
+        return OpenAIEmbeddings(
+            model=settings.openrouter_embedding_model,
+            base_url=settings.openrouter_base_url,
+            api_key=settings.openrouter_api_key,
+            dimensions=settings.embedding_dimension,
+            check_embedding_ctx_length=False,
+            chunk_size=settings.embedding_batch_size,
+            model_kwargs={"encoding_format": "float"},
+            # **A ceiling, not a tidiness.** `OpenAIEmbeddings` defaults to
+            # `request_timeout=None`, and as of 2026-08-16 embedding is on the
+            # REQUEST hot path for every question asked -- so a stalled
+            # OpenRouter connection hangs the turn and its SSE stream with no
+            # error and no bound, on a single uvicorn worker that is meanwhile
+            # trying to serve everyone else. The chat path has carried this same
+            # ceiling since it moved to OpenRouter; this is the half that was
+            # missing. Probed rather than assumed: the kwarg constructs cleanly
+            # on langchain-openai 1.5.1 and sets `request_timeout=120.0`.
+            timeout=settings.openrouter_timeout_s,
+        )
+
+    # The rollback, and the only reason `langchain-google-genai` is still
+    # installed. `gemini-embedding-2` has no `task_type` in its constructor --
+    # but note langchain-google-genai 4.3.4 injects one at CALL time anyway
+    # (`RETRIEVAL_DOCUMENT` on embed_documents, `RETRIEVAL_QUERY` on embed_query,
+    # embeddings.py:420 and :486). The OpenRouter route sends neither, and the
+    # cosine check above was run against BOTH shapes for exactly that reason.
+    #
+    # `output_dimensionality` must equal the index dimension exactly. The index
+    # is 768d and a mismatched vector is rejected at upsert, which is the one
+    # failure in this file that is loud rather than silent.
     return GoogleGenerativeAIEmbeddings(
         model=settings.embedding_model,
         google_api_key=settings.gemini_api_key,

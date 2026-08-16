@@ -10,9 +10,25 @@ loop, which only stays legible if Stage 1 stays a chain.
 **Contextualisation is in front of the chain, not inside it.** A follow-up
 carries its subject in a pronoun -- "what is its power budget?" -- and embedding
 that raw retrieves nothing useful, because the vector for a bare pronoun has no
-relationship to the vector for the rover it stands for. So when there is history,
-a rewrite step resolves the question into a standalone one and *that* is what
-gets embedded. It runs before retrieval and leaves the chain's shape untouched.
+relationship to the vector for the rover it stands for. So a rewrite step
+resolves the question into a standalone one and *that* is what gets embedded. It
+runs before retrieval and leaves the chain's shape untouched.
+
+**As of 2026-08-16 it runs on EVERY turn, first ones included**
+(`settings.rewrite_every_turn`). The step widened along with the trigger: it
+still resolves references, and it now also repairs typos and shorthand, because
+a first turn has no pronouns and can perfectly well have both of those. Per
+`new features/loop.md` section 6 item 1 that makes it a code path rather than a
+tool or a trigger -- something that must happen every time is something this
+module calls itself.
+
+**The step does NOT expand acronyms, and that is a removal rather than an
+omission.** Expansion was built here, measured fabricating ("Ka-band
+(Kurtz-band)" in 2 of 5 trials; "LS&T" -> "Link System and Telemetry", which
+moved retrieval to the wrong file), narrowed to a conditional version that
+measured 5/5, and removed anyway. The comment above
+`CONTEXTUALIZE_SYSTEM_PROMPT` is where that measurement lives; the prompt now
+carries a flat prohibition.
 
 The canonical LangChain name for this is `create_history_aware_retriever`.
 Checked against the reference before writing any of this rather than after an
@@ -114,25 +130,128 @@ QUESTION: {question}"""
 # answer embedded as a search query retrieves documents that look like answers
 # rather than documents that contain one.
 #
-# "Keep the user's wording everywhere else" matters for the same reason. This
-# string is going to an embedding model, so every word the rewriter invents
-# moves the vector away from the user's actual intent. The job is resolving
-# references, not improving the question.
+# **This prompt widened on 2026-08-16, and the sentence it replaced was right for
+# the job it had.** It used to say "keep the user's wording everywhere else",
+# because every invented word moves the vector away from the user's intent. That
+# is still true of INVENTION. It is not true of REPAIR: a misspelled or
+# abbreviated term is already not the user's vocabulary matching the corpus's,
+# and leaving it alone preserves a distance rather than avoiding one. The line
+# between the two is that a repair must be recoverable from the question itself
+# plus the conversation -- never from the corpus, never from world knowledge
+# about the subject.
+#
+# **The asymmetry, which is what shapes the wording below.** A FALSE POSITIVE is
+# the expensive direction: rewriting a question that was already fine risks
+# changing what the user asked, and the answer then arrives confidently about
+# something adjacent with no visible cause. A FALSE NEGATIVE -- a typo left
+# alone -- costs slightly worse retrieval on a question the corpus may well
+# answer anyway. Those are not symmetric, so the prompt is biased toward MINIMAL
+# edits and closes with an explicit instruction to return a clean question
+# unchanged. `scripts/rewrite_check.py` case 8 is that bias made testable: a
+# well-formed question must come back byte-identical, and it is as load-bearing
+# as the repair cases, because it is the one protecting the user's meaning.
+#
+# **ACRONYM EXPANSION WAS BUILT, MEASURED, AND THEN REMOVED THE SAME DAY. That
+# is the most important thing in this comment, and the prohibition below is what
+# is left of it.**
+#
+# The bullet first read "Expand acronyms and initialisms into the full term,
+# KEEPING the acronym as well" -- which CONTRADICTED the do-not-invent bullet
+# four lines under it, because an acronym a first-turn question does not define
+# can only be expanded from world knowledge. The model resolved the contradiction
+# in favour of the more specific instruction and invented, the same way
+# `new features/loop.md` T1 describes two competing instructions resolving. Every
+# line here is an observation rather than a worry:
+#
+#   "how fast is the Ka-band downlink?" -> "Ka-band (Kurtz-band) downlink"
+#                                       -> "Ka-band (Kurzwellen-band) downlink"
+#        2 of 5 trials, both fabricated, both wrong -- and the rewrite_check case
+#        guarding that very question PASSED while printing them.
+#   "wats the LS&T alloc" -> "Link System and Telemetry (LS&T)", invented, and it
+#        moved retrieval to the WRONG FILE.
+#   "hskpng tlm vol per day" -> "Hong Kong SpacePort (HSKP)".
+#
+# A conditional version was then built and measured green -- expand only when the
+# question or the conversation spells the term out, 5/5 in both directions. **It
+# was removed anyway, and deliberately.** The feature's whole value was the
+# first-turn case, where nothing has spelled anything out; gated on
+# recoverability it fires almost never, and what remains is a standing invitation
+# to a model that has already been observed reaching past it. The repair bullets
+# survive because they were measured clean (typos and shorthand, 5/5, no
+# fabrication in any trial); this one does not, because the thing it was for is
+# exactly the thing that is unsafe.
+#
+# So the rule is now UNCONDITIONAL, and that is why it says "not even when the
+# conversation spells it out": a conditional prohibition is the shape that failed
+# once already. An acronym passes through untouched. Cases 7a and 7c in
+# `scripts/rewrite_check.py` pin it, 7c with the measured-harmful "LS&T" string.
+#
+# **A leave-alone bullet is not free, and the first draft of this one cost a
+# repair.** It read "Leave acronyms, initialisms and product names exactly as the
+# user wrote them", and typo repair immediately fell from 5/5 to 3/5 -- the
+# regression was "ka bnd", which the model had been fixing to "Ka band" and now
+# read as a product name to be preserved. Same two words, opposite instructions,
+# and the more recent one won. Narrowing the bullet to acronyms and initialisms,
+# with an explicit carve-out for ordinary misspellings, restored 5/5 on the next
+# run. **A prohibition written to stop one behaviour will stop its neighbours
+# unless its edge is stated**, and the only reason this was caught is that case 6
+# asserts the repair rather than merely asserting no fabrication.
+#
+# **What survives here is COREFERENCE, not expansion, and the difference is
+# measured rather than argued.** With no history, "C&T" and "LS&T" pass through
+# untouched 5/5. With a history that spells the term out, the rewrite comes back
+# as "S-band command and telemetry uplink rate" 5/5 -- the only variable being
+# the conversation, so those words came from the user's own thread and not from
+# priors. That is the coreference bullet resolving a reference, and an
+# unconditional acronym ban could only beat it by damaging coreference, which is
+# the rewriter's oldest job. Case 7b therefore asserts GROUNDEDNESS -- every
+# content word traceable to the question or the conversation -- rather than
+# silence, because groundedness is the property whose absence produced
+# "Kurtz-band" in the first place.
+#
+# **The version worth building instead is GROUNDED rather than forbidden.**
+# Passing the agent's own document titles into this prompt would let a real
+# expansion come from the corpus rather than from priors, which is what the
+# bullet was reaching for and never had. That needs `contextualize_question` to
+# take the agent, a cache not keyed on one static prompt, and its own
+# measurement -- recorded in `new features/10-*.md`. It is not a widening of the
+# bullet below; it is a different feature, and the bullet below stays either way.
 CONTEXTUALIZE_SYSTEM_PROMPT = """\
-Given the conversation so far and the user's latest question, rewrite that \
-question so that it can be understood on its own, without the conversation.
+Rewrite the user's latest question into the best possible search query for a \
+document index, so that it can be understood on its own.
 
-Rules:
+Do all of these:
 - Resolve pronouns and references ("it", "that", "the second one") into the \
-words they stand for.
-- Keep the user's wording everywhere else. This text goes to a search index, \
-not to a person.
-- Do not answer the question.
-- If the question already stands on its own, return it unchanged."""
+words they stand for, using the conversation above when there is one.
+- Correct obvious misspellings and expand shorthand into the full words \
+("dwnlink" -> "downlink", "thruput" -> "throughput").
+- Leave acronyms and initialisms exactly as the user wrote them. This does not \
+apply to an ordinary misspelled word, which you should still repair.
+
+Do none of these:
+- Do not answer the question, or any part of it.
+- Do not add facts, qualifiers, topics or subject-matter words that are not in \
+the question or in the conversation above.
+- NEVER expand an acronym, not even when the conversation above spells it out \
+and not even when you are confident. An acronym is the document's own wording \
+and will match it; an expansion is a guess, and a wrong guess will not match.
+- Do not change what is being asked, and do not make the question broader or \
+narrower.
+- If the question is already well spelled, unabbreviated and standalone, return \
+it unchanged."""
 
 
 class StandaloneQuestion(BaseModel):
-    """The rewrite, as a typed object rather than as a string to be parsed."""
+    """The rewrite, as a typed object rather than as a string to be parsed.
+
+    **One field, and it stayed one field when the prompt widened on 2026-08-16.**
+    A second required field is a second thing the model must fill, which
+    invalidates `config.decision_model`'s 9/9 parsed measurement outright; a
+    second optional field costs schema surface for nothing, because the only new
+    fact the trace wants -- whether this was a first turn or a follow-up -- is
+    computable from `len(history)` at the call site and needs no model to report
+    it.
+    """
 
     question: str = Field(
         description=(
@@ -159,10 +278,16 @@ class AnswerResult:
     documents: list[Document] = field(default_factory=list)
     # Pre-rerank candidates with Pinecone's cosine score. See `Retrieval`.
     scored: list[tuple[Document, float]] = field(default_factory=list)
-    # The standalone question that was actually embedded, or None when
-    # contextualisation did not run. None is NOT "unchanged" -- see
+    # The standalone question that was actually embedded, or None when the
+    # rewrite produced nothing. None is NOT "unchanged" -- see
     # `contextualize_question`.
     rewritten_question: str | None = None
+    # Whether the rewriter was CALLED, which stopped being derivable from
+    # `rewritten_question is None` when first turns started being rewritten.
+    # None used to mean "not asked"; it now means "asked and got nothing back",
+    # and the two need opposite responses from anyone reading a trace -- the
+    # first is a configuration, the second is a degraded turn.
+    rewrite_attempted: bool = False
     model: str = ""
     reranked: bool = False
     latency_ms: int = 0
@@ -319,16 +444,27 @@ def get_contextualizer() -> Runnable:
 async def contextualize_question(
     question: str, history: Sequence[ChatTurn]
 ) -> str | None:
-    """Rewrite a follow-up into a question that stands on its own.
+    """Rewrite a question into the best search query it can stand on its own as.
 
-    Returns the standalone question, or None when contextualisation did not run
-    -- no history, or the call failed.
+    Returns the rewritten question, or None **only when the rewrite did not
+    produce one** -- `settings.rewrite_every_turn` is off and there is no
+    history, or the call failed. `AnswerResult.rewrite_attempted` is what
+    separates those two, and a caller that needs to know whether a rewrite was
+    *tried* must read that rather than infer it from the None.
 
     **None is not "unchanged".** A rewrite that comes back byte-identical still
     returns the string, because "the model read this and left it alone" and "the
     model was never asked" are different facts and the caller records which one
-    happened. Collapsing them would make every first turn indistinguishable from
-    a question the rewriter declined to touch.
+    happened. Collapsing them would make a question the rewriter declined to
+    touch indistinguishable from one it never saw.
+
+    **It runs on first turns as of 2026-08-16.** The old early-out assumed a
+    first turn had no references to resolve, which is true and was too narrow: a
+    typo and a piece of shorthand are not references, and they are the two
+    things most likely to put a question's vector somewhere the corpus is not.
+    An acronym is a third such thing and is deliberately NOT repaired -- see the
+    comment above `CONTEXTUALIZE_SYSTEM_PROMPT` for the measurement that removed
+    expansion after it fabricated.
 
     **Convergence worth naming.** PRD 3.5's Stage 2 loop rewrites when the top
     retrieval score falls below threshold; this rewrites when a question
@@ -345,10 +481,13 @@ async def contextualize_question(
     carries it, and where it lands durably (a new column, or a REWRITE payload
     in `trace_events`) is a schema decision this module does not make.
     """
-    if not history:
-        # A first turn has no references to resolve: nothing to gain, and a
-        # model call on the latency path to lose. It passes through
-        # byte-identically, which is also what makes the None meaningful.
+    if not history and not settings.rewrite_every_turn:
+        # The pre-2026-08-16 behaviour, preserved behind the flag: a first turn
+        # was assumed to have no references to resolve, so it passed through
+        # byte-identically. Typos and shorthand are not references, which is
+        # what made that assumption too narrow -- and the flag is what keeps
+        # `new features/loop.md` S4's "with the feature off the output is
+        # byte-identical" expressible for a feature with no per-agent column.
         return None
 
     # Awareness note, matching PRD section 11's stance on indirect prompt
@@ -452,6 +591,7 @@ async def answer_question(
     *,
     rerank: bool | None = None,
     history: Sequence[ChatTurn] | None = None,
+    rewrite: bool | None = None,
     emit: events.Emit | None = None,
     **model_overrides,
 ) -> AnswerResult:
@@ -461,6 +601,13 @@ async def answer_question(
     input: omit it and this behaves exactly as it did before, which is what
     keeps a one-shot `/api/ask` and a threaded chat on one code path rather than
     two that will diverge.
+
+    `rewrite` overrides `settings.rewrite_every_turn` for THIS call and `None`
+    means "use the setting". It exists for one caller -- `app/eval/jobs.py`,
+    which needs its golden questions embedded verbatim -- and it deliberately
+    does not override history-driven contextualisation, because a caller that
+    supplies history has already opted into resolving what its pronouns refer
+    to.
 
     The result now carries the scored retrieval, so a caller that needs
     `query_chunks.similarity_score` no longer searches a second time for numbers
@@ -481,18 +628,31 @@ async def answer_question(
     """
     started = time.perf_counter()
 
-    # 1. Contextualise, if there is anything to contextualise against.
+    # 1. Rewrite the question into the best search query for it.
     #
-    # The `started` frame is gated on `history` rather than on the result,
-    # because that is exactly the condition `contextualize_question` returns None
-    # on -- and it has to be known BEFORE the call, since a `finished` with no
-    # `started` is the one shape the contract reserves for `rerank`.
+    # Known BEFORE the call, because a `finished` with no `started` is the one
+    # shape the phase contract reserves for `rerank`. It is also the gate on the
+    # call itself rather than only on the frames: `contextualize_question` reads
+    # `settings.rewrite_every_turn` for its own early-out and knows nothing about
+    # this call's `rewrite` override, so leaving the call unguarded would spend a
+    # model call on exactly the eval turn the override exists to keep verbatim.
     t0 = time.perf_counter()
-    if emit is not None and history:
+    rewrite_attempted = bool(history) or (
+        settings.rewrite_every_turn if rewrite is None else rewrite
+    )
+    if emit is not None and rewrite_attempted:
         await events.phase(emit, events.PHASE_REWRITE, events.STARTED)
-    rewritten = await contextualize_question(question, history or ())
+    # **Gated on `rewrite_attempted`, never on `history`.** Leaving it on history
+    # is not a cosmetic difference now that first turns rewrite: it is 1-1.6 s of
+    # dead air after `start` and before `retrieve started`, with `HEARTBEAT_S`
+    # at 10.0 s so nothing at all reaches the browser in the meantime.
+    rewritten = (
+        await contextualize_question(question, history or ())
+        if rewrite_attempted
+        else None
+    )
     contextualize_ms = int((time.perf_counter() - t0) * 1000)
-    if emit is not None and history:
+    if emit is not None and rewrite_attempted:
         await events.phase(
             emit,
             events.PHASE_REWRITE,
@@ -503,6 +663,11 @@ async def answer_question(
             # be able to tell "the model read this and left it alone" from "the
             # rewrite failed and the raw question was used".
             rewritten_question=rewritten,
+            # And `changed` is the third fact, which the client cannot compute
+            # from a phase frame alone -- it never sees the raw question on this
+            # channel. Without it the banner would have to fire on every turn,
+            # quoting a sentence the user just typed.
+            rewritten_changed=(rewritten is not None and rewritten != question),
         )
     search_query = rewritten or question
 
@@ -686,6 +851,7 @@ async def answer_question(
         # silently become "the best score of any search this turn".
         scored=retrieval.scored,
         rewritten_question=rewritten,
+        rewrite_attempted=rewrite_attempted,
         model=(agent.generation_model or settings.generation_model),
         reranked=retrieval.reranked,
         latency_ms=int((time.perf_counter() - started) * 1000),

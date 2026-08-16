@@ -103,7 +103,7 @@ export default function Message({ message }: { message: ChatMessage }) {
       </div>
 
       <div className="rounded-2xl rounded-bl-sm border border-slate-800 bg-slate-900/50 p-4">
-        {message.rewritten_question && (
+        {message.rewritten_changed && message.rewritten_question && (
           /*
             The single most useful thing a multi-turn RAG can tell a user about
             itself, and it is invisible everywhere else. "What about the second
@@ -112,6 +112,14 @@ export default function Message({ message }: { message: ChatMessage }) {
             confidently about the wrong thing with no visible cause. Shown
             above the answer rather than inside the trace panel because a cause
             you have to open a panel to see is a cause nobody sees.
+
+            **Gated on `rewritten_changed`, not on the string being present.**
+            The rewriter runs on every turn as of 2026-08-16, so the string is
+            almost always there -- and a banner on every message in every thread,
+            usually quoting a sentence one word away from the question directly
+            above it, is not a weaker version of this affordance. It is the thing
+            that makes a reader stop looking at it, so the one turn where the
+            rewrite really did grab the wrong antecedent reads as more noise.
           */
           <p
             data-testid="rewritten-question"

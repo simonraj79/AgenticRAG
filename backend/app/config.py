@@ -11,9 +11,16 @@ from functools import lru_cache
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+
+# The only two roads `app/rag/retriever.get_embeddings` implements. Module level
+# rather than a class attribute because pydantic v2 raises
+# `PydanticUserError: A non-annotated attribute was detected` on a bare constant
+# in a model body, and annotating it would make it a settable field.
+EMBEDDING_ROUTES = ("openrouter", "google")
 
 
 class Settings(BaseSettings):
@@ -75,11 +82,22 @@ class Settings(BaseSettings):
     ingest_in_background: bool = True
 
     # --- Models / vector store (used from the RAG layer) ---
-    # `gemini_api_key` is now the EMBEDDING key, not the generation key. Chat
-    # moved to OpenRouter; embeddings deliberately did not, because the Pinecone
-    # index was written in `gemini-embedding-2`'s space and querying it through
-    # any other embedder returns confident nonsense rather than an error. Full
-    # reasoning in app/rag/llm.py. Both keys are required.
+    # The EMBEDDING key, and only while `embedding_route == "google"`. That route
+    # is now the ROLLBACK rather than the default -- see `embedding_route` below --
+    # so this key is optional in the shipped configuration.
+    #
+    # **It is kept documented, kept in `.env.example` and kept in
+    # `create_render_services.BACKEND_SECRET_KEYS` anyway.** Deleting a variable
+    # from the template while it is still set on the deployed service is exactly
+    # the drift CLAUDE.md records under "Render's env vars DRIFT from `.env`", and
+    # the rollback needs it present the day it is needed rather than the day
+    # someone notices it is gone.
+    #
+    # The clause that has NOT changed and is the reason `embedding_model` keeps
+    # its value: the Pinecone index was written in `gemini-embedding-2`'s space,
+    # and querying it through any other EMBEDDER returns confident nonsense rather
+    # than an error. Another gateway to the SAME model is not another embedder --
+    # measured, see `embedding_route`.
     gemini_api_key: str = ""
     pinecone_api_key: str = ""
     pinecone_index_name: str = "agentic-rag-ntu"
@@ -233,6 +251,47 @@ class Settings(BaseSettings):
     # re-running that table.
     decision_model: str = "google/gemma-4-31b-it"
 
+    # --- The question rewriter ---
+    #
+    # It runs on EVERY turn as of 2026-08-16, first turns included, so it is a
+    # plain code path rather than a trigger (`new features/loop.md` section 6,
+    # item 1: "if it must run every time, call it yourself"). It used to return
+    # immediately when there was no history, on the reasoning that a first turn
+    # has no references to resolve -- true, and too narrow, because a typo and a
+    # piece of shorthand are not references, and either one is enough to put a
+    # first turn's vector somewhere the corpus is not.
+    #
+    # **What the widened step does NOT do is expand acronyms.** That bullet was
+    # built here, fabricated ("Ka-band (Kurtz-band)" in 2 of 5 trials; "LS&T" ->
+    # "Link System and Telemetry", which moved retrieval to the wrong file), was
+    # narrowed to a conditional version that measured 5/5 both directions, and
+    # was then removed anyway -- the value was the first-turn case, where nothing
+    # has spelled anything out, so a recoverability gate fires almost never.
+    # `CONTEXTUALIZE_SYSTEM_PROMPT` in `app/rag/pipeline.py` now forbids it
+    # outright, and carries the full measurement.
+    #
+    # **This flag exists for the reason loop.md S4 asks for one.** "With the
+    # feature off the output is byte-identical to before" has to be expressible,
+    # and a rewriter regression is otherwise invisible: `contextualize_question`
+    # swallows every exception by design and degrades to Stage 1, so a rewriter
+    # that stopped working shows up only as quietly worse retrieval.
+    #
+    # False restores the pre-2026-08-16 behaviour exactly: first turns embedded
+    # verbatim, only follow-ups contextualised.
+    rewrite_every_turn: bool = True
+
+    # **Eval turns opt OUT, and that is a measurement decision rather than a
+    # default.** `app/eval/jobs.py` creates one fresh Conversation per golden
+    # question precisely so the question reaches the embedder verbatim -- that is
+    # what a golden set means. A rewriter that runs on every turn silently removes
+    # that guarantee: every EVAL.md baseline stops being comparable, and the
+    # golden-question editor keeps displaying a question that is not the one that
+    # was asked.
+    #
+    # Turn this on only together with a full re-run of the baselines AND an editor
+    # that shows the rewritten string.
+    eval_rewrite_questions: bool = False
+
     # The model that DRAFTS the golden set (§3.6.1). Split out of
     # `decision_model`, which it used to share by accident rather than by
     # argument: the rewriter is a mechanical pronoun dereference on every
@@ -260,21 +319,143 @@ class Settings(BaseSettings):
     #
     # Flash was also 5.8 s against 11.8 s, which is not why.
     #
-    # **The honest cost: Flash is also `ragas_judge_model`, so it now grades
-    # against reference answers it wrote.** That touches only context precision
-    # and context recall -- faithfulness and answer relevance never read
-    # `reference`, and faithfulness is the metric that was actually broken. It is
-    # tolerable for two further reasons: PRD 3.6.1 designs these as DRAFTS a
-    # human edits (`source` flips to `edited`), and on the current single-chunk
-    # corpus both context metrics are pinned at 1.0 and therefore "not yet
-    # measured" regardless of who authored the reference. Set this back to
-    # `google/gemma-4-31b-it` to buy independence at the cost of both points
-    # above.
-    golden_set_model: str = "google/gemini-3.7-flash"
+    # **MOVED OFF FLASH 2026-08-16, to buy the independence the paragraph below
+    # used to record as an accepted cost.** Flash is `ragas_judge_model`, so while
+    # it also drafted the set the judge was grading against reference answers it
+    # had written itself. That touches context precision and context recall --
+    # faithfulness and answer relevance never read `reference` -- and it was
+    # tolerable only while both context metrics sat pinned at 1.0 on a
+    # single-chunk corpus, i.e. only while they were not measuring anything.
+    # `minimax/minimax-m3` is a third vendor, so `self_judged` is now false
+    # structurally rather than nominally.
+    #
+    # **The measured cost, recorded because the next reader will otherwise undo
+    # the mitigation.** Pooled over 8 runs, same corpus, same prompt:
+    #
+    #                              MiniMax M3      Flash
+    #   reference answer, median      24 chars     95 chars
+    #   references under 20 chars          43%           0%
+    #   shortest seen             '14 knots', '31 hours'
+    #   p50                            ~9.8 s       ~4.9 s
+    #   refusal probes            hit every planted gap (as good as Flash)
+    #
+    # That short-reference number is the SAME defect point 2 above rejected Gemma
+    # for ("Nineteen", 8 characters). It is mitigated in `app/eval/generate.py` by
+    # a `reference_answer` field description that demands a full sentence naming
+    # the subject -- **that mitigation is load-bearing, not cosmetic, and the
+    # pooled median must be re-measured rather than assumed if either the model or
+    # that description changes.** `scripts/goldenset_check.py` is the harness.
+    #
+    # Reasoning is default-ON here with `mandatory=false`, measured at 93-99.98%
+    # of completion tokens, which is why `generate.py` passes `reasoning=False`.
+    # Without it the call hits `finish_reason=length` against MAX_OUTPUT_TOKENS.
+    #
+    # Set back to `google/gemini-3.7-flash` to trade independence for a longer
+    # reference answer and half the latency.
+    golden_set_model: str = "minimax/minimax-m3"
 
     structured_output_method: str = "function_calling"
+
+    # **The vector space and the road to it are two different facts, and only one
+    # of them changed on 2026-08-16.**
+    #
+    # `embedding_model` names the SPACE. It is stamped onto `agents.embedding_model`
+    # and `ingestion_runs.embedding_model` and is the only durable statement of
+    # what a stored vector MEANS, so it must not move while the space does not.
+    # Changing it to the OpenRouter slug was the obvious edit and it is the wrong
+    # one: it would leave old rows saying one string and new rows another for
+    # BYTE-IDENTICAL vectors, disarm the mismatch detector `app/rag/ingest.py`
+    # exists to provide, make `app/eval/metrics_guide.py`'s "check the agent's
+    # embedding_model matches the index" advice manufacture a false alarm, and
+    # show two spellings side by side in the settings sheet.
+    #
+    # Verified 2026-08-16, and both call shapes were checked on purpose:
+    # langchain-google-genai 4.3.4 injects a `task_type` the constructor never
+    # sets -- `RETRIEVAL_DOCUMENT` on `embed_documents`, `RETRIEVAL_QUERY` on
+    # `embed_query` -- while the OpenRouter route sends neither. The index is
+    # WRITTEN with one and QUERIED with the other, so proving only one shape
+    # would have left the other unverified.
+    #
+    #   embed_documents (Google) vs embed_query (Google)   cosine 1.000000000
+    #   embed_documents (Google) vs OpenRouter             cosine 1.000000000
+    #   embed_query     (Google) vs OpenRouter             cosine 1.000000000
+    #   cross-string control                               cosine 0.616
+    #
+    # One space, one string. `task_type` is inert for this model, which is what
+    # CLAUDE.md always said of the constructor and is now also known of the wire.
     embedding_model: str = "models/gemini-embedding-2"
     embedding_dimension: int = 768
+
+    # `embedding_route` names the ROAD. "openrouter" | "google".
+    #
+    # An explicit setting rather than something inferred from which key happens to
+    # be set, because a wrong route is the one failure this subsystem cannot
+    # report: it returns confident nonsense rather than an error, and nothing else
+    # in the system records which provider wrote a vector.
+    #
+    # "google" is the rollback and it still works -- `langchain-google-genai` stays
+    # installed for exactly that reason and for no other.
+    embedding_route: str = "openrouter"
+
+    @field_validator("embedding_route")
+    @classmethod
+    def _validate_embedding_route(cls, value: str) -> str:
+        """Reject a route this code does not implement, at load.
+
+        **The paragraph above claims this setting is explicit "because a wrong
+        route is the one failure this subsystem cannot report". Free text did not
+        deliver that claim.** `retriever.get_embeddings` branches on
+        `== "openrouter"` and falls through to Google on ELSE, so every
+        misspelling -- `EMBEDDING_ROUTE=openroute`, `Openrouter`, an empty string
+        from a cleared Render variable -- selects the rollback silently. The
+        setting that exists to make the road explicit was picking a different
+        road on a typo.
+
+        And the failure that typo produces is not even a route error. With
+        `gemini_api_key` optional as of 2026-08-16 it surfaces as a Google auth
+        failure at RETRIEVAL time, one layer down from the cause; and where that
+        key does happen to be set, it does not surface at all -- the wrong
+        gateway answers, and CLAUDE.md's "confident nonsense rather than an
+        error" is the outcome. Both valid values are named in the message
+        because the reader of this exception is someone who has just mistyped
+        one of them.
+
+        This fires at construction, which is where an environment variable is
+        read. It is deliberately not `validate_assignment`: `scripts/embed_check.py`
+        assigns this attribute to probe both branches in one process, and turning
+        every assignment into a validated write would be a wider behaviour change
+        than the defect being fixed here.
+        """
+        if value not in EMBEDDING_ROUTES:
+            raise ValueError(
+                "embedding_route must be exactly "
+                f"{' or '.join(repr(route) for route in EMBEDDING_ROUTES)}, "
+                f"got {value!r}. Anything else silently selects the Google "
+                "rollback in rag/retriever.get_embeddings."
+            )
+        return value
+
+    # The same model, spelled the way each gateway resolves it. `models/` is the
+    # Gemini-API-native prefix; OpenRouter wants `author/model` like every chat
+    # slug. Two spellings of one space, which is why this is a separate setting
+    # rather than an edit to `embedding_model`.
+    openrouter_embedding_model: str = "google/gemini-embedding-2"
+
+    # Texts per embeddings HTTP request. **A hard provider ceiling, not a tuning
+    # knob**: OpenRouter's Google backend answers 101 inputs with
+    # `400 ... at most 100 requests can be in one batch`.
+    #
+    # This is the change whose absence passes every small test. `langchain-google-genai`
+    # re-batched at 100 internally (`_DEFAULT_BATCH_SIZE`); `OpenAIEmbeddings`
+    # defaults to 1000 and does not, and `app/rag/ingest.py` hands a whole
+    # document's chunks to `store.add_texts`, which forwards up to 1000 of them in
+    # one call. Any document over 100 chunks ingests fine today and 400s without
+    # this. A probe with 25 strings succeeds in one request and proves nothing.
+    #
+    # NOT `agents.chunk_size` (characters per text) and NOT langchain-pinecone's
+    # `embedding_chunk_size`. Three different things named chunk_size sit on one
+    # call stack; this is the innermost.
+    embedding_batch_size: int = 100
 
     # PRD section 2 says "Cohere rerank-v3". That is a family, not a model id --
     # the API rejects it. The live ids are rerank-english-v3.0,

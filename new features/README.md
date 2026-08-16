@@ -9,6 +9,24 @@ Planning documents for one change set: **agentic tools + Handouts**.
 > unprompted. loop.md has been amended rather than duplicated, per the rule at the
 > bottom of this file — but 09 carries the measurements and the machinery that had to
 > become conditional as a result.
+>
+> **[10-routing-and-embeddings.md](10-routing-and-embeddings.md) is where the model
+> layer finished moving.** Every model call in the project now goes through
+> OpenRouter, embeddings included, with no re-ingest — and its central finding is
+> about a prompt rather than a provider: a bullet telling the rewriter to "expand
+> acronyms" contradicted the do-not-invent bullet four lines below it, and the model
+> resolved the conflict by inventing. That is [loop.md](loop.md) T1's mechanism
+> appearing in a module with no tool in it, which is why 10 is worth reading even if
+> the routing half is irrelevant to you.
+>
+> **That bullet no longer exists.** It was rewritten as a conditional — expand only
+> when the question or the conversation spells the term out — which measured 5/5 in
+> both directions and was **removed anyway**: the feature's value was the first-turn
+> case, where nothing has spelled anything out, so the gate that made it safe also
+> made it fire almost never. The rewriter still repairs typos and shorthand and still
+> resolves coreference; acronyms now pass through untouched under a flat prohibition.
+> **A feature can pass its own harness and still be the wrong thing to ship** — §5.2
+> is that record, and §6.1 keeps the version worth building instead.
 
 **[loop.md](loop.md) and [loop-prompt.md](loop-prompt.md) are the living documents here.**
 Everything else records a change that has shipped. `loop.md` is the design pattern extracted
@@ -43,6 +61,7 @@ the shape of the screen.
 | [07-workspace-shell.md](07-workspace-shell.md) | The workspace shell, the editable settings sheet, and the de-NotebookLM pass — plus `scripts/ui_check.py`, which finally executes 05's acceptance criteria |
 | [08-streaming-and-followups.md](08-streaming-and-followups.md) | SSE streaming, and the two defects that came from how the work was divided rather than how it was written — including why an unadvertised parameter sometimes 404s and sometimes does not |
 | **[09-deepseek-agentic.md](09-deepseek-agentic.md)** | The move to `deepseek/deepseek-v4-flash-0731` — **the change that inverted [loop.md](loop.md) T1**, why turning reasoning off is only safe because a Gemma-era paragraph survives, and the two new layer-1 harnesses |
+| **[10-routing-and-embeddings.md](10-routing-and-embeddings.md)** | Embeddings move to OpenRouter with **no re-ingest** (same model, same space, cosine 1.000000) and the four kwargs that are each a different 400; the golden set moves to a third vendor for judge independence; the DeepSeek provider pin recorded as a **NO_GO with evidence**; and the rewriter losing its trigger — including the acronym bullet that **fabricated**, was fixed into a conditional that measured 5/5, and was **removed anyway**, with the grounded version deferred rather than guessed at |
 
 ---
 

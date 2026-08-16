@@ -181,16 +181,26 @@ def get_judge_embeddings() -> LangchainEmbeddingsWrapper:
     **Ragas needs a judge LLM *and* an embedding model, and defaults to OpenAI
     for both.** Leave either unset and the failure is
     `OPENAI_API_KEY not set` from deep inside a metric -- which reads like a
-    missing dependency rather than a missing argument. Nothing in this project
-    calls OpenAI; `langchain-openai` is only present because
-    `langchain-pinecone` depends on it.
+    missing dependency rather than a missing argument.
 
-    Built on `app.rag.retriever.get_embeddings`, not on a second
-    `GoogleGenerativeAIEmbeddings`. That function is the one place the model,
-    the API key and `output_dimensionality` are configured together, and answer
-    relevance compares generated questions against the original in embedding
-    space -- so it should be measuring distances in the same space the corpus
-    was indexed in, not in a lookalike built from the same env vars.
+    **Still nothing in this project calls OpenAI, and `langchain-openai` is no
+    longer incidental.** The older wording here -- that it "is only present
+    because `langchain-pinecone` depends on it" -- was wrong once when chat moved
+    to OpenRouter and is wrong twice as of 2026-08-16, because the embeddings
+    moved there too. It now serves EVERY model call in the project, chat and
+    embedding alike: `ChatOpenAI` and `OpenAIEmbeddings` are OpenAI-PROTOCOL
+    clients pointed at `openrouter.ai`, and no `OPENAI_API_KEY` exists or is
+    needed.
+
+    Built on `app.rag.retriever.get_embeddings`, not on a second embedder. That
+    function is the one place the ROUTE, the model, the API key and the output
+    dimension are configured together -- and the route is exactly why building a
+    second one here would now be worse than it used to be: the two routes spell
+    the same 768d request differently (`dimensions` against
+    `output_dimensionality`), so a lookalike assembled from the same env vars
+    could silently be a different width or a different provider. Answer relevance
+    compares generated questions against the original in embedding space, so it
+    must measure distances in the space the corpus was actually indexed in.
     """
     return LangchainEmbeddingsWrapper(get_embeddings())
 

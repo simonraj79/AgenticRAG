@@ -363,15 +363,31 @@ export type ChatMessage = {
   latency_ms: number | null;
   model_used: string | null;
   /**
-   * The history-contextualised query that was actually embedded, or null when
-   * the question went to Pinecone unchanged.
+   * The query that was actually embedded, or null when no rewrite was produced.
    *
    * "You asked X, I searched for Y" is the one thing a multi-turn RAG can tell
    * a user about itself that a single-turn one cannot, and it is exactly what
    * goes wrong invisibly: a rewrite that drags in the wrong antecedent from two
    * turns ago produces a confidently irrelevant answer with no visible cause.
+   *
+   * **Since 2026-08-16 this is populated on nearly every turn**, because the
+   * rewriter runs on first turns too (typos and shorthand, not just pronouns;
+   * acronyms are deliberately left alone). It is therefore no longer the thing
+   * to render on -- see `rewritten_changed`.
    */
   rewritten_question: string | null;
+  /**
+   * Whether that rewrite actually differs from what the user typed. Null on a
+   * turn where the rewriter was not asked, and on every turn replayed from
+   * before the key existed.
+   *
+   * **This is the render gate, and `rewritten_question` being truthy is not.**
+   * Once every turn carries a rewrite, a banner keyed on the string fires on
+   * every message in every thread, quoting a sentence usually a word away from
+   * the one directly above it -- which spends the most valuable explanatory
+   * affordance in the product on saying nothing.
+   */
+  rewritten_changed: boolean | null;
   created_at: string;
   citations: Citation[];
   /**
@@ -426,6 +442,9 @@ export type AskResult = {
   latency_ms: number;
   model_used: string | null;
   rewritten_question: string | null;
+  /** See `rewritten_changed` on the message type above. Null means the rewriter
+   *  was not asked, which is not the same as it having changed nothing. */
+  rewritten_changed: boolean | null;
   citations: Citation[];
   /**
    * Files this turn just produced. Both fields default to empty server-side, so
@@ -504,8 +523,12 @@ export type AskStreamStart = {
  * **`rerank` arrives as `finished` only.** It happens inside the retriever,
  * which stays the single construction seam and takes no emitter -- so a reader
  * must never wait for a `started` before rendering a `finished`. `generate`
- * repeats once per agent-loop step and carries `step`; `rewrite` is emitted only
- * when contextualisation actually ran.
+ * repeats once per agent-loop step and carries `step`; `rewrite` is emitted
+ * whenever the rewriter is asked, which since 2026-08-16 is **every turn** and
+ * not only the follow-ups. That change had to reach this frame rather than only
+ * the trace: the first-turn rewrite is 1-1.6 s of silence after `start`, and
+ * the heartbeat is 10 s away, so a gate left on "has history" would show a new
+ * thread nothing at all until retrieval began.
  *
  * Facts only. The client composes the sentence, because "a progress note that
  * under-promises is worse than none" is a copy rule and belongs where the copy
@@ -522,6 +545,11 @@ export type AskStreamPhase = {
   step?: number;
   /** `rewrite` + `finished`. Null and unchanged are different facts. */
   rewritten_question?: string | null;
+  /** `rewrite` + `finished`. Whether the rewrite differs from what was typed.
+   *  Sent because the client cannot work it out here -- the raw question never
+   *  travels on this channel, so a phase consumer comparing strings has nothing
+   *  to compare against. */
+  rewritten_changed?: boolean | null;
   /** `retrieve`: how many came back. `rerank`: how many were kept. */
   chunk_count?: number;
   /** `retrieve` + `finished`. **Advisory only.** `score_threshold` governs

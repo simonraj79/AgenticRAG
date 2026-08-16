@@ -124,17 +124,40 @@ async def config() -> dict:
         "generation_model": settings.generation_model,
         "decision_model": settings.decision_model,
         "judge_model": settings.ragas_judge_model,
+        "golden_set_model": settings.golden_set_model,
+        # The SPACE. Unchanged by the 2026-08-16 route move, on purpose -- it is
+        # what `agents.embedding_model` is compared against.
         "embedding_model": settings.embedding_model,
         "embedding_dimension": settings.embedding_dimension,
+        # The ROAD, and the reason this key exists at all: a wrong route is the
+        # one fault in this system that returns confident nonsense instead of an
+        # error, so "which gateway embedded this?" must be answerable from
+        # outside the process.
+        "embedding_route": settings.embedding_route,
+        # The RERANKER. The one model in the turn that is neither an OpenRouter
+        # chat slug nor part of the Pinecone index, so nothing else on this
+        # payload implies it -- a reader of a live deployment could not name it
+        # at all until this key existed. It is worth naming: reranking is ~830 ms
+        # of every turn, and `config.py` records that PRD section 2's
+        # "rerank-v3" is a FAMILY the Cohere API rejects, so the live id
+        # (rerank-v3.5) is a choice this deployment made rather than a spec it
+        # inherited. Cohere ids also differ by generation and price.
+        "rerank_model": settings.rerank_model,
+        "rewrite_every_turn": settings.rewrite_every_turn,
+        "eval_rewrite_questions": settings.eval_rewrite_questions,
         "pinecone_index": settings.pinecone_index_name,
         "frontend_url": settings.frontend_url,
         "oauth_redirect_uri": settings.oauth_redirect_uri,
         "secrets_present": {
-            # Two model providers, not one, and the split is not arbitrary:
-            # `openrouter` serves every chat model, `gemini` is now the
-            # EMBEDDING key. A deployment missing the second one fails at
-            # retrieval, not at generation -- which looks nothing like a missing
-            # model key, so both are reported separately.
+            # Two model providers, not one, and the split is not arbitrary.
+            # `openrouter` serves every chat model AND, since 2026-08-16, the
+            # embeddings -- so it is now the key whose absence breaks everything.
+            #
+            # `gemini` is the embedding key for the `google` ROLLBACK route only.
+            # Read it together with `embedding_route` above: absent while the
+            # route is "openrouter" is fine, absent while the route is "google"
+            # fails at RETRIEVAL rather than at generation, which looks nothing
+            # like a missing model key.
             "openrouter": bool(settings.openrouter_api_key),
             "gemini": bool(settings.gemini_api_key),
             "pinecone": bool(settings.pinecone_api_key),

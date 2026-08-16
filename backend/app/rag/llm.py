@@ -8,21 +8,36 @@ change, exactly as the retriever seam makes the Stage 1 -> Stage 2 change a
 one-liner.
 
 ------------------------------------------------------------------
-WHY OPENROUTER, AND WHAT DELIBERATELY DID NOT MOVE.
+WHY OPENROUTER, AND WHAT MOVED WITH IT.
 
-Chat goes through OpenRouter. **Embeddings do not, and must not.**
-`app/rag/retriever.py` still calls Google directly for `gemini-embedding-2` at
-768d, because CLAUDE.md's rule stands: the embedding model is part of the index.
-Every vector in Pinecone was written in that space, and matching dimensions do
-not imply a shared space -- querying an index built with one embedder using
-another returns confident nonsense rather than an error. OpenRouter is a
-chat-completions gateway and does not serve that model at all, so "move
-everything to OpenRouter" would have meant a full re-ingest to gain nothing.
+**Chat and embeddings both go through OpenRouter, and this paragraph used to
+say the exact opposite.** It read "Embeddings do not, and must not", on the
+grounds that OpenRouter "is a chat-completions gateway and does not serve that
+model at all, so 'move everything to OpenRouter' would have meant a full
+re-ingest to gain nothing". Both halves were false, and the second one was the
+expensive kind of false -- a cost that was never paid, cited as the reason not
+to try. Measured 2026-08-16: OpenRouter serves `google/gemini-embedding-2`
+itself, on 3 endpoints, and three strings pushed through **both** roads came
+back at cosine **1.000000** on `embed_documents` AND on `embed_query`, every
+vector L2-normalised, against a cross-string control of 0.616566. One model,
+one space, two gateways. The move cost no re-ingest, no re-index, and no change
+to `settings.embedding_model` -- which is still `models/gemini-embedding-2`
+because that string is the PROVENANCE stamped onto `agents.embedding_model`,
+and the space it names did not change.
 
-The practical consequence: **`GEMINI_API_KEY` is still required.** It stops
-being the generation key and becomes the embedding key. `OPENROUTER_API_KEY`
-does not replace it, and Ragas -- which needs a judge LLM *and* an embedding
-model -- now draws its two halves from two different providers.
+The rule the old paragraph was protecting is untouched, and it is why the
+cosine was measured rather than assumed: **the embedding model is part of the
+index.** Matching dimensions do not imply a shared vector space, and querying
+an index built with one embedder using another returns confident nonsense
+rather than an error -- there is no exception to that, only a verified case of
+two roads reaching the same place. `app/rag/retriever.py` remains the single
+construction site and picks the road from `settings.embedding_route`:
+`openrouter` ships, `google` is the rollback.
+
+The practical consequence: **`GEMINI_API_KEY` is no longer required.** It is
+the rollback route's key -- needed only under `EMBEDDING_ROUTE=google` -- and
+is optional otherwise. Ragas needs a judge LLM *and* an embedding model, and
+now draws both halves from OpenRouter rather than one from each provider.
 ------------------------------------------------------------------
 
 THREE THINGS HERE WERE ESTABLISHED FROM THE LIVE CATALOGUE, NOT ASSUMED.
@@ -109,15 +124,50 @@ _LEGACY_SLUGS = {
 # 404 naming neither the model nor the parameter. That is how the golden-set
 # generator broke the first time it was pointed at Gemini 3.7 Flash.
 #
-# `deepseek/` -- FAILS SILENTLY, WHICH IS WORSE. Measured 2026-08-16 across the 28
-# endpoints serving `deepseek/deepseek-v4-flash-0731`: 18 of them advertise
-# `top_k`, so the request routes and returns 200. Nothing errors. What it costs is
-# invisible -- the ten endpoints WITHOUT `top_k` include DeepSeek's own
-# first-party one, which is the only endpoint on the model with
-# `supports_implicit_caching: true` and a cache-read price of $0.0028/M against
-# $0.028/M or worse everywhere else. Carrying a parameter the model has no card
-# for therefore routes around a 10x cheaper cache, at 100% uptime and 640ms p50,
-# and reports success while doing it.
+# `deepseek/` -- FAILS SILENTLY, WHICH IS WORSE, AND THE MECHANISM IS PROVED
+# RATHER THAN INFERRED: an endpoint that does not advertise `top_k` is EXCLUDED
+# by `require_parameters`, so sending it does not merely waste a field, it picks
+# a different provider. Re-measured against the live catalogue 2026-08-16, 28
+# endpoints serve `deepseek/deepseek-v4-flash-0731` and 9 of them do not
+# advertise `top_k` -- including the two CHEAPEST on the model, StreamLake at
+# $0.06426/M prompt and Baidu at $0.0644/M. Send `top_k` and both are ineligible;
+# the cheapest survivor is Decart at $0.0657/M. HTTP 200, a correct answer, no
+# warning, a bill that is quietly not the one the price table would predict.
+# **That is why this tuple is not a cost optimisation.** An optimisation is
+# optional; this is the difference between the provider the operator thinks is
+# serving the model and the one that is.
+#
+# An earlier version of this comment argued the case from DeepSeek's own
+# first-party endpoint -- the only one of the 28 with
+# `supports_implicit_caching: true`, cache reads at $0.0028/M against $0.028/M
+# elsewhere -- and that argument is WITHDRAWN as the load-bearing one. Two
+# measurements killed it. This account cannot route there at all (see the
+# provider-pin NO_GO in `build_chat_model`, where `provider.only: ["deepseek"]`
+# answers `"No endpoints available matching your guardrail restrictions and data
+# policy"`), so no parameter choice buys it back. And its uncached prompt price
+# is $0.14/M -- **2.2x Baidu's** -- so the cache only pays at a high implicit-hit
+# rate, which was measured at exactly zero: `prompt_tokens_details
+# {cached_tokens: 0, cache_write_tokens: 0}` on every probe call. The retrieved
+# chunks sit INSIDE the prompt and change every query, so a stable cacheable
+# prefix is a hypothesis, not a property. The conclusion survives; the reason for
+# it changed, and a reason nobody re-checks is how a 2.2x markup gets recorded as
+# a saving.
+#
+# `minimax/` -- SAME SILENT SHAPE, one family later, and it arrived with the
+# golden-set generator (`settings.golden_set_model = "minimax/minimax-m3"`, which
+# inherited `top_k` from the generation defaults exactly as the Gemini case did).
+# MiniMax's card reports `default_parameters.top_k = null`: there is **no
+# configuration to honour**, which is this tuple's stated criterion above rather
+# than a convenience. Measured 2026-08-16 across the 12 endpoints serving
+# `minimax/minimax-m3`: 5 do not advertise `top_k`, one of the 5 being MiniMax's
+# own first-party endpoint (tag `minimax/fp8`). On the path the golden set
+# actually takes -- `STRUCTURED_OUTPUT_METHOD = "json_schema"`, which additionally
+# requires `structured_outputs` -- eligibility is CoreWeave, Together, Parasail,
+# ModelRun and Morph, and carrying `top_k` drops Morph: **5 endpoints become 4**.
+# That matters because Parasail, one of the 4, measured 96.80% uptime. Latency
+# paid nothing either way (p50 4.68 s with `top_k`, 4.67 s without).
+# **Reversal condition:** if a future measurement shows MiniMax honouring `top_k`
+# in a way that improves golden-set quality, this is the line to revert.
 #
 # The generalisable half: an unadvertised parameter does not only 404. Under
 # `require_parameters` it also NARROWS routing, and a narrowed route is a silent
@@ -126,7 +176,14 @@ _LEGACY_SLUGS = {
 # whether any remain. The authority is that call, never this tuple: the per-model
 # `supported_parameters` is a UNION across providers and will claim support the
 # endpoint you land on does not have.
-_NO_TOP_K_PREFIXES = ("google/gemini-", "deepseek/")
+#
+# **And the failure mode INVERTS the moment any provider pin lands.** Unpinned,
+# `top_k` costs a silent reroute. Pinned to a single endpoint that does not
+# advertise it, there is nowhere to reroute TO and every turn is a hard 404 --
+# proven on BaseTen, which serves this model at 100% uptime and advertises no
+# `top_k`. So this tuple stops being about money and becomes a correctness
+# requirement if `provider.order` is ever written. Read it again then.
+_NO_TOP_K_PREFIXES = ("google/gemini-", "deepseek/", "minimax/")
 
 # Model families that refuse to have reasoning turned OFF.
 #
@@ -223,6 +280,73 @@ def build_chat_model(
     slug = openrouter_slug(model)
     extra_body: dict[str, Any] = {}
 
+    # **A PROVIDER PIN WAS PROBED HERE ON 2026-08-16 AND DELIBERATELY NOT BUILT.
+    # Do not re-attempt it from the code; re-probe first.** The intended line was
+    # `order: ["DeepSeek"]` with `allow_fallbacks: true`, to reach the model's
+    # only implicit-caching endpoint. Live result: **http=200 on 3/3 calls, served
+    # by BAIDU every time.** Not an error, not a warning, not a dropped field --
+    # the preference was accepted and ignored, and nothing in the response says so
+    # except the top-level `provider` name, which nothing in this project reads.
+    # A misspelled or unreachable provider name in `order` behaves identically.
+    #
+    # The cause is not in this request. `provider.only: ["deepseek"]` says it in
+    # as many words:
+    #
+    #     404 No endpoints available matching your guardrail restrictions and
+    #         data policy. Configure: https://openrouter.ai/settings/privacy
+    #
+    # The first-party endpoint is filtered out by THIS ACCOUNT's model-training /
+    # data-policy setting. Verified that per-request `data_collection: "allow"`
+    # does not override it (the account toggle is the ceiling), and that
+    # `allow_fallbacks: false`, the `deepseek/fp8` tag form and the lowercase slug
+    # all fail the same way. `order` itself works fine -- controls pinned Wafer
+    # and CoreWeave 5/5, case-insensitively. So the pin would have been a line
+    # that does nothing, costs nothing, and reports success: `loop.md` T2 exactly,
+    # and `llm_check.py` would have gone green because an offline harness can only
+    # assert what this repo put in the dict, never what OpenRouter did with it.
+    #
+    # The economics are inverted anyway, which is the part worth knowing before
+    # anyone "fixes" the toggle: DeepSeek first-party is $0.14/$0.28 per M against
+    # Baidu's $0.0644/$0.1288 -- **2.2x MORE on uncached tokens** -- and the
+    # $0.0028/M cache read only pays at a high implicit-hit rate. Measured
+    # `prompt_tokens_details {cached_tokens: 0, cache_write_tokens: 0}`. Retrieved
+    # chunks sit inside the prompt and change every query, so establish that a
+    # cacheable prefix exists at all before reopening this.
+    #
+    # And unblocking it is a HUMAN decision, not a code change: flipping that
+    # privacy toggle opts the whole account into providers that may train on
+    # prompts, while Groundwork puts user-uploaded course documents into every
+    # generation prompt and this repo is public. That is a PRD-level consent
+    # question, adjacent to open item 6, and it is account-wide.
+    #
+    # If it is ever unblocked, the pin MUST be MERGED into this dict, never
+    # assigned over it:
+    #
+    #     prov: dict[str, Any] = {}
+    #     if settings.openrouter_require_parameters:
+    #         prov["require_parameters"] = True
+    #     if slug.startswith(tuple(_PINNED_PROVIDERS)):     # prefix-keyed, like
+    #         prov["order"] = [...]                         # the two tuples above
+    #         prov["allow_fallbacks"] = True
+    #     if prov:
+    #         extra_body["provider"] = prov
+    #
+    # A second `extra_body["provider"] = {...}` statement silently DELETES
+    # `require_parameters` (or the pin, depending which ran last), which is the
+    # exact failure the flag exists to prevent -- OpenRouter goes back to dropping
+    # `tools` on a tool-less tier and `function_calling` returns prose. And
+    # `extra_body["provider"]["order"] = ...` raises KeyError the first time an
+    # operator sets `OPENROUTER_REQUIRE_PARAMETERS=false`, turning a documented
+    # escape hatch into a hard crash on every chat call. `llm_check.py` cases
+    # 13/14 assert this dict by EXACT EQUALITY to catch both; do not loosen them.
+    #
+    # Never `sort`. `provider.sort` looks like it reinforces a pin ("cheapest
+    # first, and the cache is cheapest") and is one of exactly three documented
+    # ways to opt OUT of OpenRouter's quality-based provider reordering for
+    # tool-calling requests -- and `agent_loop.py` binds tools on all three model
+    # invocations, so EVERY generation turn here is a tool-calling request. That
+    # is a quality regression with no error attached, arriving from a line added
+    # to save money. Cases 27-29 are the tripwire.
     if settings.openrouter_require_parameters:
         extra_body["provider"] = {"require_parameters": True}
 

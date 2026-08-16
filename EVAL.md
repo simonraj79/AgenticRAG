@@ -101,20 +101,26 @@ Two things about this table are load-bearing:
 All are environment variables. Defaults live in [`backend/app/config.py`](backend/app/config.py);
 the committed template is [`.env.example`](.env.example).
 
-### 4.1 Credentials — both providers are required
+### 4.1 Credentials
 
 | Variable | Used for | Required |
 |---|---|---|
-| `OPENROUTER_API_KEY` | **Every chat model** — generation, decision, golden-set drafting, judge | ✅ |
-| `GEMINI_API_KEY` | **Embeddings only** (`gemini-embedding-2`) | ✅ |
+| `OPENROUTER_API_KEY` | **Every model call** — generation, decision, golden-set drafting, judge, **and embeddings** | ✅ |
 | `PINECONE_API_KEY` | Vector store | ✅ |
 | `COHERE_API_KEY` | Reranking | ✅ |
+| `GEMINI_API_KEY` | The **rollback** embedding route only (`EMBEDDING_ROUTE=google`) | optional |
 
-> Chat moved to OpenRouter; embeddings deliberately did not. Every vector in Pinecone was
-> written in `gemini-embedding-2`'s space, matching dimensions do not imply a shared space,
-> and OpenRouter serves no embedding model. **Ragas therefore draws its judge LLM and its
-> embedding model from two different providers**, and a deployment missing `GEMINI_API_KEY`
-> fails at *retrieval*, which looks nothing like a missing model key.
+> **Embeddings moved to OpenRouter on 2026-08-16, and this changed the road, not the
+> space.** Same model (`gemini-embedding-2`), same 768 dimensions, same vectors already in
+> Pinecone — measured cosine 1.000000 between the two routes on both `embed_documents` and
+> `embed_query`, so no re-ingest was needed and none was done. `EMBEDDING_MODEL` still names
+> the space and did not change; `EMBEDDING_ROUTE` names the gateway.
+>
+> Two consequences for reading a run. Ragas now draws its judge LLM and its embedding model
+> from **one** provider, where it used to straddle two. And `OPENROUTER_API_KEY` is now the
+> key without which *retrieval* fails as well as generation — a failure that looks nothing
+> like a missing model key. See `scripts/embed_check.py` and
+> `new features/10-routing-and-embeddings.md`.
 
 ### 4.2 Models
 
@@ -122,11 +128,12 @@ the committed template is [`.env.example`](.env.example).
 |---|---|---|
 | `GENERATION_MODEL` | `deepseek/deepseek-v4-flash-0731` | Writes the answers being graded |
 | `GENERATION_REASONING` | `false` | Thinking on the generation path. On, it was 60–79% of billed output tokens |
-| `DECISION_MODEL` | `google/gemma-4-31b-it` | Per-turn question rewrite / contextualisation |
-| `GOLDEN_SET_MODEL` | `google/gemini-3.7-flash` | **Drafts** the golden set (§7) |
+| `DECISION_MODEL` | `google/gemma-4-31b-it` | The question rewriter. **Runs on every turn** now — but not on eval turns, see §4.6 |
+| `GOLDEN_SET_MODEL` | `minimax/minimax-m3` | **Drafts** the golden set (§7). A third vendor, so it no longer shares a model with the judge |
 | `RAGAS_JUDGE_MODEL` | `google/gemini-3.7-flash` | **Grades** the answers |
 | `RAGAS_JUDGE_REASONING_EFFORT` | `low` | `high` / `medium` / `low`. Thinking is **mandatory** on Flash — it cannot be switched off |
-| `EMBEDDING_MODEL` | `models/gemini-embedding-2` | Google direct. **Changing it invalidates the index** |
+| `EMBEDDING_MODEL` | `models/gemini-embedding-2` | The vector **space**. **Changing it invalidates the index** |
+| `EMBEDDING_ROUTE` | `openrouter` | The **gateway** to that space. `openrouter` or `google`. Changing it invalidates nothing — same model, same vectors |
 | `EMBEDDING_DIMENSION` | `768` | Fixed at index creation |
 | `RERANK_MODEL` | `rerank-v3.5` | Cohere |
 
@@ -190,6 +197,40 @@ change helped, which is the whole point of Stage 3.
 | Variable | Default | What it does |
 |---|---|---|
 | `RAGAS_MAX_CONCURRENCY` | `2` | Judge calls in flight **within one question**. Conservative on purpose: being greedy produces a scorecard full of nulls that looks like a broken judge |
+
+### 4.6 Eval turns do not use the question rewriter
+
+| Variable | Default | What it does |
+|---|---|---|
+| `REWRITE_EVERY_TURN` | `true` | The rewriter runs on **every** chat turn, first turns included — typos, shorthand and references. **Never acronyms**: expansion was built, measured fabricating, and removed (CLAUDE.md), so an acronym in a trace's REWRITE payload should read exactly as the user typed it |
+| `EVAL_REWRITE_QUESTIONS` | **`false`** | **Eval turns opt out.** A golden question reaches the embedder verbatim |
+
+**Why the opt-out exists, and why it is a measurement decision rather than a default.**
+Until 2026-08-16 the rewriter only fired when there was conversation history to resolve
+against. An eval run creates one fresh, archived conversation per golden question, so "no
+history" meant "no rewrite" and every golden question was embedded verbatim **by accident of
+an empty thread**. When the rewriter started running on first turns, that guarantee
+disappeared silently.
+
+Three things would have broken, none of them loudly:
+
+- **Every baseline in §10 would stop being comparable.** The questions would still be the
+  same rows in the database, and a different string would reach the embedder.
+- **The golden-question editor would keep showing a question that is not the one that was
+  asked.** There is no `queries.rewritten_question` column — the rewrite lives only in the
+  REWRITE trace payload — so nothing in the UI could reveal the difference.
+- **Nothing would error.** `contextualize_question` swallows every exception by design and
+  degrades to the raw question, so a rewriter that is running, or failing, is invisible
+  either way.
+
+`eval_rewrite_questions=True` turns it back on. **Do it only together with a full re-run of
+the §10 baselines and an editor that displays the rewritten string** — otherwise the run
+measures a set of questions nobody can read back.
+
+Note this does not make an eval turn identical to a chat turn any more. It is one deliberate
+difference, recorded here rather than inferred from a missing trace row: a chat turn's
+retrieval may benefit from a repaired typo, and the eval turn measuring "the same" question
+does not.
 
 ---
 
@@ -325,10 +366,46 @@ where Gemma asked about facts the corpus never raises. Flash's reference answers
 several attributable claims rather than one word — which matters because `context_recall`
 decomposes that field.
 
-> **Known cost:** `GOLDEN_SET_MODEL` currently equals `RAGAS_JUDGE_MODEL`, so the judge
-> grades context precision and recall against reference answers it wrote. Faithfulness and
-> answer relevance never read `reference`. Set `GOLDEN_SET_MODEL=google/gemma-4-31b-it` to
-> buy independence back.
+### 7.1 The drafter moved off the judge's model — 2026-08-16
+
+`GOLDEN_SET_MODEL` used to equal `RAGAS_JUDGE_MODEL`, so the judge graded context precision
+and recall against reference answers it had written itself. That was recorded here as an
+accepted cost; it is now paid off. **`minimax/minimax-m3` is a third vendor**, so generation
+(DeepSeek), judging (Google) and reference authorship (MiniMax) are three different models.
+
+**It cost one regression, and it is the silent kind — read this before editing any prompt in
+`app/eval/generate.py`.** Pooled over 8 runs on the same corpus and prompt:
+
+| | MiniMax M3 | Flash |
+|---|---|---|
+| reference answer, median | **24 chars** | 95 chars |
+| references under 20 chars | **43%** | 0% |
+| shortest seen | `"14 knots"`, `"31 hours"` | — |
+| refusal probes | hit every planted gap | as good |
+
+A reference answer of `"14 knots"` is not wrong. It validates, it persists, it renders in the
+editor — and `context_recall`, which decomposes `reference` into claims, gets **nothing to
+decompose**. Two of the four metrics read this field. This is the same defect that ruled
+Gemma out as the drafter (`"Nineteen"`, 8 characters), arriving through the model chosen for
+independence.
+
+**The mitigation is two prompt strings and both halves are load-bearing.** A stronger
+`reference_answer` field description *and* a matching bullet in `SUGGEST_SYSTEM_PROMPT`. The
+field description alone moved the median from 24 to 68 and still left 34% under 20 — an
+improvement that fails. With both, the median measured **119–157** with **0/168** references
+under 20 characters. `scripts/goldenset_check.py` measures the distribution, because a
+wording edit can undo this without anything raising.
+
+Two further properties of this model, so they are not mistaken for defects:
+
+- **A well-formed EMPTY set arrives roughly 1 call in 6** (`finish_reason=stop`, no error).
+  Pre-existing model behaviour; *Suggest* returning nothing is worth simply re-running.
+- **Reasoning is default-ON**, measured at 93–99.98% of completion tokens on this prompt, so
+  `generate.py` passes `reasoning=False`. Without it the call hits `finish_reason=length` and
+  returns a **truncated** set — which reads as a thin corpus rather than as a truncation.
+
+Set `GOLDEN_SET_MODEL=google/gemini-3.7-flash` to trade the independence back for longer
+references and half the latency.
 
 ---
 
@@ -345,7 +422,7 @@ decomposes that field.
 | `total_count` | Every active question, refusals and failures included |
 | `error_count` | Rows that produced no usable metric at all |
 | `refusal_pass` / `refusal_total` | The refusal tally, reported not averaged |
-| `self_judged` | True when the model that wrote the answers also graded them |
+| `self_judged` | True when the model that wrote the answers also graded them. **False on every current run** — and read §7.1, because it compares judge to *generator* only and says nothing about who wrote the references |
 | `note` | Populated only when there was nothing to summarise |
 
 ### Five ways a scorecard misleads
@@ -362,8 +439,11 @@ decomposes that field.
    still renders.
 4. **Perfect retrieval scores on a small corpus mean "not yet measured".** Context precision
    and recall both returning 1.000 on a single-chunk corpus is retrieval that *cannot* fail.
-5. **`self_judged: true` means the numbers are not independent.** Read the caveat before the
-   pointer.
+5. **`self_judged: true` means the numbers are not independent — and `false` is a narrower
+   promise than it sounds.** It compares the judge to the *generator*, nothing else. Until
+   2026-08-16 it read `false` on runs where the judge had also written every reference
+   answer, which is what `context_precision` and `context_recall` are scored against. Both
+   are independent now (§7.1); the flag was never the thing that established it.
 
 **Before acting on a weak metric, read the answers.** A refusal metric measures the detector
 and the agent at once, and faithfulness measures the judge and the generator at once — the
@@ -390,6 +470,13 @@ ceiling, but a rate-limited call retried with backoff inside the budget dies rep
 ## 10. Run history
 
 Same agent (`Kestrel Feynman`), same corpus, same ten questions throughout.
+
+> **All three runs predate 2026-08-16, and three things have changed underneath them since:**
+> the generation model (§4.2), the golden-set drafter (§7.1), and the embedding route (§4.1).
+> Only the third is provably neutral — same model, same vectors, cosine 1.000000. Treat a
+> run recorded after that date as a **new baseline**, not the next point on this trend. The
+> next run is also the first that could be compared question-for-question against these,
+> because eval turns still embed verbatim (§4.6).
 
 | | Run 1 | Run 2 | **Run 3** |
 |---|---|---|---|
@@ -423,7 +510,9 @@ verbatim from its context, scored **0.000** by Gemma and **1.000** by Flash.
 | **20** | **Faithfulness penalises a teaching persona for teaching.** The Feynman persona's analogy and its "restate this in your own words" prompt are unsupported by the context *by design*, so they count as unfaithful claims. The card then names faithfulness weakest and advises tightening the grounding clause — i.e. deleting the pedagogy | **Open** |
 | **16** | The persona names the gap rather than declining, so one refusal row reads as an answer. Real finding, not a detector gap | Open |
 | **18** | Deleting a document cascades `query_chunks` away, emptying the contexts behind past scorecards. Scores survive, evidence does not | Open |
-| — | Judge and golden-set author are the same model (§7) | Accepted, documented |
+| — | Judge and golden-set author are the same model | **Resolved 2026-08-16** — `GOLDEN_SET_MODEL` is `minimax/minimax-m3`, a third vendor. It cost a short-reference regression that a prompt mitigation holds down; §7.1 |
+| — | `reference_answer` length depends on a prompt string with nothing enforcing it at write time | Open — `scripts/goldenset_check.py` measures it out of band, but a short reference still saves cleanly |
+| — | The rewrite is stored only in the REWRITE trace payload, so a rewritten question cannot be read back from `queries` | Open — the reason eval turns skip the rewriter entirely (§4.6) rather than rewriting and recording |
 
 On #20, measured in run 3 — every corpus fact in these answers was correct and retrieval
 worked:
