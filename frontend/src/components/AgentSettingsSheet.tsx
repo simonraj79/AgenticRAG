@@ -82,9 +82,44 @@ import {
 } from "./ui.tsx";
 import Drawer from "./Drawer.tsx";
 
-/** The editable shape, flattened out of `Agent`. Strings for the two free-text
- *  fields because a `<textarea>` cannot hold `null` -- the mapping back to null
- *  happens in `buildPatch`, in one place. */
+/**
+ * The models this build has actually been measured against, and the sentinel for
+ * "not one of these".
+ *
+ * **A shortlist, not a whitelist.** The API deliberately accepts any
+ * `author/model` id (see `GenerationModel` in `backend/app/api/agents.py`), and
+ * "Other" below reaches it. What this list buys is that the three obvious choices
+ * are known to work with the exact request this app sends -- `require_parameters`
+ * routing, `max_tokens` in `extra_body`, a `reasoning` flag, and `tools` +
+ * `tool_choice` on a tool turn. A model can be live on OpenRouter and still fail
+ * every one of those.
+ *
+ * Measured 2026-08-16 on plain generation, a tool-bound call and
+ * `with_structured_output`; all three pass for all three entries. The labels name
+ * the property that actually distinguishes them, because "which model" is not a
+ * question a workshop attendee can answer from a slug.
+ */
+const KNOWN_MODELS: { slug: string; label: string }[] = [
+  {
+    slug: "deepseek/deepseek-v4-flash-0731",
+    label: "DeepSeek V4 Flash - searches on its own judgement",
+  },
+  {
+    slug: "google/gemma-4-31b-it",
+    label: "Gemma 4 31B - never searches unprompted; the gap trigger does it",
+  },
+  {
+    slug: "google/gemini-3.7-flash",
+    label: "Gemini 3.7 Flash - thinking cannot be turned off",
+  },
+];
+
+/** Sentinel option value. Not a legal model id, because it contains no "/". */
+const CUSTOM = "__custom__";
+
+/** The editable shape, flattened out of `Agent`. Strings for the three
+ *  free-text fields because neither a `<textarea>` nor a `<select>` can hold
+ *  `null` -- the mapping back to null happens in `buildPatch`, in one place. */
 type Draft = {
   name: string;
   description: string;
@@ -97,6 +132,7 @@ type Draft = {
   rerank_top_n: number;
   score_threshold: number;
   max_rewrites: number;
+  generation_model: string;
   tools_enabled: boolean;
   max_tool_steps: number;
 };
@@ -113,6 +149,10 @@ function draftFrom(agent: Agent): Draft {
     rerank_enabled: agent.rerank_enabled,
     rerank_top_n: agent.rerank_top_n,
     score_threshold: agent.score_threshold,
+    // "" is the empty selection, which `buildPatch` maps back to null --
+    // the same round trip `description` and `system_prompt` make, because a
+    // <select> cannot hold null either.
+    generation_model: agent.generation_model ?? "",
     max_rewrites: agent.max_rewrites,
     tools_enabled: agent.tools_enabled,
     max_tool_steps: agent.max_tool_steps,
@@ -144,6 +184,12 @@ function buildPatch(agent: Agent, draft: Draft): AgentPatch {
 
   const prompt = draft.system_prompt.trim() === "" ? null : draft.system_prompt;
   if (prompt !== (agent.system_prompt ?? null)) patch.system_prompt = prompt;
+
+  // Trimmed before comparing AND before sending: the server strips it too
+  // (`GenerationModel` carries `strip_whitespace`), so an untrimmed draft
+  // would read as dirty, save, come back normalised, and read as dirty again.
+  const model = draft.generation_model.trim() === "" ? null : draft.generation_model.trim();
+  if (model !== (agent.generation_model ?? null)) patch.generation_model = model;
 
   if (draft.chunk_size !== agent.chunk_size) patch.chunk_size = draft.chunk_size;
   if (draft.chunk_overlap !== agent.chunk_overlap) patch.chunk_overlap = draft.chunk_overlap;
@@ -184,6 +230,9 @@ export default function AgentSettingsSheet({
   const nameId = useId();
   const descriptionId = useId();
   const promptId = useId();
+  const modelId = useId();
+  // Whether the custom box is showing because the user picked "Other".
+  const [customModel, setCustomModel] = useState(false);
 
   /**
    * Re-seed from the record when the sheet opens, or when it is pointed at a
@@ -218,6 +267,17 @@ export default function AgentSettingsSheet({
     // to write -- this note is the only thing standing between the omission and
     // someone "fixing" it back to the bug described above.
   }, [open, agent.id]);
+
+  // The box also shows itself for a value that is set but unlisted -- an agent
+  // already on a custom model, or one whose model was set by direct SQL. Without
+  // this the select would fall back to "Other" while the value stayed invisible,
+  // and the first edit to any other field would look like it had cleared it.
+  const isCustomValue = useMemo(
+    () =>
+      draft.generation_model !== "" &&
+      !KNOWN_MODELS.some((m) => m.slug === draft.generation_model),
+    [draft.generation_model],
+  );
 
   const patch = useMemo(() => buildPatch(agent, draft), [agent, draft]);
   const dirtyCount = Object.keys(patch).length;
@@ -365,6 +425,70 @@ export default function AgentSettingsSheet({
             ]}
             onChange={(next) => set("tools_enabled", next === "on")}
           />
+
+          {/*
+            A <select>, not a `Segmented`. Segmented lays its options out in one
+            `inline-flex` row that does not wrap, and model slugs are long -- three
+            of them would push the sheet past the viewport and fail `ui_check.py`
+            A7, which asserts zero horizontal overflow at 320px.
+
+            The list is a SHORTLIST, not a whitelist: the API accepts any
+            `author/model` id, and "Other" reveals a text box for one. Every entry
+            here was measured on 2026-08-16 against the exact request this app
+            sends -- plain generation, a tool-bound call, and
+            `with_structured_output` -- because "it is on OpenRouter" does not mean
+            "it works here". Gemini 3.7 Flash failed all three until
+            `build_chat_model` stopped sending it `reasoning:{enabled:false}`,
+            which it answers with a hard 400.
+          */}
+          <div>
+            <label htmlFor={modelId} className="block text-xs font-medium text-slate-300">
+              Generation model
+            </label>
+            <p className="mt-0.5 text-xs text-slate-400">
+              Which model writes the answers. This changes behaviour, not just cost:
+              DeepSeek searches the corpus again on its own judgement, Gemma does not
+              and relies on the gap trigger to make it look.
+            </p>
+            <select
+              id={modelId}
+              data-testid="settings-generation-model"
+              data-value={draft.generation_model}
+              value={KNOWN_MODELS.some((m) => m.slug === draft.generation_model)
+                ? draft.generation_model
+                : draft.generation_model === ""
+                  ? ""
+                  : CUSTOM}
+              onChange={(event) => {
+                const next = event.target.value;
+                // Switching to "Other" must not pre-fill the box with a slug the
+                // user did not type, so it clears -- and an empty custom value is
+                // indistinguishable from "server default", which is the safe
+                // reading of a half-finished edit.
+                set("generation_model", next === CUSTOM ? "" : next);
+                setCustomModel(next === CUSTOM);
+              }}
+              className="mt-1 min-h-11 w-full rounded-md border border-slate-700 bg-slate-950 px-3 text-sm text-slate-100 outline-none focus:border-slate-500"
+            >
+              <option value="">Server default</option>
+              {KNOWN_MODELS.map((entry) => (
+                <option key={entry.slug} value={entry.slug}>
+                  {entry.label}
+                </option>
+              ))}
+              <option value={CUSTOM}>Other (type an OpenRouter id)…</option>
+            </select>
+            {(customModel || isCustomValue) && (
+              <input
+                data-testid="settings-generation-model-custom"
+                value={draft.generation_model}
+                onChange={(event) => set("generation_model", event.target.value)}
+                placeholder="author/model"
+                aria-label="Custom OpenRouter model id"
+                className="mt-2 min-h-11 w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 font-mono text-xs text-slate-100 outline-none focus:border-slate-500"
+              />
+            )}
+          </div>
 
           <ParamSlider
             id="settings-max-tool-steps"

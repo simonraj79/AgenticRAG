@@ -193,11 +193,24 @@ pointer actionable.
 | `rerank_top_n` | `3` | context_precision |
 | `score_threshold` | `0.5` | **advisory only.** Governs neither refusing nor, since the agent loop, rewriting. See §6 |
 | `system_prompt` | per template | faithfulness, answer_relevance |
-| `generation_model` | `NULL` → service default | faithfulness |
+| `generation_model` | `NULL` → service default | faithfulness, **and what the agent does** — see below |
 | `tools_enabled` | `true` (new agents) / `false` (pre-existing) | **all four, and it is not a tuning knob** |
 | `max_tool_steps` | `3` | context_recall, latency |
 
-**`tools_enabled` is the one row in this table that changes what is being measured, not how
+**`generation_model` became editable in the settings sheet on 2026-08-16, and it is the
+second row here that changes what is being measured.** It used to be reachable only by
+direct SQL, so in practice every agent used the service default and the row was theoretical.
+It is not any more.
+
+The models differ in *behaviour*, not just quality: measured on the same probe,
+`deepseek/deepseek-v4-flash-0731` initiated a corpus search unprompted 6/6 where
+`google/gemma-4-31b-it` scored 0/6, which is the whole reason the gap trigger exists. So two
+agents on the same corpus with the same retrieval parameters can retrieve different context
+and be scored on it. Unlike `tools_enabled`, **`eval_runs` does record `generation_model`**,
+so a scorecard can tell you — read it before comparing two runs, and treat a comparison
+across a model change as two measurements rather than a trend.
+
+**`tools_enabled` is the other row in this table that changes what is being measured, not how
 well it does it.** With it on, the agent can search its corpus again mid-turn and can write
 and run Python, so the answer, the trace and the latency all move. Two consequences for
 anyone comparing scorecards:

@@ -175,6 +175,69 @@ check(
     "gemma keeps top_k through get_chat_model",
 )
 
+# ---------------------------------------------------------------------------
+# 16-19. Reasoning cannot be turned OFF on every family, and the picker made
+#        that load-bearing. Gemini answers a `reasoning:{enabled:false}` with a
+#        hard 400 ("Reasoning is mandatory for this endpoint and cannot be
+#        disabled"), so a user selecting it would break every turn.
+# ---------------------------------------------------------------------------
+print("\n-- reasoning: the flag some models refuse --")
+check(
+    "16. gemini does NOT receive reasoning=false (it 400s on it)",
+    "reasoning" not in body(GEMINI, reasoning=False),
+    str(body(GEMINI, reasoning=False)),
+)
+check(
+    "17. gemini DOES receive reasoning=true (only disabling is refused)",
+    body(GEMINI, reasoning=True).get("reasoning") == {"enabled": True},
+    str(body(GEMINI, reasoning=True).get("reasoning")),
+)
+check(
+    "18. deepseek still receives reasoning=false",
+    body(DEEPSEEK, reasoning=False).get("reasoning") == {"enabled": False},
+)
+check(
+    "19. gemma still receives reasoning=false",
+    body(GEMMA, reasoning=False).get("reasoning") == {"enabled": False},
+)
+
+# ---------------------------------------------------------------------------
+# 20-25. Model ids the API will now accept from a user, since `generation_model`
+#        is editable. The point of the guard is to fail at SAVE time with a
+#        message, instead of at chat time with a 404 that reads like an outage.
+# ---------------------------------------------------------------------------
+print("\n-- the model id a user may now type --")
+from fastapi import HTTPException  # noqa: E402
+
+from app.api.agents import _reject_unroutable_model  # noqa: E402
+from app.rag.llm import _LEGACY_SLUGS  # noqa: E402
+
+
+def accepts(value) -> bool:
+    try:
+        _reject_unroutable_model(value)
+        return True
+    except HTTPException:
+        return False
+
+
+check("20. None is allowed -- it clears back to the server default", accepts(None))
+check("21. a full author/model id is allowed", accepts(DEEPSEEK))
+check("22. an unknown vendor is still allowed (no whitelist)", accepts("acme/some-new-model"))
+check(
+    "23. a bare id is REFUSED rather than guessed into a later 404",
+    not accepts("deepseek-v4-flash-0731"),
+)
+check(
+    "24. a known legacy bare id is still allowed (llm.py maps it)",
+    accepts("gemma-4-31b-it"),
+)
+check(
+    "25. every _LEGACY_SLUGS target is a real author/model id",
+    all("/" in v for v in _LEGACY_SLUGS.values()),
+    f"targets={sorted(_LEGACY_SLUGS.values())}",
+)
+
 print("\n" + "=" * 74)
 if failures:
     print(f"{len(failures)} FAILED:")

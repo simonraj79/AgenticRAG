@@ -414,17 +414,83 @@ and left alone.
 
 ---
 
-## 8. Known gap this swap did not create and did not fix
+## 8. The model became switchable — and that promoted a latent bug
 
-`agents.generation_model` is unreachable from the API: absent from `AgentTunables`
-and `AgentOut`, and `AgentUpdate` sets `extra="forbid"`, so a PATCH carrying it is
-a 422. It can only be set by direct SQL. `llm.py` describes it as "a free-text
-column an operator can type into", which is true of the database and of no shipped
-interface.
+`agents.generation_model` was unreachable from the API: absent from
+`AgentTunables` and `AgentOut`, with `extra="forbid"` making a PATCH a 422. It
+could only be set by direct SQL, which mattered more after this swap than before
+it — pointing one agent back at Gemma is now a *meaningful* operation, and it is
+the configuration S13 exists to protect.
 
-That matters more after this change than before it, because pointing one agent
-back at Gemma is now a meaningful operation — it is the configuration S13 exists to
-protect. Left as-is; noted for PRD §10.
+**Exposed 2026-08-16.** `AgentTunables` (so create and update both accept it),
+`AgentOut`, and a `<select>` in the settings sheet with a measured shortlist plus
+an "Other" box. Null still means "use the server default" and clearing is
+supported.
+
+### 8.1 The bug the picker would have shipped
+
+`generation_reasoning` is false, so every generation call carried
+`reasoning: {"enabled": false}`. `google/gemini-3.7-flash` answers that with a
+hard 400:
+
+```
+Reasoning is mandatory for this endpoint and cannot be disabled.
+```
+
+Verified across plain generation, a tool-bound call and
+`with_structured_output` — **all three failed identically.** So Flash was
+unusable as a generation model, and the picker would have offered it as a menu
+item that breaks every turn.
+
+This is the shape worth keeping: **a configuration value nobody could reach was
+hiding a defect, and exposing it is what made the defect reachable.** While it
+was settings-only, nobody was going to point generation at Flash by accident. The
+audit for "add a field to a schema" is therefore not the schema — it is *what
+values become possible that were not before*.
+
+`build_chat_model` now withholds the flag for families that refuse it
+(`_REASONING_ALWAYS_ON_PREFIXES`), and drops it rather than raising: the caller's
+intent is "do not spend tokens thinking", and on a model that cannot comply the
+honest outcome is the model's default, not a failed turn.
+
+A second, smaller find in the same pass: `_LEGACY_SLUGS` mapped
+`gemini-flash-lite-latest` to `google/gemini-3.7-flash-lite`, and OpenRouter says
+that **is not a valid model ID**. A legacy-id guard whose whole purpose is to stop
+a bare id 404ing, which mapped to a model that 400s, is worse than no entry —
+the unmapped path at least warns and names its guess. Removed, and `llm_check.py`
+case 25 now asserts every mapping target is a real `author/model` id.
+
+### 8.2 Free text, with the failure moved to save time
+
+The API accepts any `author/model` id rather than a `Literal` whitelist —
+`llm.py` calls this "a free-text column an operator can type into", and enumerating
+it would mean a deploy every time OpenRouter adds a model, in a workshop about
+trying models. The `SplitterName` precedent points the other way, and the
+distinction is why: a bad splitter *silently downgrades* to one the user cannot see
+they got, whereas a bad model id fails loudly.
+
+Loudly, but in the wrong place. `openrouter_slug()` guesses `google/<model>` for a
+bare id and logs a warning nobody reads, so a typo was stored and then 404'd on
+every answer — which CLAUDE.md records as reading like an outage rather than a
+namespace error. `_reject_unroutable_model` makes that a 422 at the moment a human
+can fix it, checking **shape only**: verifying existence would put a third-party
+network call inside a settings save and still would not prove the model serves the
+parameters this app sends.
+
+The shortlist in the UI is the other half of that answer. Every entry was measured
+against the exact request this app sends — `require_parameters` routing,
+`max_tokens` in `extra_body`, the `reasoning` flag, and `tools` + `tool_choice`:
+
+| Model | plain | tools | structured |
+|---|---|---|---|
+| `deepseek/deepseek-v4-flash-0731` | ok | ok | ok |
+| `google/gemma-4-31b-it` | ok | ok | ok |
+| `google/gemini-3.7-flash` | ok *(after 8.1)* | ok | ok |
+
+A `<select>`, not a `Segmented`: `Segmented` lays its options in one non-wrapping
+`inline-flex` row, and three model slugs would push the sheet past the viewport and
+fail `ui_check.py` A7 (zero horizontal overflow at 320px). Verified 15/15 with the
+control in place, including A8's 44px sweep with the sheet open.
 
 ---
 
