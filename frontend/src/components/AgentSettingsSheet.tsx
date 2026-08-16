@@ -135,6 +135,7 @@ type Draft = {
   generation_model: string;
   tools_enabled: boolean;
   max_tool_steps: number;
+  self_check_enabled: boolean;
 };
 
 function draftFrom(agent: Agent): Draft {
@@ -156,6 +157,7 @@ function draftFrom(agent: Agent): Draft {
     max_rewrites: agent.max_rewrites,
     tools_enabled: agent.tools_enabled,
     max_tool_steps: agent.max_tool_steps,
+    self_check_enabled: agent.self_check_enabled,
   };
 }
 
@@ -205,6 +207,8 @@ function buildPatch(agent: Agent, draft: Draft): AgentPatch {
   if (draft.max_rewrites !== agent.max_rewrites) patch.max_rewrites = draft.max_rewrites;
   if (draft.tools_enabled !== agent.tools_enabled) patch.tools_enabled = draft.tools_enabled;
   if (draft.max_tool_steps !== agent.max_tool_steps) patch.max_tool_steps = draft.max_tool_steps;
+  if (draft.self_check_enabled !== agent.self_check_enabled)
+    patch.self_check_enabled = draft.self_check_enabled;
 
   return patch;
 }
@@ -424,6 +428,32 @@ export default function AgentSettingsSheet({
               { value: "off", label: "Off" },
             ]}
             onChange={(next) => set("tools_enabled", next === "on")}
+          />
+
+          {/*
+            The help text names the CHEAP case on purpose. The check is a free
+            set operation against the citation ledger on almost every turn -- a
+            marker the answer used that no retrieved passage carries -- and only
+            pays for a model call when that test fires. Describing it as "checks
+            every answer" would be true and would read as a per-turn cost the
+            feature does not have, which is the kind of copy that gets a working
+            control switched off.
+
+            It is not disabled when `tools_enabled` is off, unlike the step
+            slider above. The two are independent: an agent with no tools still
+            drafts an answer that can cite something it was never given.
+          */}
+          <Segmented
+            legend="Self-check"
+            help="Checks the answer against its own citations before it settles, and redrafts if a claim is not carried by a retrieved passage. Costs nothing on a well-grounded answer."
+            name="settings-self-check"
+            testId="settings-self-check"
+            value={draft.self_check_enabled ? "on" : "off"}
+            options={[
+              { value: "on", label: "On" },
+              { value: "off", label: "Off" },
+            ]}
+            onChange={(next) => set("self_check_enabled", next === "on")}
           />
 
           {/*

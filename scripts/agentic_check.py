@@ -19,13 +19,19 @@ allocation appears in both, with different numbers -- an allocation in one and a
 measured average in the other), which is the smallest corpus that can tell a
 one-search answer from a two-search one.
 
-**Scenarios S1 and S7 are the regression tests and matter most.** Everything else
-checks that the new feature works; those two check that it did not eat the old
-one. S1 asserts an agent with tools off produces exactly the six pre-existing
-trace event types -- and, since 2026-08-16, that REWRITE is among them, because
-the subset check alone passed whether the rewriter ran or had been deleted. S7
-asserts that giving a model tools did not turn "the corpus does not cover this"
-into an invention.
+**Scenarios S1, S7, S20 and S25 are the regression tests and matter most.**
+Everything else checks that a new feature works; those four check that it did not
+eat the old one. S1 asserts an agent with tools off produces exactly the six
+pre-existing trace event types -- and, since 2026-08-16, that REWRITE is among
+them, because the subset check alone passed whether the rewriter ran or had been
+deleted. S7 asserts that giving a model tools did not turn "the corpus does not
+cover this" into an invention. S20 is S1 for the orchestrator, and S25 is S7 for
+the self-check: a persona designed to answer with a question must not be graded
+for citing nothing.
+
+Layer 1 for the orchestrator is `scripts/route_specialist_check.py` -- mention
+parsing, the alias table, the self-check trigger and the critic's carve-out, with
+no database and no model, in seconds. Read a red row there before a red row here.
 
 HTTP routes are exercised through an ASGI transport rather than a running server,
 with `current_user` overridden. `owned_agent` still runs for real, so the tenancy
@@ -57,6 +63,7 @@ from app.db.models import (  # noqa: E402
     Handout,
     IngestionRun,
     Query,
+    QueryChunk,
     TraceEvent,
     User,
 )
@@ -71,6 +78,15 @@ FIXTURES = ROOT / "scripts" / "fixtures"
 # The six event types that existed before the tool loop. S1 asserts a
 # tools-off turn produces a subset of exactly these and nothing else.
 CLASSIC_EVENTS = {"RETRIEVE", "SCORE_CHECK", "REWRITE", "RERANK", "GENERATE", "REFUSE"}
+
+# The three the orchestrator adds, and the nine that existed before it. S20 is
+# to orchestration what S1 is to tools: with the feature off the trace must hold
+# nothing from this set, and the assertion is written as a set difference so a
+# FOURTH new event type is caught too. A subset check against a set that already
+# contained the new names would pass whether the feature was off or merely
+# broken -- the hole S1 carried until 2026-08-16.
+ORCHESTRATOR_EVENTS = {"ROUTE", "DELEGATE", "SELF_CHECK"}
+PRE_ORCHESTRATOR_EVENTS = CLASSIC_EVENTS | {"TOOL_CALL", "TOOL_RESULT", "TOOL_ERROR"}
 
 
 # --------------------------------------------------------------------------
@@ -293,12 +309,20 @@ async def cleanup(db) -> int:
 # --------------------------------------------------------------------------
 
 async def ask(db, agent: Agent, user: User, question: str,
-              conversation: Conversation | None = None):
+              conversation: Conversation | None = None,
+              emit=None):
     """One turn through the real engine, returning (AskOut, events, conversation).
 
     Goes through `ask.run_turn` rather than `pipeline.answer_question`, because
     the trace rows are half of what is being asserted and only `run_turn` writes
     them.
+
+    `emit` is the streaming seam, and only S26 uses it. It is here rather than in
+    a second helper because `answer_reset` is a WIRE frame with no trace row --
+    `app/rag/events.py` says in as many words that SSE names must never become
+    trace event types -- so a scenario asserting that a draft was not discarded
+    has nowhere else to look. With `emit=None` every branch below `run_turn` is
+    the line it already was, which is what S1 depends on.
     """
     from app.api.ask import run_turn
 
@@ -311,7 +335,7 @@ async def ask(db, agent: Agent, user: User, question: str,
 
     out = await run_turn(
         db, agent=agent, user=user, session=None,
-        conversation=conversation, question=question,
+        conversation=conversation, question=question, emit=emit,
     )
 
     events = (
@@ -330,6 +354,19 @@ def event_types(events) -> list[str]:
 
 def payloads_of(events, kind: str) -> list[dict]:
     return [e.payload or {} for e in events if e.event_type == kind]
+
+
+def frame_collector():
+    """(frames, emit) -- an `Emit` that records instead of sending.
+
+    Frames are `(name, payload)` in order. Used only by S26; see `ask()`.
+    """
+    frames: list[tuple[str, dict]] = []
+
+    async def emit(name: str, payload: dict) -> None:
+        frames.append((name, payload))
+
+    return frames, emit
 
 
 # --------------------------------------------------------------------------
@@ -994,6 +1031,539 @@ async def s19_no_over_firing(db, agent, user) -> Outcome:
 
 
 # --------------------------------------------------------------------------
+# S20-S27 -- the orchestrator, @mentions and the self-check.
+# See `new features/11-orchestrator-and-self-check.md`, section 1 Q5.
+#
+# Layer 1 for this feature is `scripts/route_specialist_check.py`: mention
+# parsing, the alias table, the self-check trigger and the critic's carve-out,
+# with no database and no model. Read a red row there before a red row here --
+# the S16-before-S15 ordering, for the same reason.
+#
+# **Every one of these owns the columns it needs.** `agents.specialists` being
+# NULL is the entire off switch, so a scenario that inherited the fixture's
+# configuration would be asserting against whatever the previous scenario left
+# behind. `loop.md` section 5 records S3 passing twice while proving nothing for
+# exactly that reason, and S21, S23, S25, S26 and S27 would each be vacuous in a
+# different way: S21 with no roster records no ROUTE row at all, and S25 with
+# `self_check_enabled` false finds zero SELF_CHECK rows because the feature never
+# ran, which is the answer it is looking for arrived at by the wrong route.
+# --------------------------------------------------------------------------
+
+from app.db.specialists import DEFAULT_ROSTER  # noqa: E402
+from app.rag import events as rag_events  # noqa: E402
+from app.rag.selfcheck import (  # noqa: E402
+    SIGNAL_PHANTOM,
+    VERDICT_UNGROUNDED,
+    markers_in,
+)
+
+# What S21 measured, read by S22. See S22's docstring: a mention that agrees
+# with the router proves nothing, so S22 needs to know what the router actually
+# chose rather than assuming.
+_ROUTED: dict[str, str] = {}
+
+# The question S21 uses for the explanatory arm, reused verbatim by S22 so that
+# the only variable between them is the mention.
+S21_EXPLAIN = "Explain simply how the Ka-band downlink budget works."
+S21_QUIZ = "Write me five practice questions on the power allocation by subsystem."
+
+
+def _orchestration(agent, *, specialists, self_check):
+    """Set the two orchestrator columns, returning what was there before.
+
+    `getattr` with a default because these columns arrive with the feature's own
+    migration: before it lands the attributes do not exist, and a scenario that
+    raised `AttributeError` while reading them would report the feature as broken
+    rather than as absent.
+    """
+    prior = (
+        getattr(agent, "specialists", None),
+        getattr(agent, "self_check_enabled", False),
+    )
+    agent.specialists = specialists
+    agent.self_check_enabled = self_check
+    return prior
+
+
+def _route_payload(events) -> dict:
+    rows = payloads_of(events, "ROUTE")
+    return rows[0] if rows else {}
+
+
+async def s20_orchestration_off(db, agent, user) -> Outcome:
+    """Orchestration OFF must produce exactly the pre-existing trace shape.
+
+    The regression test, and the S1 of this feature. Everything else here checks
+    that routing and the self-check work; this checks they did not change the
+    turn of an agent that has neither.
+
+    `loop.md` S4 is the standard being held to: not "similar", identical. NULL
+    and false are the classic path by construction -- no backfill was needed,
+    unlike `bc307f5fc31f` -- so a stray ROUTE row here means the branch is keyed
+    on something other than the column.
+    """
+    prior = _orchestration(agent, specialists=None, self_check=False)
+    await db.commit()
+    try:
+        out, events, _ = await ask(
+            db, agent, user, "How much power do the solar arrays generate?"
+        )
+        seen = set(event_types(events))
+        stray = seen - PRE_ORCHESTRATOR_EVENTS
+        orchestrated = sorted(seen & ORCHESTRATOR_EVENTS)
+        ok = bool(out.answer) and not stray
+        return Outcome(
+            "S20 orchestration off is unchanged", ok,
+            f"events={sorted(seen)}"
+            + (f" STRAY={sorted(stray)}" if stray else "")
+            + (f" ORCHESTRATOR_ROWS={orchestrated}" if orchestrated else ""),
+        )
+    finally:
+        agent.specialists, agent.self_check_enabled = prior
+        await db.commit()
+
+
+async def s21_router_discriminates(db, agent, user) -> Outcome:
+    """Two questions on one corpus must route to two DIFFERENT specialists.
+
+    **One question cannot test a router.** A router hardwired to return
+    `feynman-explainer`, a router whose structured output silently failed and
+    fell back, and a router that read the question all produce the same passing
+    row on a single "explain this" probe. The finding is the DIFFERENCE, so the
+    scenario has to ask twice and compare.
+
+    The pair is chosen so the topic is constant and only the ASK varies -- "the
+    Ka-band budget" against "the power allocation" would confound the router's
+    signal with the corpus. What separates them is "explain simply" versus "write
+    me five practice questions", which is the distinction `route.py`'s prompt
+    names in its own first bullet.
+
+    Separate conversations, deliberately: the router sees history, so asking both
+    in one thread would let the first answer influence the second and the
+    difference would no longer be a property of the questions.
+
+    Also asserts `trigger == "router"` on both. Without it a fallback -- which
+    `route_specialist` returns on a failed structured call, by design, so that a
+    dead router degrades to a working answer -- would be indistinguishable from a
+    decision, and this scenario would be measuring the fallback path.
+    """
+    prior = _orchestration(agent, specialists=list(DEFAULT_ROSTER), self_check=False)
+    await db.commit()
+    try:
+        _out_a, events_a, _ = await ask(db, agent, user, S21_EXPLAIN)
+        _out_b, events_b, _ = await ask(db, agent, user, S21_QUIZ)
+    finally:
+        agent.specialists, agent.self_check_enabled = prior
+        await db.commit()
+
+    a, b = _route_payload(events_a), _route_payload(events_b)
+    chosen_a, chosen_b = a.get("specialist"), b.get("specialist")
+    if chosen_a:
+        _ROUTED["explain"] = chosen_a
+    if chosen_b:
+        _ROUTED["quiz"] = chosen_b
+
+    ok = (
+        bool(chosen_a)
+        and bool(chosen_b)
+        and chosen_a != chosen_b
+        and a.get("trigger") == "router"
+        and b.get("trigger") == "router"
+    )
+    return Outcome(
+        "S21 the router discriminates", ok,
+        f"explain->{chosen_a} ({a.get('trigger')}) quiz->{chosen_b} "
+        f"({b.get('trigger')}) why={preview(str(a.get('why')), 60)} / "
+        f"{preview(str(b.get('why')), 60)}",
+    )
+
+
+async def s22_mention_overrides_router(db, agent, user) -> Outcome:
+    """A typed mention must beat the router's own choice.
+
+    **Without S21 having run first this scenario proves nothing**, and that is
+    not a caution, it is the reason the pair exists. Assert `@quiz ... -> quiz
+    writer` on its own and a router that would have picked the Quiz Writer anyway
+    passes it -- the mention could be agreeing with the router by luck, and a
+    parser that had been deleted entirely would look identical. So the specialist
+    mentioned here is chosen to be one S21 MEASURED the router not choosing for
+    this exact question, and the scenario says so in its detail line either way.
+
+    Run with `--only s22` and the fallback below keeps it runnable, but the
+    detail prints `s21_not_run` and the finding is weaker by exactly that much.
+    """
+    prior = _orchestration(agent, specialists=list(DEFAULT_ROSTER), self_check=False)
+    await db.commit()
+    try:
+        router_pick = _ROUTED.get("explain")
+        # Anything the router demonstrably did not pick for S21_EXPLAIN.
+        alternatives = [s for s in DEFAULT_ROSTER if s != (router_pick or "feynman-explainer")]
+        target = "quiz-generator" if "quiz-generator" in alternatives else alternatives[0]
+        # An ALIAS rather than the slug, because that is what a user types --
+        # and because it exercises the alias table on the live path rather than
+        # only in `route_specialist_check.py`.
+        token = "@quiz" if target == "quiz-generator" else f"@{target}"
+        out, events, _ = await ask(db, agent, user, f"{token} {S21_EXPLAIN}")
+    finally:
+        agent.specialists, agent.self_check_enabled = prior
+        await db.commit()
+
+    payload = _route_payload(events)
+    ok = (
+        payload.get("trigger") == "mention"
+        and payload.get("specialist") == target
+        # The mention must be STRIPPED before the embedder. `@quiz` in vector
+        # space is noise, and the rewriter is documented to mangle terms it does
+        # not recognise -- so a mention that survives into the search query is a
+        # silent retrieval regression, not a cosmetic one.
+        and token not in (out.rewritten_question or "")
+    )
+    return Outcome(
+        "S22 a mention overrides the router", ok,
+        f"router_picked={router_pick or 's21_not_run'} mentioned={token} "
+        f"got={payload.get('specialist')} trigger={payload.get('trigger')} "
+        f"search_query={preview(out.rewritten_question or '-', 60)}",
+    )
+
+
+async def s23_two_mentions_two_sections(db, agent, user) -> Outcome:
+    """Two mentions produce two sections over ONE shared ledger.
+
+    Two DELEGATE events and two `## ` headings are the visible half. **The real
+    assertion is the ledger**, because concatenating two specialists' text is
+    only safe if `[2]` means the same chunk in both sections -- and a
+    two-ledger implementation produces an answer that looks exactly like a
+    one-ledger implementation while attributing half its claims to the wrong
+    source. There is no error to test for; this is `loop.md` T2 aimed at a
+    citation.
+
+    It is asserted through `query_chunks` rather than by comparing the two
+    sections' text, because `query_chunks.rank` IS the marker (see
+    `ask.CitationOut`: "there is no `marker` column"). Two ledgers written to one
+    turn therefore collide on rank, and a turn that wrote only the first
+    ledger's chunks leaves the second section's markers unresolvable. Those are
+    the two ways the feature can be built wrongly, and this catches both.
+
+    A marker shared BETWEEN the sections is asserted when there is one, and its
+    absence is reported rather than failed: whether two specialists happen to
+    cite the same passage is a property of the corpus and the question, while
+    rank-uniqueness is a property of the design and is always available.
+    """
+    import re
+
+    prior = _orchestration(agent, specialists=list(DEFAULT_ROSTER), self_check=False)
+    await db.commit()
+    try:
+        out, events, _ = await ask(
+            db, agent, user,
+            "@feynman @quiz the onboard storage margin for science data",
+        )
+        rows = (await db.scalars(
+            select(QueryChunk).where(QueryChunk.query_id == out.query_id)
+        )).all()
+    finally:
+        agent.specialists, agent.self_check_enabled = prior
+        await db.commit()
+
+    delegates = payloads_of(events, "DELEGATE")
+    bodies = re.split(r"^##\s+", out.answer or "", flags=re.M)[1:]
+
+    by_rank: dict[int, uuid.UUID] = {}
+    duplicate_ranks: list[int] = []
+    for row in rows:
+        if row.rank in by_rank:
+            duplicate_ranks.append(row.rank)
+        by_rank[row.rank] = row.chunk_id
+
+    used = markers_in(out.answer or "")
+    unresolved = sorted(used - set(by_rank))
+
+    shared = set.intersection(*(markers_in(b) for b in bodies)) if len(bodies) >= 2 else set()
+    shared_chunks = {m: by_rank.get(m) for m in sorted(shared)}
+    shared_ok = all(cid is not None for cid in shared_chunks.values())
+
+    ok = (
+        len(delegates) == 2
+        and len(bodies) >= 2
+        and not duplicate_ranks
+        and not unresolved
+        and shared_ok
+    )
+    return Outcome(
+        "S23 two mentions, two sections, one ledger", ok,
+        f"delegates={len(delegates)} sections={len(bodies)} "
+        f"query_chunks={len(rows)} duplicate_ranks={duplicate_ranks} "
+        f"unresolved_markers={unresolved} shared_markers={sorted(shared) or 'none'}",
+    )
+
+
+async def s24_phantom_marker_is_caught(db, agent, user) -> Outcome:
+    """A citation outside the ledger must fire, and no verdict may excuse it.
+
+    **This one does NOT go through a model, and that is the design rather than a
+    shortcut.** The end-to-end version needs the generation model to invent a
+    citation on demand, which is not reproducible: it would pass on the runs
+    where the model happened to hallucinate and go red on the runs where it
+    behaved, and CLAUDE.md already records what an intermittent red does -- the
+    fifth refusal-marker miss "surfaced as an INTERMITTENT red ... a flaky
+    refusal scenario reads as model variance and gets re-run". A scenario nobody
+    believes is worse than no scenario.
+
+    So the draft is constructed and the detector is called directly. What earns
+    this a place in layer 2 rather than beside the identical case in
+    `route_specialist_check.py` is the SECOND half, which layer 1 cannot reach:
+    with the critic stubbed to say `grounded=True`, the result must STILL be
+    ungrounded. The signal overrides the verdict in exactly one direction -- no
+    model opinion can make a citation to a passage that does not exist true --
+    and that asymmetry is a line of code with nothing else asserting it.
+    """
+    from app.rag import selfcheck
+
+    draft = (
+        "The Ka-band high-rate downlink is budgeted at 220 Mbps [1] and the "
+        "onboard storage holds 34 TB [2]. The relay constellation is visible "
+        "for 74 percent of each orbit [99]."
+    )
+    signal = selfcheck.self_check_signal(draft, ledger_size=3, expects_citations=True)
+
+    class _AlwaysGrounded:
+        async def ainvoke(self, _payload):
+            return selfcheck.GroundingVerdict(
+                grounded=True, unsupported=[], suggested_query=None
+            )
+
+    prior_critic = selfcheck.get_critic
+    selfcheck.get_critic = lambda: _AlwaysGrounded()
+    try:
+        result = await selfcheck.run_grounding_critic(
+            answer=draft, context="[1] ... [2] ... [3] ...", signal=signal
+        )
+    finally:
+        selfcheck.get_critic = prior_critic
+
+    ok = (
+        signal is not None
+        and signal.name == SIGNAL_PHANTOM
+        and signal.phantom_markers == (99,)
+        and result.verdict == VERDICT_UNGROUNDED
+        and result.phantom_markers == (99,)
+    )
+    return Outcome(
+        "S24 a phantom marker is caught, and no verdict excuses it", ok,
+        f"signal={getattr(signal, 'name', None)} "
+        f"phantom={getattr(signal, 'phantom_markers', None)} "
+        f"verdict_with_a_grounded_critic={result.verdict}",
+    )
+
+
+async def s25_no_self_check_on_a_socratic_turn(db, agent, user) -> Outcome:
+    """The self-check must not fire on a persona designed to cite nothing.
+
+    **This is the S7 of this feature** -- the one that checks the addition did
+    not eat the existing behaviour. A Socratic turn is a question put back to the
+    learner; it asserts nothing, so it cites nothing, and it is CORRECT when it
+    does. Firing a critic on it is the same defect as `refusal_pass = 0/2`: a
+    measurement penalising the behaviour the persona exists to produce, which
+    CLAUDE.md records costing three separate investigations before anyone read
+    the answers.
+
+    **It owns `self_check_enabled = True`, and that is the whole scenario.**
+    Zero SELF_CHECK rows on an agent with the feature switched off is not a
+    finding, it is the feature being absent -- the right answer reached by the
+    wrong route, and precisely the trap `loop.md` section 5 describes. It also
+    asserts the turn genuinely routed to `socratic-tutor`, because a failed route
+    would produce zero SELF_CHECK rows too, for a third wrong reason.
+    """
+    prior = _orchestration(agent, specialists=list(DEFAULT_ROSTER), self_check=True)
+    await db.commit()
+    try:
+        out, events, _ = await ask(
+            db, agent, user,
+            "@socratic I think the Ka-band link clears all the science data "
+            "generated each day, because it is the high-rate path. Is that right?",
+        )
+    finally:
+        agent.specialists, agent.self_check_enabled = prior
+        await db.commit()
+
+    payload = _route_payload(events)
+    checks = payloads_of(events, "SELF_CHECK")
+    routed = payload.get("specialist") == "socratic-tutor"
+    ok = routed and not checks and bool(out.answer)
+    return Outcome(
+        "S25 no self-check on a Socratic turn", ok,
+        f"self_check_enabled=True routed_to={payload.get('specialist')} "
+        f"trigger={payload.get('trigger')} self_check_rows={len(checks)} "
+        f"markers={sorted(markers_in(out.answer or '')) or 'none'} "
+        f"answer={preview(out.answer, 90)}",
+    )
+
+
+async def s26_critic_exempts_pedagogy(db, agent, user) -> Outcome:
+    """A teaching answer must not have its draft discarded for teaching.
+
+    **PRD open item 20, and the one scenario here that can fail by making the
+    product quietly worse rather than visibly broken.** EVAL run 3 scored an
+    answer 0.571 on faithfulness whose sentences 1-4 were four correct figures
+    straight from the context; the deductions were a labelled analogy and
+    "restate this in your own words". The scorecard then named faithfulness as
+    the weakest metric and advised reducing persona verbosity -- that is,
+    deleting the pedagogy. A groundedness critic with no carve-out rebuilds that
+    instrument inside the live turn, where it does not merely recommend deleting
+    the teaching: it discards the draft the user watched stream and tells the
+    model to write a duller one. Nothing raises.
+
+    The layer-1 half is `route_specialist_check.py` cases 25-31 -- the free
+    pre-check does not fire on that answer, and the critic prompt still carries
+    its exemptions. This is the end-to-end half, and it goes through the
+    streaming seam because `answer_reset` is a wire frame with no trace row (see
+    `ask()`).
+
+    Two ways the draft can be thrown away and both are asserted: the frame the
+    browser would render, and `SELF_CHECK.acted`, which section 7.1 exists to
+    separate "we checked and it was fine" from "we checked and acted". A turn
+    where the pre-check never fired passes; a turn where it fired and the critic
+    said grounded passes; a turn where the draft was discarded does not.
+    """
+    prior = _orchestration(agent, specialists=list(DEFAULT_ROSTER), self_check=True)
+    await db.commit()
+    frames, emit = frame_collector()
+    try:
+        out, events, _ = await ask(
+            db, agent, user,
+            "@feynman Explain simply how the battery store covers the power "
+            "deficit, with an analogy.",
+            emit=emit,
+        )
+    finally:
+        agent.specialists, agent.self_check_enabled = prior
+        await db.commit()
+
+    resets = [
+        p for name, p in frames
+        if name == rag_events.ANSWER_RESET and p.get("reason") == "self_check"
+    ]
+    checks = payloads_of(events, "SELF_CHECK")
+    acted = [c for c in checks if c.get("acted")]
+    ungrounded = [c for c in checks if c.get("verdict") == VERDICT_UNGROUNDED]
+    ok = bool(out.answer) and not resets and not acted and not ungrounded
+    return Outcome(
+        "S26 the critic exempts pedagogy", ok,
+        f"self_check_rows={len(checks)} "
+        f"verdicts={[c.get('verdict') for c in checks] or 'none'} "
+        f"acted={len(acted)} answer_reset_self_check={len(resets)} "
+        f"answer_chars={len(out.answer or '')}",
+    )
+
+
+# The unsupported claim S27 puts in the critic's mouth. Deliberately a string no
+# model would ever write: "the answer text is unmodified" is otherwise not
+# provable after the fact, because the draft the check saw is recorded nowhere
+# this scenario can read. A sentinel makes it exact -- if the turn splices the
+# critic's findings into the answer, this appears verbatim.
+S27_SENTINEL = "UNSUPPORTED-SENTINEL-Q7"
+
+# A second, weaker guard for a caveat the SYSTEM composed rather than quoted.
+# Phrases, not a shape, and it is the half that can miss -- kept because its
+# false negatives cost nothing and the sentinel above is what actually bites.
+S27_CAVEAT_PHRASES = (
+    "may not be fully grounded",
+    "could not be verified",
+    "not supported by the sources",
+    "self-check",
+    "this answer was flagged",
+)
+
+
+async def s27_budget_exhaustion_still_answers(db, agent, user) -> Outcome:
+    """An ungrounded verdict with no budget left keeps the draft, unmodified.
+
+    Section 4.4's last row, and its asymmetry is the one worth reading twice:
+    **editing a model's answer to add a caveat it did not write is the one
+    outcome worse than shipping the draft**, because it makes the system's voice
+    unreliable in a way no trace event records. So the turn is flagged and the
+    text is left exactly as the model wrote it.
+
+    **The failure is forced, not hoped for.** Getting a live model to produce an
+    ungrounded draft on demand is the same non-reproducibility S24 refuses, so
+    two module globals in `selfcheck` are swapped for the duration: `markers_in`
+    makes every draft look as though it cited a passage that does not exist, and
+    `get_critic` returns an ungrounded verdict with no model call. Both are
+    resolved from `selfcheck`'s own globals at call time, so the patch holds
+    whatever import style `pipeline.py` uses -- and both are restored in the
+    `finally`, along with `max_tool_steps`.
+
+    `suggested_query` is null on purpose: a search would be the other branch of
+    that table, and this scenario is about the branch with nowhere left to go.
+
+    **It owns retrieval as well as the step budget, and the reason is arithmetic
+    rather than caution.** `pipeline` computes `steps_left = max_steps -
+    loop.steps`, so `max_tool_steps = 1` only exhausts the budget if the loop
+    actually spends its step. Starving retrieval to `k=1` on a seven-chunk corpus
+    is what makes a search necessary -- the same condition S3, S13 and S15 own
+    for the same reason. If the model answers without searching anyway,
+    `steps_left` is 1 and the turn takes the REDRAFT branch instead: the three
+    assertions below still hold there, because "never edit the model's text"
+    binds on both branches, but the budget branch was not the one exercised. The
+    detail line prints `acted` and `tool_steps` so that is visible in the run
+    rather than inferred from a green row.
+    """
+    from app.rag import selfcheck
+
+    class _Ungrounded:
+        async def ainvoke(self, _payload):
+            return selfcheck.GroundingVerdict(
+                grounded=False, unsupported=[S27_SENTINEL], suggested_query=None
+            )
+
+    prior = _orchestration(agent, specialists=list(DEFAULT_ROSTER), self_check=True)
+    prior_steps = agent.max_tool_steps
+    prior_k, prior_n = agent.retrieve_k, agent.rerank_top_n
+    agent.max_tool_steps = 1
+    agent.retrieve_k, agent.rerank_top_n = 1, 1
+    await db.commit()
+
+    prior_markers = selfcheck.markers_in
+    prior_critic = selfcheck.get_critic
+    selfcheck.markers_in = lambda text: {999}
+    selfcheck.get_critic = lambda: _Ungrounded()
+    try:
+        out, events, _ = await ask(
+            db, agent, user,
+            "Compare the Ka-band availability gaps with the battery replacement "
+            "schedule, and explain how the two interact.",
+        )
+    finally:
+        selfcheck.markers_in = prior_markers
+        selfcheck.get_critic = prior_critic
+        agent.specialists, agent.self_check_enabled = prior
+        agent.max_tool_steps = prior_steps
+        agent.retrieve_k, agent.rerank_top_n = prior_k, prior_n
+        await db.commit()
+
+    checks = payloads_of(events, "SELF_CHECK")
+    verdicts = [c.get("verdict") for c in checks]
+    acted = [c.get("acted") for c in checks]
+    answer = out.answer or ""
+    tail = answer[-400:].lower()
+    caveats = [p for p in S27_CAVEAT_PHRASES if p in tail]
+    ok = (
+        bool(answer)
+        and VERDICT_UNGROUNDED in verdicts
+        and S27_SENTINEL not in answer
+        and not caveats
+    )
+    return Outcome(
+        "S27 budget exhaustion still answers, unmodified", ok,
+        f"answer_chars={len(answer)} verdicts={verdicts or 'none'} "
+        f"acted={acted or 'none'} tool_steps={out.tool_steps} "
+        + ("(redraft branch, not the budget branch)" if any(acted) else "")
+        + f" critic_text_spliced_in={S27_SENTINEL in answer} "
+        f"appended_caveat={caveats or 'no'}",
+    )
+
+
+# --------------------------------------------------------------------------
 # HTTP scenarios -- the handout routes
 # --------------------------------------------------------------------------
 
@@ -1201,6 +1771,26 @@ SCENARIOS = [
     # which explains a red S18 without anyone re-deriving a retrieval probe.
     s19_no_over_firing,
     s18_rewrite_is_necessary,
+    # S20-S27, the orchestrator. Ordered cheapest-and-most-explanatory first,
+    # the S16-before-S15 convention:
+    #
+    #   S20 is the regression test and costs one plain turn. A red S20 means the
+    #       classic path moved, which explains every row under it.
+    #   S24 makes no model call at all, so a red S24 is the detector rather than
+    #       the model and is worth knowing before reading S25-S27.
+    #   S21 must precede S22, which is not a preference -- S22 reads what S21
+    #       measured, and without it can only report `s21_not_run`.
+    #   S26 is the one to write first and the one to read first among the
+    #       behavioural rows: it is the only scenario here that fails by making
+    #       the product quietly worse rather than visibly broken.
+    s20_orchestration_off,
+    s24_phantom_marker_is_caught,
+    s21_router_discriminates,
+    s22_mention_overrides_router,
+    s23_two_mentions_two_sections,
+    s25_no_self_check_on_a_socratic_turn,
+    s26_critic_exempts_pedagogy,
+    s27_budget_exhaustion_still_answers,
 ]
 
 

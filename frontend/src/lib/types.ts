@@ -106,6 +106,30 @@ export type Agent = {
   /** Tool round-trips allowed in one turn before the loop is closed and an
    *  answer is forced. A ceiling, not a target: most turns use none. */
   max_tool_steps: number;
+  /**
+   * The teaching personas this agent may route a turn to, or null.
+   *
+   * **Null means classic, and one column carries both the on/off and the
+   * roster.** An agent with no roster behaves exactly as it did before routing
+   * existed: no ROUTE event, no route pill, and the composer's `@mention`
+   * popup never opens. That is why the check everywhere is "is this a non-empty
+   * array" rather than a separate boolean -- two fields could disagree, and the
+   * one that would be wrong is the one nobody renders.
+   *
+   * The values are slugs from `lib/specialists.ts` (`feynman-explainer` and
+   * friends). Typed as plain strings rather than a union for the reason every
+   * other read type here is loose: a sixth specialist must render, not throw.
+   */
+  specialists: string[] | null;
+  /**
+   * Whether a drafted answer is checked against the passages it cited before
+   * it is accepted.
+   *
+   * Orthogonal to routing and stored on the agent rather than the persona,
+   * following `tools_enabled`: a persona is a claim about HOW to answer, not
+   * about which quality controls the operator wants running.
+   */
+  self_check_enabled: boolean;
   document_count: number;
   created_at: string;
 };
@@ -183,6 +207,13 @@ export type AgentPatch = {
   generation_model?: string | null;
   tools_enabled?: boolean;
   max_tool_steps?: number;
+  /** Whether the answer is checked against its own citations before it settles.
+   *
+   *  `specialists` is deliberately absent: a roster arrives from the template at
+   *  creation and there is no UI that edits one, so a field here would be a
+   *  promise this type cannot keep. This one is here because the sheet writes
+   *  it. */
+  self_check_enabled?: boolean;
 };
 
 /**
@@ -412,6 +443,33 @@ export type ChatMessage = {
    *  when it is greater, see `summariseToolActivity`. */
   tool_calls: number;
   /**
+   * Which teaching persona answered this turn, or null on a classic agent.
+   *
+   * **Optional, not merely nullable, and the difference is the replay path.**
+   * These four are reconstructed server-side from the ROUTE and SELF_CHECK
+   * trace payloads with `.get`-and-default, so a turn recorded before routing
+   * existed carries no key at all rather than an explicit null. `?` is what
+   * lets those turns fold through `toMessage` unchanged.
+   */
+  specialist?: string | null;
+  /** Every persona that answered, for a turn with two `@mentions`. One event
+   *  rather than two half-events, so the single-specialist case is a
+   *  one-element list and `specialist` is its first entry. Absent, not `[]`,
+   *  on a classic turn. */
+  specialists?: string[];
+  /** Why that persona: "router" | "mention" | "fallback". A plain string,
+   *  because an unrecognised trigger must render as an unlabelled pill rather
+   *  than crash the thread. */
+  route_trigger?: string | null;
+  /** "grounded" | "ungrounded" | "failed", or absent when the check never ran
+   *  -- which is the common case, since the free pre-check skips a turn whose
+   *  citations are all legal. **Only "ungrounded" is surfaced**, and it is
+   *  surfaced rather than acted on: the draft is kept exactly as the model
+   *  wrote it and the turn carries a caveat, because editing a model's answer
+   *  to add a warning it did not write is the one outcome worse than shipping
+   *  the draft. */
+  self_check_verdict?: string | null;
+  /**
    * **Client-only, and the only field here the server never sends.**
    *
    * True when the user pressed Stop part-way through a streamed answer and the
@@ -460,6 +518,16 @@ export type AskResult = {
   tool_steps: number;
   /** See `tool_calls` on the message type above. */
   tool_calls: number;
+  /** The four routing and self-check fields, identical to `ChatMessage`'s and
+   *  documented there. Optional for the same reason: an agent with no roster
+   *  serialises exactly as it did before this feature, so a classic turn omits
+   *  all four rather than sending nulls. `toMessage` carries them straight
+   *  across, which is what keeps a fresh turn and the same turn after a reload
+   *  from rendering differently. */
+  specialist?: string | null;
+  specialists?: string[];
+  route_trigger?: string | null;
+  self_check_verdict?: string | null;
 };
 
 // --------------------------------------------------------------------------
@@ -537,7 +605,18 @@ export type AskStreamStart = {
 export type AskStreamPhase = {
   type: "phase";
   seq: number;
-  name: "rewrite" | "retrieve" | "rerank" | "generate";
+  /**
+   * **Three names were added here rather than three new frame types, and that
+   * was the cheap half of the decision.** A new frame type costs an event-name
+   * entry, a client type, a `parseFrame` case and a dispatch case -- four edits
+   * to carry the same information a phase name already carries. `route`,
+   * `delegate` and `self_check` are pipeline stages exactly as `retrieve` is.
+   *
+   * `route` runs on every turn of an agent with a roster, concurrently with
+   * `rewrite`. `delegate` repeats once per `@mention`ed persona. `self_check`
+   * appears only when the free pre-check found something to check.
+   */
+  name: "rewrite" | "retrieve" | "rerank" | "generate" | "route" | "delegate" | "self_check";
   status: "started" | "finished";
   /** Null while `started`. */
   duration_ms: number | null;
@@ -556,6 +635,33 @@ export type AskStreamPhase = {
    *  rewriting rather than refusing and the measured bands overlap, so this may
    *  be displayed and must never be branched on. */
   top_score?: number | null;
+  /** `route` and `delegate`. The persona slug -- one of `lib/specialists.ts`'s
+   *  five. Loose, like every other slug on this wire. */
+  specialist?: string;
+  /** `route` only. Every persona chosen, so a two-`@mention` turn is one event
+   *  rather than two half-events. `specialist` is its first entry. */
+  specialists?: string[];
+  /** `route` only: "router" | "mention" | "fallback".
+   *
+   *  Worth rendering rather than collapsing, because the three are different
+   *  claims about who decided. "mention" means the USER chose and the router
+   *  was skipped entirely; crediting a model with a decision the user made is
+   *  the same misreading `tool_call.trigger` exists to prevent. "fallback"
+   *  means routing failed and the turn degraded to the plain persona -- which
+   *  is a working turn, not an error. */
+  trigger?: "router" | "mention" | "fallback";
+  /** `delegate` only, 1-based, with `total`. Two `@mentions` produce two
+   *  sections over one shared ledger, so these are what let the log say
+   *  "(2 of 2)" instead of showing the same line twice. */
+  index?: number;
+  total?: number;
+  /** `self_check` only. Which free pre-check fired: "phantom_marker" (the
+   *  answer cited a passage the ledger does not hold) or "no_citations" (it
+   *  asserted things and anchored none of them). Never a model call -- the
+   *  signal is read off the text against the ledger. */
+  signal?: string;
+  /** `self_check` + `finished`: "grounded" | "ungrounded" | "failed". */
+  verdict?: "grounded" | "ungrounded" | "failed";
 };
 
 /**
@@ -627,18 +733,31 @@ export type AskStreamToken = {
 /**
  * Everything streamed so far is being discarded.
  *
- * At most once per turn, and only in one situation: a loop step produced a
- * complete answer, the gap detector fired on it, a step remained, and the forced
- * search had not already run -- so the loop is about to search and answer again.
+ * At most once per turn per reason, and `reason` says which discard this is.
  * It is a user-visible retraction of text somebody has already read, which is
- * why it is a frame of its own rather than a silent wipe, and `marker` is the
- * phrase that fired so the copy can say what happened.
+ * why it is a frame of its own rather than a silent wipe.
+ *
+ * `"gap_detected"`: a loop step produced a complete answer, the gap detector
+ * fired on it, a step remained, and the forced search had not already run -- so
+ * the loop is about to search and answer again. `marker` is the phrase that
+ * fired, so the copy can say what happened.
+ *
+ * `"self_check"`: the draft cited a passage that does not exist, or anchored
+ * nothing at all, and the critic agreed it was not grounded. **Pattern 04
+ * needed a new `reason`, not a new interaction** -- text has streamed, a check
+ * failed, the draft is thrown away, which is precisely what this frame already
+ * described. `signal` is the pre-check that fired.
  */
 export type AskStreamAnswerReset = {
   type: "answer_reset";
   seq: number;
-  reason: "gap_detected";
+  reason: "gap_detected" | "self_check";
+  /** The refusal phrase, on `"gap_detected"`. Read defensively at the call
+   *  site rather than typed optional: it is not meaningful on a self-check
+   *  discard and nothing may render an empty quotation. */
   marker: string;
+  /** `"self_check"` only: "phantom_marker" | "no_citations". */
+  signal?: string;
 };
 
 /**

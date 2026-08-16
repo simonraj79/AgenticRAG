@@ -73,6 +73,20 @@ PHASE_RETRIEVE = trace.RETRIEVE.lower()
 PHASE_RERANK = trace.RERANK.lower()
 PHASE_GENERATE = trace.GENERATE.lower()
 
+# Three more, and they are PHASE NAMES rather than frame types on purpose.
+# `EVENT_NAMES` is deliberately unchanged by this feature: a new frame type would
+# cost an `EVENT_NAMES` entry, a client type, a `parseFrame` case and a dispatch
+# case -- four edits to carry information the existing `phase` frame already has
+# a slot for. A new phase name costs one type edit and one `phaseLine()` case.
+#
+# The `answer_reset` frame is reused too, with a new `reason` value rather than a
+# new name: "text streamed, then the draft was thrown away" is exactly the
+# interaction the gap trigger already produces and the client already renders.
+# Pattern 04 needs a new reason, not a new interaction.
+PHASE_ROUTE = trace.ROUTE.lower()
+PHASE_DELEGATE = trace.DELEGATE.lower()
+PHASE_SELF_CHECK = trace.SELF_CHECK.lower()
+
 STARTED = "started"
 FINISHED = "finished"
 

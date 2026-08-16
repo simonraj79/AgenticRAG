@@ -50,6 +50,7 @@ import hashlib
 import logging
 import re
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -708,6 +709,8 @@ async def run_agent_loop(
     model: BaseChatModel,
     max_steps: int,
     emit: events.Emit | None = None,
+    follow_up: Sequence[BaseMessage] | None = None,
+    force_first_tool: str | None = None,
 ) -> LoopResult:
     """Generate an answer, letting the model call tools first.
 
@@ -747,16 +750,47 @@ async def run_agent_loop(
     line it was before streaming existed rather than a similar one, which is what
     keeps scenario S1 of `scripts/agentic_check.py` -- and every number already
     recorded in EVAL.md -- true structurally instead of by care.
+
+    **`follow_up` and `force_first_tool` are the REDRAFT seam, and both default
+    to None so nothing changes without them.** The self-check
+    (`app/rag/selfcheck.py`) needs to re-run generation over the ledger it
+    already has, carrying the draft it is rejecting and the critic's complaint
+    about it, and it needs the option of making the model search before it
+    rewrites. That is this loop's job in every particular -- bounded steps,
+    `ToolMessage` observations, a forced final answer, the same streaming -- so
+    the alternative was a second, thinner loop in `pipeline.py` that would drift
+    from this one on the first change to either. Two arguments buy the reuse:
+
+    * `follow_up` is appended after the context turn, so the ledger rebuild at
+      `messages[1]` below still lands on the right message.
+    * `force_first_tool` makes only the FIRST step's runnable name a tool,
+      through the same `bind_tools(tools, tool_choice=...)` the gap trigger uses.
+      A NAMED tool, never `"any"`, which is silently ignored on this route.
+      Subsequent steps go back to `bound`, so the budget is not spent forcing.
+
+    Neither adds a parameter to the request: `tool_choice` is already present on
+    every call this loop makes, so the 14-of-19 routing headroom measured for
+    `google/gemma-4-31b-it` is untouched (T5).
     """
     ctx = ToolContext(agent=agent, ledger=ledger)
     tools = build_tools(ctx)
     tools_by_name = {tool.name: tool for tool in tools}
     bound = model.bind_tools(tools)
+    # Built once, and only when asked for. `bound` itself is the object every
+    # pre-existing caller uses on every step, which is what keeps the default
+    # path the identical call it always was.
+    first_bound = (
+        bound
+        if force_first_tool is None
+        else model.bind_tools(tools, tool_choice=force_first_tool)
+    )
 
     messages: list[BaseMessage] = [
         SystemMessage(content=system_prompt + TOOL_GUIDANCE),
         _human_turn(ledger, question),
     ]
+    if follow_up:
+        messages.extend(follow_up)
 
     invocations: list[ToolInvocation] = []
     generation_ms = 0
@@ -777,8 +811,11 @@ async def run_agent_loop(
 
     for step in range(1, max(max_steps, 0) + 1):
         t0 = time.perf_counter()
+        # `bound` on every step unless a caller forced the first one -- see
+        # `force_first_tool`. With it unset this expression IS `bound`.
+        runnable = first_bound if step == 1 else bound
         if emit is None:
-            ai = await bound.ainvoke(messages)
+            ai = await runnable.ainvoke(messages)
             generation_ms += int((time.perf_counter() - t0) * 1000)
         else:
             # **The per-step call is streamed, not only the two structurally
@@ -794,7 +831,7 @@ async def run_agent_loop(
             await events.phase(
                 emit, events.PHASE_GENERATE, events.STARTED, step=step
             )
-            ai = await _astream_message(bound, messages, emit, stream_tokens=True)
+            ai = await _astream_message(runnable, messages, emit, stream_tokens=True)
             elapsed = int((time.perf_counter() - t0) * 1000)
             generation_ms += elapsed
             # `.text` directly rather than `_message_text`, which logs a warning

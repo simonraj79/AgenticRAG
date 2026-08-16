@@ -249,6 +249,11 @@ export default function AgentDetail({
             <AgentChat
               key={agent.id}
               agentId={agent.id}
+              // Handed down rather than fetched: this component already owns
+              // the agent record, and the composer's `@mention` popup needs the
+              // roster to filter without a round trip. Null on every classic
+              // agent, which switches the popup off entirely.
+              specialists={agent.specialists}
               onCorpusChanged={handleCorpusChanged}
               initialRailTab="threads"
             />

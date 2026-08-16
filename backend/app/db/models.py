@@ -141,10 +141,25 @@ class AgentTemplate(Base):
     persona_role: Mapped[str | None] = mapped_column(String(64))
     pedagogy: Mapped[str | None] = mapped_column(Text)
     icon: Mapped[str | None] = mapped_column(String(16))
-    # explain / practice / reflect / assess / general. Deliberately a plain
-    # String rather than an enum: adding a category must not need a migration,
-    # and an unrecognised value degrades to "ungrouped" rather than to an error.
+    # explain / practice / reflect / assess / general / orchestrate. Deliberately
+    # a plain String rather than an enum: adding a category must not need a
+    # migration, and an unrecognised value degrades to "ungrouped" rather than to
+    # an error.
     category: Mapped[str | None] = mapped_column(String(32))
+
+    # The specialist roster this template seeds, as a list of slugs from
+    # `app/db/specialists.py`. NULL on every template that is not an
+    # orchestrator, which is all of them but `adaptive-tutor`.
+    #
+    # On the TEMPLATE as well as on the agent because `agents.py`'s
+    # TEMPLATE_PARAMETERS copy loop is a field-by-field getattr/setattr (PRD
+    # 4.2): a roster that lived only here would be re-tuned under an existing
+    # agent's feet the moment somebody edited the preset.
+    #
+    # JSONB rather than a join table because a roster is a five-element list of
+    # code-defined constants, not an entity - `specialists.BY_SLUG` is the
+    # authority, and a foreign key would create a second one that could disagree.
+    specialists: Mapped[list[str] | None] = mapped_column(JSONB)
 
     agents: Mapped[list["Agent"]] = relationship(back_populates="template")
 
@@ -207,6 +222,37 @@ class Agent(Base):
     # as `max_rewrites`, one loop further out.
     max_tool_steps: Mapped[int] = mapped_column(
         Integer, default=3, server_default=text("3"), nullable=False
+    )
+
+    # Which teaching specialists may answer a turn for this agent, as slugs from
+    # `app/db/specialists.py`.
+    #
+    # **ONE COLUMN CARRIES BOTH THE ON/OFF AND THE ROSTER, and that is the whole
+    # design.** NULL means "not an orchestrator": no routing call, no prompt
+    # substitution, no ROUTE event, and a turn byte-identical to the one this
+    # agent took yesterday. A separate `orchestrating` boolean would make the
+    # classic path depend on two columns agreeing, and the failure of that
+    # agreement - roster set, flag off - is silent, which is the shape this
+    # project keeps paying for. `specialists.roster(None)` returns an empty
+    # tuple rather than the default five for the same reason.
+    #
+    # No backfill was needed when this landed, unlike `tools_enabled` above:
+    # NULL is already the classic path, so every agent that predates the column
+    # is unchanged by construction rather than by an UPDATE.
+    specialists: Mapped[list[str] | None] = mapped_column(JSONB)
+
+    # Whether a drafted answer is checked against its own ledger before it is
+    # returned. ORTHOGONAL to `specialists`, and on `agents` only - following
+    # `tools_enabled`, which is also absent from `agent_templates`, because a
+    # persona is a claim about HOW to answer rather than about which quality
+    # controls the operator wants running.
+    #
+    # `server_default false` and no backfill, which is the inverse of
+    # `tools_enabled`'s asymmetry and needs no explanation beyond this: false IS
+    # the pre-existing behaviour, so a new agent and an old one both start where
+    # every EVAL.md number was measured.
+    self_check_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=text("false"), nullable=False
     )
 
     # Reserved for later sharing models; only "private" is honoured today.
