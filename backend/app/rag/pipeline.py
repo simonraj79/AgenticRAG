@@ -243,6 +243,14 @@ def get_chat_model(agent: Agent | None = None, **overrides) -> ChatOpenAI:
     protocol carries a system message as its own turn. The old comment warned
     against flattening the grounding rules into the user turn; that flattening is
     now not expressible.
+
+    **`top_k` is still passed here even though the default model no longer wants
+    it, and that is deliberate.** `build_chat_model` decides per family
+    (`_NO_TOP_K_PREFIXES`) and drops it for both Gemini and DeepSeek. Stripping it
+    at this call site instead would put the decision in the caller, where the next
+    caller would have to rediscover it -- the same argument that keeps every other
+    provider quirk inside `llm.py`. An agent pointed back at Gemma still gets its
+    card's full sampling configuration from this one line.
     """
     params = {
         "model": (agent.generation_model if agent and agent.generation_model else settings.generation_model),
@@ -250,6 +258,11 @@ def get_chat_model(agent: Agent | None = None, **overrides) -> ChatOpenAI:
         "top_p": settings.generation_top_p,
         "top_k": settings.generation_top_k,
         "max_tokens": settings.generation_max_tokens,
+        # Off by default, and `settings.generation_reasoning` carries the 2x2 that
+        # says why turning it off does not cost tool use. Models with no reasoning
+        # channel ignore it; it is advertised by every endpoint serving the models
+        # this project uses, so it narrows routing for none of them.
+        "reasoning": settings.generation_reasoning,
     }
     params.update(overrides)
     return build_chat_model(**params)

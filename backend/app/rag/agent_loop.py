@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -649,6 +650,9 @@ async def _astream_message(
     accumulated: AIMessageChunk | None = None
     # None -> undecided, "text" -> streaming, "tool" -> suppressed for this call.
     mode: str | None = None
+    # Every text piece emitted so far, so the markup sentinel can be found across
+    # a chunk boundary. A special token is several characters and arrives split.
+    emitted_text: list[str] = []
 
     async for chunk in runnable.astream(messages):
         accumulated = chunk if accumulated is None else accumulated + chunk
@@ -665,7 +669,9 @@ async def _astream_message(
                 # Role-only or metadata-only opening chunk. Decides nothing.
                 continue
             mode = "text"
-            await emit(events.TOKEN, {"text": piece})
+            if _emit_until_markup(piece, emitted_text):
+                await emit(events.TOKEN, {"text": piece})
+            emitted_text.append(piece)
             continue
 
         if mode == "tool":
@@ -673,7 +679,14 @@ async def _astream_message(
 
         piece = getattr(chunk, "text", "") or ""
         if piece:
-            await emit(events.TOKEN, {"text": piece})
+            # **Stop emitting the moment leaked markup appears, and never resume.**
+            # `_message_text` strips it from the stored answer, but that is too
+            # late for a stream: the tokens are already on the user's screen, and
+            # a correction that arrives after the read is not a correction. See
+            # `_strip_leaked_tool_markup` for the measurement.
+            if _emit_until_markup(piece, emitted_text):
+                await emit(events.TOKEN, {"text": piece})
+            emitted_text.append(piece)
 
     if accumulated is None:
         # A stream that yielded nothing at all. An empty AIMessage keeps every
@@ -751,6 +764,10 @@ async def run_agent_loop(
     steps = 0
     consecutive_failed_steps = 0
     gap_search_used = False
+    # Whether a `search_corpus` call has already run and returned this turn.
+    # Read only by the gap trigger, to answer the question that trigger is
+    # actually asking -- see the comment there.
+    corpus_searched = False
     stopped_reason: str | None = None
 
     # The step whose generation produced the text currently on the client's
@@ -842,8 +859,45 @@ async def run_agent_loop(
             # turn that was going to refuse anyway. That cost buys a strictly
             # better refusal too: "I searched and it is not there" is a stronger
             # claim than "it was not in the chunk I happened to be given".
+            #
+            # -------------------------------------------------------------
+            # `not corpus_searched` -- added 2026-08-16 with the DeepSeek swap
+            # -------------------------------------------------------------
+            # The table above is a fact about Gemma, not about the world, and
+            # `settings.generation_model` now points at
+            # `deepseek/deepseek-v4-flash-0731`, which self-initiated a search in
+            # 6/6 trials on the same probe. So the premise this branch was written
+            # under -- "no tool calls this step" implies "never searched" -- is
+            # false for the default model. Without this gate, the ordinary shape of
+            # a CORRECT refusal on the new model is:
+            #
+            #   step 1  model searches, finds nothing
+            #   step 2  model answers "the corpus does not cover X"
+            #   ...     detect_gap fires, and forces the SAME search again
+            #
+            # That is a guaranteed wasted retrieval on every correct refusal, plus
+            # a nudge inviting the model to re-answer a question it had already
+            # answered correctly.
+            #
+            # Restating it as `loop.md` T2 does makes the gate obvious rather than
+            # clever. The outcome this trigger wants is **"the model searched
+            # before it declined"**, never "an admission appeared in the text". If
+            # a search has already run, the outcome HAS occurred and there is
+            # nothing to trigger. The old condition was a proxy that was exact only
+            # while the model never searched.
+            #
+            # Residual risk, stated rather than hidden: a turn could search for
+            # topic A and then admit a gap about topic B, and this gate suppresses
+            # the second search. Accepted, on the measurement that this model emits
+            # 1.50-2.00 calls per step and covers both halves of a two-part
+            # question in one step (probe 2, 8/8 steps). Revisit it if a scenario
+            # ever shows a real single-topic search followed by a different gap.
+            #
+            # The branch is NOT dead code on the default model: `tools_enabled`
+            # agents whose `generation_model` names Gemma still reach it, which is
+            # exactly the configuration S13 pins.
             gap = detect_gap(_message_text(ai))
-            if gap and not gap_search_used and step < max_steps:
+            if gap and not gap_search_used and not corpus_searched and step < max_steps:
                 gap_search_used = True
                 steps = step
                 ctx.step = step
@@ -990,6 +1044,12 @@ async def run_agent_loop(
             invocations.append(invocation)
             messages.append(message)
             step_ok += 1 if invocation.ok else 0
+            # A search that returned zero results still counts as searched, and
+            # deliberately: `search_corpus` reports `ok=True` with "0 results
+            # above the retrieval floor" precisely because finding nothing is an
+            # answer. That is the case the gap trigger must NOT then re-run.
+            if invocation.tool == SEARCH_CORPUS and invocation.ok:
+                corpus_searched = True
 
         for position, call in enumerate(invalid):
             invocation, message = _invalid_call_message(
@@ -1075,6 +1135,83 @@ async def run_agent_loop(
     )
 
 
+# A model's own tool-call markup, arriving in the CONTENT channel instead of in
+# `tool_calls`, where the user then reads it.
+#
+# Measured 2026-08-16 in the browser, `deepseek/deepseek-v4-flash-0731`, on a turn
+# that spent its whole step budget. When the budget runs out the loop re-invokes
+# with `tool_choice="none"` (see the forced final answer below) -- and this model
+# still WANTED to search, so it expressed that the only way left to it:
+#
+#     Let me try searching for the thermal rejection budget document ...
+#     <|DSML|tool_calls> <|DSML|invoke name="search_corpus"> ...
+#
+# (with U+FF5C FULLWIDTH VERTICAL LINE, not ASCII `|` -- DeepSeek's special-token
+# delimiter, which is exactly why it survives every provider-side parser that
+# looks for the ASCII form.)
+#
+# **Nothing raised. The turn succeeded. The user got machinery in their answer.**
+# `new features/loop.md` T2 in a place nobody had looked: the assertion "did the
+# turn produce an answer" was true, and `agentic_check.py` S6 asserts precisely
+# that -- `bool(out.answer)` -- so the suite stayed green through it.
+#
+# Truncating from the first sentinel rather than excising a matched block is
+# deliberate. The markup is a *continuation* the model never finished, so there is
+# no reliable closing token to match, and anything after the sentinel is machinery
+# by construction. Prose before it is kept, because it usually reads as a normal
+# closing sentence.
+#
+# Scoped to the sentinel rather than to `<` so that a legitimate answer discussing
+# HTML or XML is untouched: U+FF5C does not appear in English prose, and does not
+# appear in this project's corpora at all.
+_LEAKED_TOOL_MARKUP = re.compile("<｜")
+
+
+def _emit_until_markup(piece: str, emitted: list[str]) -> bool:
+    """Whether this streamed piece may still go to the screen.
+
+    False once leaked markup has appeared, and false for every piece after it --
+    a stream cannot be un-read, so the gate latches rather than filtering.
+
+    **Checks the JOIN of everything so far, not the piece.** `<｜` is two
+    characters and a stream splits wherever the provider's buffer happened to
+    end, so a sentinel arriving as `"<"` then `"｜"` is invisible to any per-chunk
+    test. That is the same class of bug as `sentences()` in `refusal.py` refusing
+    to split on a lone newline: generated text is chunked by the transport, and a
+    matcher that assumes the transport's boundaries are meaningful will miss on a
+    schedule nobody can reproduce.
+
+    The cost of the join is one string build per token on a path that is already
+    doing an HTTP write per token.
+
+    Residual, stated rather than hidden: if a chunk ends exactly on the `<`, that
+    one character has already been written and cannot be recalled -- only the
+    `｜` and everything after it is suppressed. Holding a one-character tail back
+    on every token would fix it and would delay every legitimate answer's last
+    character behind the next chunk. A stray `<` is the cheaper defect.
+    """
+    if _LEAKED_TOOL_MARKUP.search("".join(emitted)):
+        return False
+    return not _LEAKED_TOOL_MARKUP.search("".join(emitted) + piece)
+
+
+def _strip_leaked_tool_markup(text: str) -> str:
+    """Text up to the first leaked special-token sentinel.
+
+    Returns the input unchanged when there is none, which is every turn on a
+    model whose markup the provider parses properly -- including every Gemma turn
+    this project ever took.
+    """
+    match = _LEAKED_TOOL_MARKUP.search(text)
+    if match is None:
+        return text
+    log.warning(
+        "Stripped leaked tool-call markup from a model answer (%d chars removed).",
+        len(text) - match.start(),
+    )
+    return text[: match.start()].rstrip()
+
+
 def _message_text(message: AIMessage | BaseMessage) -> str:
     """The answer text, however the provider shaped the content.
 
@@ -1083,8 +1220,12 @@ def _message_text(message: AIMessage | BaseMessage) -> str:
     exists because a provider returning structured content blocks would give an
     empty string here, and an empty answer is worth logging rather than
     returning silently.
+
+    Leaked tool-call markup is stripped here -- see `_strip_leaked_tool_markup`.
+    This is the single place the loop reads text off a message, which is why the
+    strip belongs here rather than at the three call sites.
     """
-    text = getattr(message, "text", "") or ""
+    text = _strip_leaked_tool_markup(getattr(message, "text", "") or "")
     if not text:
         log.warning(
             "Agent loop produced no text; content type was %s",

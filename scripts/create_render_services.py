@@ -33,7 +33,25 @@ BACKEND_NAME = "agentic-rag-api"
 FRONTEND_NAME = "agentic-rag-web"
 
 # Secrets forwarded to the backend. RENDER_API_KEY is intentionally absent.
+#
+# **OPENROUTER_API_KEY was missing from this list until 2026-08-16**, and the way
+# it was missing is the lesson. This script predates the move off the Gemini API;
+# when chat moved to OpenRouter, `llm.py`, `config.py` and `.env.example` were all
+# updated and the PROVISIONING script was not, because nothing re-provisions on a
+# working deployment. The live service has the key -- somebody added it by hand --
+# so the gap was invisible for as long as nobody created a service.
+#
+# It would have surfaced as a fresh backend where generation, the rewrite
+# decision, golden-set drafting and the Ragas judge all fail at once, on a deploy
+# whose build and health check both pass. Every diagnostic would point at the
+# model layer.
+#
+# The general shape, worth checking whenever a provider is added: a required
+# environment variable has THREE homes in this repo -- `config.py`,
+# `.env.example`, and here -- and only the first two are exercised by running the
+# app locally.
 BACKEND_SECRET_KEYS = [
+    "OPENROUTER_API_KEY",
     "GEMINI_API_KEY",
     "PINECONE_API_KEY",
     "PINECONE_INDEX_NAME",
@@ -42,6 +60,17 @@ BACKEND_SECRET_KEYS = [
     "GOOGLE_OAUTH_CLIENT_SECRET",
     "SESSION_SECRET_KEY",
 ]
+
+# Sent as a literal, not read from `.env`, and it must not be omitted.
+#
+# `settings.environment` DEFAULTS to "development", which is one of the three
+# gates on `POST /api/auth/dev-login` -- an authentication bypass. The other two
+# (a loopback client address, and `DEV_AUTH_ENABLED`) would still hold on Render,
+# but leaving the value at its development default means a deployed service is one
+# environment-variable edit away from the bypass being reachable rather than two.
+BACKEND_LITERAL_ENV = {
+    "ENVIRONMENT": "production",
+}
 
 
 def call(method: str, path: str, token: str, body: dict | None = None):
@@ -151,6 +180,7 @@ def main() -> int:
         # INTERNAL url. Same region is what makes that resolve at all.
         env_vars.append({"key": "DATABASE_URL", "value": internal_db})
         env_vars.append({"key": "PYTHON_VERSION", "value": "3.12.10"})
+        env_vars += [{"key": k, "value": v} for k, v in BACKEND_LITERAL_ENV.items()]
 
         payload = {
             "type": "web_service",

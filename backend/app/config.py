@@ -113,7 +113,74 @@ class Settings(BaseSettings):
     openrouter_app_url: str = "https://github.com/simonraj79/ClaudeRAGAgent"
     openrouter_app_title: str = "Groundwork"
 
-    generation_model: str = "google/gemma-4-31b-it"
+    # Generation AND the agent loop AND handouts all read this (via
+    # `agent.generation_model or settings.generation_model`). Moved off
+    # `google/gemma-4-31b-it` on 2026-08-16, and the reason is one measurement
+    # rather than a preference.
+    #
+    # `new features/loop.md` T1 is built on Gemma refusing to INITIATE a search:
+    # 0 tool calls under `tool_choice="auto"`, 0 under a bare prompt, 0 under
+    # "You MUST call search_corpus", 0 under `tool_choice="any"`. The same probe
+    # against this model, same one-chunk context, same two-part question, same
+    # refusal-first persona prompt:
+    #
+    #   tool_choice="auto", full grounding prompt   ->  5/5 self-initiated
+    #   tool_choice="any"                           ->  honoured (Gemma ignored it)
+    #   with_structured_output(function_calling)    ->  3/3 parsed
+    #   astream with search_corpus bound            ->  148 chunks, first at 0.55s
+    #
+    # Generation latency p50 6.05s against Gemma's measured 13.2s, on a route
+    # where CLAUDE.md puts generation at 89 percent of the turn.
+    #
+    # **T1 is now MODEL-DEPENDENT, not repealed.** `agents.generation_model`
+    # overrides this per agent, so an operator can point one back at Gemma and the
+    # gap trigger becomes load-bearing again. That is why none of the trigger
+    # machinery was deleted -- see `app/rag/agent_loop.py`.
+    generation_model: str = "deepseek/deepseek-v4-flash-0731"
+
+    # Thinking OFF for generation, and this default is load-bearing in BOTH
+    # directions -- read the second half before changing it.
+    #
+    # Off, because it is expensive and buys nothing here. This model reports
+    # `reasoning.default_enabled = true, default_effort = "high"`, and measured
+    # 2026-08-16 that consumed 60-79 percent of billed output tokens (out
+    # [118, 296, 371], reasoning [70, 198, 293]) at the completion rate. Grounded
+    # generation is not a problem that rewards a chain of thought: the material is
+    # already in the prompt, and the task is to render and cite it. This is the
+    # same argument `ragas_judge_reasoning_effort` makes for the judge.
+    #
+    # **The half that will bite someone later.** Turning thinking off does NOT cost
+    # tool use -- but only because `TOOL_GUIDANCE`'s final paragraph is still
+    # there. Measured 2026-08-16, 6 trials per cell, "did it search unprompted":
+    #
+    #                        guidance paragraph      no guidance paragraph
+    #   reasoning on              6/6                      6/6
+    #   reasoning off             6/6                      2/6
+    #
+    # The paragraph and the thinking are REDUNDANT WITH EACH OTHER, and either one
+    # alone holds the behaviour. So the Gemma-era paragraph is not dead weight to
+    # be tidied away now that the model is better -- it is what makes this setting
+    # affordable. Delete both and tool use silently drops to a third, with nothing
+    # raising: `new features/loop.md` T2 exactly.
+    #
+    # Off also measurably reduced redundant work: 2.00 -> 1.50 search calls per
+    # step, and p50 3.27s -> 1.07s on the bound call.
+    #
+    # **It is one setting because the measurement refused to justify two.** The
+    # expectation going in was that handouts would want thinking ON -- writing
+    # matplotlib and python-pptx source is the task class reasoning is supposed to
+    # help, and it runs in a background job where latency is not user-facing. The
+    # head-to-head says otherwise. 6 chart recipes per arm, scoring the T2 outcome
+    # (`chart.png` present on the FIRST attempt, never "nothing raised"):
+    #
+    #   reasoning on   ->  5/6 first try,  p50 30.4s
+    #   reasoning off  ->  6/6 first try,  p50  8.1s
+    #
+    # Off was better on both axes and 3.7x faster, so `handouts/jobs._model_for`
+    # reads this same setting rather than a second one. A separate knob would have
+    # to be justified by a measurement that says the two paths want different
+    # values, and no such measurement exists.
+    generation_reasoning: bool = False
 
     # Stage 2's rewrite decision must come back as a typed object. The PRD hedged
     # this to Gemini Flash because structured output is undocumented for Gemma,
@@ -142,6 +209,28 @@ class Settings(BaseSettings):
     # `function_calling` IS two such parameters (`tools`, `tool_choice`). See
     # `openrouter_require_parameters` above -- structured output is now correct
     # because of that flag, not only because of this method name.
+    #
+    # **DELIBERATELY NOT MOVED WITH `generation_model` ON 2026-08-16.** This is
+    # now the only Gemma call site left, which is exactly the sort of asymmetry a
+    # later reader tidies away, so the measurement that produced it is recorded
+    # here. Head-to-head on what this call site actually needs -- does the typed
+    # object come back, and does it rewrite the right questions -- 9 trials each,
+    # two coreference cases plus one already-standalone question that must be
+    # left alone:
+    #
+    #   google/gemma-4-31b-it            parsed 9/9   correct 9/9   p50 1.02s
+    #   deepseek, reasoning off          parsed 9/9   correct 9/9   p50 1.58s
+    #   deepseek, reasoning default      parsed 9/9   correct 8/9   p50 0.85s
+    #
+    # Gemma is not worse at this, and it is faster than the arm that matched it.
+    # CLAUDE.md measures a follow-up already paying 3.8s for contextualisation
+    # before the question is embedded, so 0.5s of added latency on every
+    # conversational turn is a real cost bought for nothing but tidiness.
+    #
+    # A regression here would also be INVISIBLE: `contextualize_question` swallows
+    # every exception and degrades to Stage 1, so a rewriter that stopped working
+    # would surface only as quietly worse retrieval. Do not move this without
+    # re-running that table.
     decision_model: str = "google/gemma-4-31b-it"
 
     # The model that DRAFTS the golden set (§3.6.1). Split out of

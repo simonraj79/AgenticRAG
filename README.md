@@ -41,7 +41,8 @@ claim.
 | Database | Render Postgres 18 |
 | Vector DB | Pinecone serverless, 768d cosine |
 | Embeddings | `gemini-embedding-2` @ 768 dims |
-| Generation | `google/gemma-4-31b-it` via OpenRouter |
+| Generation | `deepseek/deepseek-v4-flash-0731` via OpenRouter |
+| Question rewrite | `google/gemma-4-31b-it` via OpenRouter |
 | Agent tools | `search_corpus` · `run_python` (sandboxed) |
 | Reranker | Cohere `rerank-v3.5` |
 | Evaluation | Ragas, judged by `google/gemini-3.7-flash` |

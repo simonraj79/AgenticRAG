@@ -469,7 +469,32 @@ async def s5_self_correction(db, agent, user) -> Outcome:
 
 
 async def s6_step_budget(db, agent, user) -> Outcome:
-    """max_tool_steps=1 on a two-search question still returns an answer."""
+    """max_tool_steps=1 on a two-search question still returns a CLEAN answer.
+
+    **This scenario shipped a user-visible bug while green, and the second
+    assertion is the fix.** It asserted `bool(out.answer)` -- did a turn come
+    back -- which is the error-shaped test `new features/loop.md` T2 exists to
+    forbid, and it is exactly the shape that misses.
+
+    What it missed, found in a browser on 2026-08-16: when the budget runs out
+    the loop re-invokes with `tool_choice="none"`, and
+    `deepseek/deepseek-v4-flash-0731` still wanted to search, so it emitted its
+    own tool-call syntax into the CONTENT channel --
+
+        Let me try searching for the thermal rejection budget document
+        <|DSML|tool_calls> <|DSML|invoke name="search_corpus"> ...
+
+    -- and the user read it. Nothing raised, `out.answer` was non-empty and long,
+    and this scenario stayed green through it. This is the ONLY scenario that
+    exercises the forced-final-answer path, so it is the only one that could have
+    caught it.
+
+    The assertion is now "is the answer free of machinery", which is a statement
+    about the OUTCOME. `_LEAKED_TOOL_MARKUP` is imported rather than retyped, so a
+    change to the sentinel cannot leave this scenario testing the old one.
+    """
+    from app.rag.agent_loop import _LEAKED_TOOL_MARKUP
+
     agent.max_tool_steps = 1
     await db.commit()
     try:
@@ -480,9 +505,12 @@ async def s6_step_budget(db, agent, user) -> Outcome:
         )
         gen = payloads_of(events, "GENERATE")
         stopped = gen[0].get("stopped_reason") if gen else None
+        leaked = _LEAKED_TOOL_MARKUP.search(out.answer or "")
+        ok = bool(out.answer) and leaked is None
         return Outcome(
-            "S6 step budget forces an answer", bool(out.answer),
-            f"stopped_reason={stopped} answer_chars={len(out.answer)}",
+            "S6 step budget forces a clean answer", ok,
+            f"stopped_reason={stopped} answer_chars={len(out.answer)} "
+            f"leaked_markup={'YES at char ' + str(leaked.start()) if leaked else 'no'}",
         )
     finally:
         agent.max_tool_steps = 3
@@ -543,6 +571,197 @@ async def s10_citation_integrity(db, agent, user) -> Outcome:
     return Outcome(
         "S10 citation integrity", ok,
         f"markers={markers} unresolved={unresolved}",
+    )
+
+
+# --------------------------------------------------------------------------
+# S13-S16 -- the DeepSeek swap. See `new features/09-deepseek-agentic.md`.
+#
+# The swap inverted this suite's founding assumption. S3 and the gap trigger were
+# both built on `new features/loop.md` T1: gemma-4-31b-it would not initiate a
+# search on its own judgement, 0 tool calls in every prompt configuration tried.
+# `deepseek/deepseek-v4-flash-0731` self-initiates 6/6 on the same probe.
+#
+# That does not retire the trigger, it makes it CONDITIONAL, and conditional
+# machinery is what rots. These four pin both halves: the trigger still works
+# where it is still needed (S13), it no longer fires where it would now be waste
+# (S14), the model really is choosing to search (S15), and the two redundant
+# mechanisms holding S15 up have not BOTH been removed (S16).
+# --------------------------------------------------------------------------
+
+# The generation model the gap trigger was designed against. S13 owns this the
+# way S1 owns `tools_enabled` -- the scenario must not depend on the fixture
+# happening to be configured hostilely.
+GAP_TRIGGER_MODEL = "google/gemma-4-31b-it"
+
+
+def _searches(events) -> list[dict]:
+    return [p for p in payloads_of(events, "TOOL_CALL") if p.get("tool") == "search_corpus"]
+
+
+def _gap_forced(events) -> list[dict]:
+    """Searches the GAP TRIGGER forced, not ones the model chose.
+
+    `agent_loop` stamps `trigger="gap_detected"` into the invocation args, and
+    `ask.run_turn` records `args` verbatim, so the durable trace distinguishes the
+    two. A model-chosen call has no `trigger` key at all.
+    """
+    return [p for p in _searches(events) if (p.get("args") or {}).get("trigger") == "gap_detected"]
+
+
+async def s13_gap_trigger_still_fires(db, agent, user) -> Outcome:
+    """The gap trigger must still work on a model that does not self-initiate.
+
+    **This is the scenario that stops the trigger becoming dead code.** With the
+    default model searching on its own, every other scenario here would stay green
+    if the whole gap branch were deleted -- so its only remaining proof is a model
+    that behaves the way gemma does, which `agents.generation_model` can still
+    select and which CLAUDE.md documents an operator being able to type in.
+
+    Owns TWO preconditions, because either one alone makes the test vacuous:
+    `generation_model`, so the model genuinely will not search unprompted; and
+    `retrieve_k=1`, per `loop.md` section 5 -- on a seven-chunk corpus a wider
+    retrieval answers both halves and there is no gap to detect. Both restored.
+
+    Read as `loop.md` T2: the assertion is "did a gap-triggered search occur",
+    never "did the turn succeed". A turn that answers half and stops succeeds.
+    """
+    prior_model = agent.generation_model
+    prior_k, prior_n = agent.retrieve_k, agent.rerank_top_n
+    agent.generation_model = GAP_TRIGGER_MODEL
+    agent.retrieve_k, agent.rerank_top_n = 1, 1
+    await db.commit()
+    try:
+        out, events, _ = await ask(
+            db, agent, user,
+            "How many battery modules does the platform carry, and separately, "
+            "how much onboard storage do the science instruments have?",
+        )
+    finally:
+        agent.generation_model = prior_model
+        agent.retrieve_k, agent.rerank_top_n = prior_k, prior_n
+        await db.commit()
+    forced = _gap_forced(events)
+    total = _searches(events)
+    # Either the trigger fired, or the model searched by itself -- on a model
+    # measured at 0/N that second branch would be news, so it is reported rather
+    # than failed. What must NOT happen is neither.
+    ok = bool(total)
+    return Outcome(
+        "S13 gap trigger still fires", ok,
+        f"model={GAP_TRIGGER_MODEL} searches={len(total)} gap_forced={len(forced)}"
+        + ("" if forced else "  (no gap-forced search: the model self-initiated)"),
+    )
+
+
+async def s14_no_redundant_gap_search(db, agent, user) -> Outcome:
+    """A correct refusal that already searched must not be made to search again.
+
+    The saving the `not corpus_searched` gate buys. Before it, the ordinary shape
+    of a correct refusal on a self-initiating model was: search, find nothing, say
+    so -- and then have `detect_gap` force the SAME search a second time, on every
+    single refusal.
+
+    The probe is S7's, chosen the way CLAUDE.md says a refusal probe should be:
+    both fixtures RAISE the modulation scheme and say it is held elsewhere, so the
+    model is tempted to complete it and a search genuinely returns nothing useful.
+
+    Necessity: asserting only "no gap-forced search" would pass on a turn that
+    never searched at all, which is the failure this scenario is supposed to
+    detect the absence of. So it requires a real search first.
+    """
+    out, events, _ = await ask(
+        db, agent, user,
+        "What modulation and coding scheme does the Ka-band downlink use?",
+    )
+    total = _searches(events)
+    forced = _gap_forced(events)
+    ok = bool(total) and not forced
+    return Outcome(
+        "S14 no redundant gap search", ok,
+        f"searches={len(total)} gap_forced={len(forced)} refused={out.refused} "
+        f"answer={preview(out.answer, 90)}",
+    )
+
+
+async def s15_model_initiates_search(db, agent, user) -> Outcome:
+    """The premise of the swap: the model chooses to search, unprompted.
+
+    `loop.md` T1 says to assume it will not, and that assumption is why the gap
+    trigger exists. This asserts the measured inversion on the shipped
+    configuration -- a search whose `trigger` is absent, i.e. one the MODEL
+    decided on rather than one the loop forced.
+
+    Two trials, pass on either. Not superstition: measured 2026-08-16 the shipped
+    configuration self-initiates 6/6, while the configuration this suite is meant
+    to catch -- reasoning off AND the guidance paragraph gone -- scores 2/6. Two
+    trials separate those two populations (about 89 percent of broken runs go red)
+    without spending four full turns on a property S16 also pins deterministically.
+
+    Owns `retrieve_k`, like S3 and S13: the question must be unanswerable from the
+    first retrieval or choosing not to search is the correct behaviour.
+    """
+    prior_k, prior_n = agent.retrieve_k, agent.rerank_top_n
+    agent.retrieve_k, agent.rerank_top_n = 1, 1
+    await db.commit()
+    try:
+        seen = []
+        for _ in range(2):
+            _out, events, _convo = await ask(
+                db, agent, user,
+                "How many battery modules does the platform carry, and separately, "
+                "how much onboard storage do the science instruments have?",
+            )
+            chosen = [p for p in _searches(events) if not (p.get("args") or {}).get("trigger")]
+            seen.append(len(chosen))
+            if chosen:
+                break
+    finally:
+        agent.retrieve_k, agent.rerank_top_n = prior_k, prior_n
+        await db.commit()
+    ok = any(seen)
+    return Outcome(
+        "S15 model initiates search", ok,
+        f"model={agent.generation_model or settings.generation_model} "
+        f"self_initiated_per_trial={seen}",
+    )
+
+
+async def s16_tool_use_has_a_belt_and_braces(db, agent, user) -> Outcome:
+    """At least one of the two mechanisms that produce tool use must survive.
+
+    No model call, no database read -- this is a structural assertion, and it is
+    deliberately the only one of the four that cannot be flaky.
+
+    Measured 2026-08-16, 6 trials per cell, "did it search unprompted":
+
+                             guidance paragraph      no guidance paragraph
+        reasoning on              6/6                      6/6
+        reasoning off             6/6                      2/6
+
+    The two are REDUNDANT WITH EACH OTHER. Either alone holds the behaviour, which
+    is what makes `generation_reasoning=False` affordable -- and it is also what
+    makes this dangerous, because it means the guidance paragraph now looks like
+    dead weight from a superseded model. Deleting it costs nothing measurable
+    until reasoning is also off, which it already is. Nothing raises; tool use
+    drops to a third; S15 goes intermittent and gets marked flaky.
+
+    So this asserts the DISJUNCTION rather than either half, because either half
+    alone is a legitimate configuration and only losing both is the bug. That is
+    `loop.md` T2 aimed at a config invariant: the failure has no error to test for,
+    so the test has to name the outcome.
+    """
+    from app.rag.agent_loop import TOOL_GUIDANCE
+
+    # The sequencing sentence, not the whole paragraph -- reworded prose should
+    # not fail this, only losing the instruction should.
+    sequencing = "after searching" in TOOL_GUIDANCE.lower()
+    reasoning_on = bool(settings.generation_reasoning)
+    ok = sequencing or reasoning_on
+    return Outcome(
+        "S16 tool use has a belt and braces", ok,
+        f"guidance_sequencing={sequencing} generation_reasoning={reasoning_on}"
+        + ("" if ok else "  BOTH REMOVED -- tool use measured 2/6 in this state"),
     )
 
 
@@ -699,6 +918,14 @@ SCENARIOS = [
     s7_refusal_survives,
     s9_timing_adds_up,
     s10_citation_integrity,
+    # S16 first of the swap group: it is the only structural one, costs no model
+    # call, and names the configuration the three behavioural ones depend on. A
+    # red S16 explains a red S15; the reverse ordering makes the reader debug the
+    # model instead of the config.
+    s16_tool_use_has_a_belt_and_braces,
+    s15_model_initiates_search,
+    s14_no_redundant_gap_search,
+    s13_gap_trigger_still_fires,
 ]
 
 

@@ -1293,6 +1293,7 @@ function toMessage(question: string, result: AskResult): ChatMessage {
     // agent with tools off, so there is nothing to substitute for.
     handouts: result.handouts,
     tool_steps: result.tool_steps,
+    tool_calls: result.tool_calls,
   };
 }
 
@@ -1330,6 +1331,11 @@ function stoppedMessage(question: string, turn: TurnFacts): ChatMessage {
     // searched -- which is often the most interesting thing about the half of
     // it that was read.
     tool_steps: turn.toolSteps,
+    // Zero, and honestly so: an aborted turn has no GENERATE payload, which is
+    // where the call count is recorded. `summariseToolActivity` takes the larger
+    // of the two, so the chip falls back to the step count rather than claiming
+    // the turn searched nothing.
+    tool_calls: 0,
     stopped: true,
   };
 }

@@ -88,22 +88,39 @@ _LEGACY_SLUGS = {
     "gemini-flash-lite-latest": "google/gemini-3.7-flash-lite",
 }
 
-# Model families whose OpenRouter parameter list contains no `top_k`.
+# Model families that must not be sent `top_k`.
 #
-# `top_k` is a Gemma-card parameter that every caller in this project inherited
-# from the generation defaults, including callers that may be pointed at a
-# non-Gemma model. Sending it to one of these under `require_parameters` leaves
-# NO eligible provider and the call dies as a 404 that names neither the model
-# nor the parameter -- which is how the golden-set generator broke the first time
-# it was pointed at Gemini 3.7 Flash.
+# ONE RULE, TWO DIFFERENT CONSEQUENCES, and the second is the reason this comment
+# is longer than the tuple. The rule: `top_k` is a Gemma-card parameter that every
+# caller in this project inherited from the generation defaults, including callers
+# pointed at a non-Gemma model. It matters here only because Gemma's card gives it
+# as part of ONE standardized sampling config (see `get_chat_model`), and a model
+# outside that family has no such config to honour. So dropping it is right rather
+# than merely convenient.
 #
-# Dropping it is right rather than merely convenient: `top_k` matters here
-# because Gemma's card gives it as part of one standardized sampling config
-# (see `get_chat_model`), and a model outside that family has no such config to
-# honour. The authority is `list-model-endpoints`, not this tuple -- the
-# per-model `supported_parameters` is a UNION across providers and will claim
-# support the endpoint you land on does not have.
-_NO_TOP_K_PREFIXES = ("google/gemini-",)
+# `google/gemini-` -- FAILS LOUDLY. No Gemini endpoint advertises `top_k`, so
+# under `require_parameters` there is no eligible provider and the call dies as a
+# 404 naming neither the model nor the parameter. That is how the golden-set
+# generator broke the first time it was pointed at Gemini 3.7 Flash.
+#
+# `deepseek/` -- FAILS SILENTLY, WHICH IS WORSE. Measured 2026-08-16 across the 28
+# endpoints serving `deepseek/deepseek-v4-flash-0731`: 18 of them advertise
+# `top_k`, so the request routes and returns 200. Nothing errors. What it costs is
+# invisible -- the ten endpoints WITHOUT `top_k` include DeepSeek's own
+# first-party one, which is the only endpoint on the model with
+# `supports_implicit_caching: true` and a cache-read price of $0.0028/M against
+# $0.028/M or worse everywhere else. Carrying a parameter the model has no card
+# for therefore routes around a 10x cheaper cache, at 100% uptime and 640ms p50,
+# and reports success while doing it.
+#
+# The generalisable half: an unadvertised parameter does not only 404. Under
+# `require_parameters` it also NARROWS routing, and a narrowed route is a silent
+# cost rather than an error. Check `list-model-endpoints` before adding a family
+# here, not after a 404 -- and check what the excluded endpoints were, not only
+# whether any remain. The authority is that call, never this tuple: the per-model
+# `supported_parameters` is a UNION across providers and will claim support the
+# endpoint you land on does not have.
+_NO_TOP_K_PREFIXES = ("google/gemini-", "deepseek/")
 
 
 def openrouter_slug(model: str) -> str:
@@ -139,6 +156,7 @@ def build_chat_model(
     top_k: int | None = None,
     max_tokens: int | None = None,
     reasoning_effort: str | None = None,
+    reasoning: bool | None = None,
     **overrides: Any,
 ) -> ChatOpenAI:
     """One chat model, wired to OpenRouter.
@@ -149,12 +167,34 @@ def build_chat_model(
     down. Sending it unconditionally would add an unsupported parameter to every
     Gemma request, which under `require_parameters` above would start excluding
     providers for no reason.
+
+    `reasoning` is the on/off switch, and it exists because a model arrived whose
+    default is ON. `deepseek/deepseek-v4-flash-0731` reports
+    `reasoning.mandatory=false, default_enabled=true, default_effort="high"`, so
+    leaving it alone is a decision -- and an expensive one. Measured 2026-08-16,
+    three turns on a one-chunk corpus: output tokens [118, 296, 371] of which
+    reasoning [70, 198, 293], i.e. **60-79 percent of billed output was thinking**,
+    charged at the completion rate. Passing False zeroed it ([0, 0, 0]).
+
+    Two properties make this safe to send unconditionally where it is wanted.
+    `reasoning` is advertised by all 28 endpoints serving that model, so unlike
+    `top_k` it narrows routing not at all. And it is `None` by default here, so
+    every existing caller's request is byte-identical to before this parameter
+    existed.
+
+    **What it must not be used to do:** see `settings.generation_reasoning` for
+    the measurement that turning it off on the chat path is only safe while
+    `TOOL_GUIDANCE`'s final paragraph survives. The two are redundant with each
+    other and removing both loses tool use entirely.
     """
     slug = openrouter_slug(model)
     extra_body: dict[str, Any] = {}
 
     if settings.openrouter_require_parameters:
         extra_body["provider"] = {"require_parameters": True}
+
+    if reasoning is not None:
+        extra_body["reasoning"] = {"enabled": reasoning}
 
     if top_k is not None:
         if slug.startswith(_NO_TOP_K_PREFIXES):

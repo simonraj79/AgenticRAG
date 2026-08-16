@@ -371,10 +371,16 @@ export type ChatMessage = {
    * and empty for every turn recorded before handouts existed.
    */
   handouts: Handout[];
-  /** How many tool round-trips the answer took; 0 when the model answered
+  /** How many tool ROUNDS the answer took; 0 when the model answered
    *  without calling one, which is the common case. The count is a chip on the
    *  turn -- the TOOL_CALL / TOOL_RESULT trace events hold the detail. */
   tool_steps: number;
+  /** How many tool CALLS those rounds contained. Equal to `tool_steps` on a
+   *  model that emits one call per round, and roughly double it on the current
+   *  generation model, which emits two `search_corpus` calls in a single round.
+   *  0 on every turn recorded before the two numbers diverged -- prefer it only
+   *  when it is greater, see `summariseToolActivity`. */
+  tool_calls: number;
   /**
    * **Client-only, and the only field here the server never sends.**
    *
@@ -419,6 +425,8 @@ export type AskResult = {
    */
   handouts: Handout[];
   tool_steps: number;
+  /** See `tool_calls` on the message type above. */
+  tool_calls: number;
 };
 
 // --------------------------------------------------------------------------
