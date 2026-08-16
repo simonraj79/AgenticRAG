@@ -84,6 +84,13 @@ TEMPLATE_PARAMETERS: tuple[str, ...] = (
     "pedagogy",
     "icon",
     "category",
+    # The specialist roster, for the same PRD 4.2 reason as everything above it:
+    # an orchestrator whose roster were read back through `template_id` would
+    # gain or lose a teaching voice the moment somebody edited the preset, and
+    # the trace of a turn taken last week would name a specialist the agent can
+    # no longer reach. NULL on every template but `adaptive-tutor`, and a NULL
+    # copied onto the agent is exactly what "not an orchestrator" means.
+    "specialists",
 )
 
 # Postgres' SQLSTATE for a unique violation. Used to make sure a 409 is only
@@ -115,12 +122,20 @@ _UNIQUE_VIOLATION = "23505"
 # That is not redundancy: the declaration list is what the seed used, and the
 # category rank is what keeps the picker sensible when the next persona is added
 # to the middle of it.
+#
+# `orchestrate` is last, and its position follows from what the categories mean
+# rather than from when it was added. The five before it each name ONE teaching
+# technique; an orchestrator is the thing that chooses among them, so it only
+# reads sensibly once the reader has seen what there is to choose between. It
+# still sorts above the blank canvas, which key 1 pins to the bottom whatever
+# category it carries.
 _CATEGORY_ORDER: tuple[str, ...] = (
     "general",
     "explain",
     "practice",
     "assess",
     "reflect",
+    "orchestrate",
 )
 
 # `seed.py` owns this slug and keeps its own copy private. Duplicated rather than
@@ -226,6 +241,12 @@ class TemplateOut(BaseModel):
     score_threshold: float
     max_rewrites: int
     system_prompt: str | None = None
+    # Null on everything but `adaptive-tutor`, and the picker has to render that:
+    # a roster is what makes the card say "answers in whichever voice fits",
+    # which is the entire difference between this preset and the five it routes
+    # to. Slugs rather than labels -- `app/db/specialists.py` owns the display
+    # names, and shipping them here would put two copies of a label on the wire.
+    specialists: list[str] | None = None
 
 
 class AgentOut(BaseModel):
@@ -281,6 +302,15 @@ class AgentOut(BaseModel):
     # is the only one that is not a column.
     tools_enabled: bool
     max_tool_steps: int
+    # The roster, and therefore the on/off. Null means this agent is not an
+    # orchestrator -- the composer's `@mention` popup reads exactly this field to
+    # decide whether it exists at all, so there is no second endpoint and no
+    # second flag that could disagree with it.
+    specialists: list[str] | None = None
+    # NOT NULL on the column, so no default here for the same reason
+    # `tools_enabled` has none: an agent that somehow reached this serialiser
+    # without it should fail loudly rather than be reported as unchecked.
+    self_check_enabled: bool
     # Not a column on `agents`: an aggregate over `documents`, supplied by the
     # route. It carries a default so `model_validate` against the ORM object
     # succeeds, and `from_agent` is the only sanctioned way to fill it -- a
@@ -383,6 +413,37 @@ class AgentTunables(BaseModel):
     # means "bind the tools, take no round-trip" -- a useful way to measure what
     # the tool descriptions alone cost. 8 is a ceiling no config can spiral past.
     max_tool_steps: int | None = Field(default=None, ge=0, le=8)
+
+    # --- The orchestrator ---------------------------------------------------
+    #
+    # Which teaching specialists may answer this agent's turns. **One field
+    # carries both the switch and the roster**, so there is no "orchestrating"
+    # boolean that could disagree with a populated list -- see
+    # `models.Agent.specialists`.
+    #
+    # `list[str]` rather than `list[Literal[...]]`, and the membership check
+    # lives in `_reject_unknown_specialists` instead. Same reasoning as
+    # `GenerationModel` above: the 422 a Literal produces names a type and a
+    # position (`body.specialists.2`), while a hand-written one can name the slug
+    # and list what was expected -- and the roster is a code constant an operator
+    # reading the message can act on immediately.
+    #
+    # Null clears it back to "not an orchestrator", which is meaningful rather
+    # than a 422 because the column is nullable; `_NOT_NULL_FIELDS` derives that
+    # from the table, so it needs no special case. An EMPTY LIST is refused, and
+    # that is the one place this field is stricter than the column: `[]` and
+    # `null` would behave identically at runtime (`roster([])` is empty either
+    # way), and two spellings of one state is how a UI comes to save one and read
+    # the other.
+    specialists: list[str] | None = None
+
+    # Whether a drafted answer is checked against its own ledger before being
+    # returned. Orthogonal to `specialists`: a plain persona agent may want it,
+    # and an orchestrator may not. Off by default on the column, so the classic
+    # turn is unchanged and the check is something an operator opts into after
+    # reading what it costs (one `decision_model` call, and only on the turns
+    # where the free pre-check fires).
+    self_check_enabled: bool | None = None
 
 
 # Derived from the base class, never typed out. `create_agent` uses this to
@@ -638,6 +699,55 @@ def _reject_unroutable_model(model: str | None) -> None:
     )
 
 
+def _reject_unknown_specialists(value: list[str] | None) -> None:
+    """422 unless every slug is one the code can resolve. Create and update share it.
+
+    **The same "move the failure to save time" argument as
+    `_reject_unroutable_model`, with a worse failure at the far end.** An
+    unresolvable slug does not raise anywhere: `specialists.roster()` filters
+    the registry by membership, so an unknown entry is simply dropped. A roster
+    of five typos therefore yields an EMPTY roster, which
+    `pipeline._orchestrating` cannot distinguish from "not an orchestrator" --
+    the agent silently stops routing, the `@mention` popup silently offers
+    nothing, and nothing in the trace says why. Refusing it here is the only
+    place a human is present to read the message.
+
+    Null is allowed and is not a mistake: it means "not an orchestrator", which
+    is what almost every agent is.
+
+    An EMPTY LIST is refused, deliberately. It is behaviourally identical to
+    null, and two spellings of one state is how a client comes to write one and
+    branch on the other. The message says which to send.
+    """
+    if value is None:
+        return
+
+    # The full registry, not the agent's current roster: an operator may add a
+    # specialist that was not previously enabled, and the only rule is that it
+    # must be one the code has a prompt for.
+    from app.db.specialists import DEFAULT_ROSTER
+
+    if not value:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                "specialists cannot be an empty list. Send null to make this a "
+                "plain agent, or name at least one specialist."
+            ),
+        )
+
+    unknown = [slug for slug in value if slug not in DEFAULT_ROSTER]
+    if unknown:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                f"Unknown specialist{'s' if len(unknown) > 1 else ''}: "
+                f"{', '.join(repr(slug) for slug in unknown)}. "
+                f"Choose from: {', '.join(DEFAULT_ROSTER)}."
+            ),
+        )
+
+
 async def _document_count(db: AsyncSession, agent_id: uuid.UUID) -> int:
     """How many documents this agent holds. One row, one aggregate."""
     total = await db.scalar(
@@ -838,6 +948,11 @@ async def create_agent(
     # column has no default to fall back to, so an unset value is genuinely None
     # and None is the legal "use the server default".
     _reject_unroutable_model(agent.generation_model)
+    # Read off the instance for the same reason, and validated even when it came
+    # from the template rather than the request: a template row carrying a slug
+    # this deploy no longer has a prompt for would otherwise create an agent that
+    # silently stops routing.
+    _reject_unknown_specialists(agent.specialists)
 
     db.add(agent)
     try:
@@ -999,6 +1114,11 @@ async def update_agent(
     # request that fixes it would be refused for the state it is fixing.
     if "generation_model" in fields:
         _reject_unroutable_model(fields["generation_model"])
+    # Sent-only, same argument: an agent already holding an unresolvable roster
+    # must still be editable, and the request that fixes it must not be refused
+    # for the state it is fixing.
+    if "specialists" in fields:
+        _reject_unknown_specialists(fields["specialists"])
 
     for key, value in fields.items():
         setattr(agent, key, value)

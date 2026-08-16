@@ -30,6 +30,7 @@ import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { ChatMessage } from "../lib/types.ts";
 import { formatDuration, formatTimestamp } from "../lib/format.ts";
+import { resolveSpecialist } from "../lib/specialists.ts";
 // The component map lives in `lib/markdown.tsx` rather than here, because the
 // handouts panel renders a study sheet's preview through the same pipeline and
 // a copied seventy-line map is how the answer and the handout end up with
@@ -93,6 +94,10 @@ export default function Message({ message }: { message: ChatMessage }) {
     message.handouts.length,
     message.tool_calls,
   );
+  /** The personas that answered, in the order the server routed them. Empty on
+   *  a classic agent and on every turn recorded before routing existed, which
+   *  is what makes the pill render nothing rather than a hole. */
+  const routed = routedSlugs(message);
 
   return (
     <li data-testid="chat-message" className="space-y-2.5">
@@ -199,6 +204,64 @@ export default function Message({ message }: { message: ChatMessage }) {
             </button>
           )}
 
+          {routed.map((slug) => {
+            /*
+              Which teaching approach answered, beside the cyan chip that says
+              what the turn DID. Violet rather than cyan on purpose: a tool call
+              is the machine going and fetching something, a route is a choice
+              about voice, and two summaries in one hue would read as one fact.
+
+              A slug this client has never heard of still renders -- as the slug,
+              with a neutral glyph -- because the roster is a database column and
+              a sixth persona must not leave a hole in the chip row. That is the
+              same rule `CategoryBadge` follows for an unrecognised category.
+
+              Not a button. `PersonaIcon` was the obvious reuse and does not fit:
+              it draws a bordered 32px tile, which is a card affordance rather
+              than an inline pill, so the glyph goes in directly and carries
+              `aria-hidden` for the reason that component gives -- it always sits
+              beside the role it stands for.
+            */
+            const specialist = resolveSpecialist(slug);
+            return (
+              <span
+                key={slug}
+                data-testid="route-pill"
+                title={routeExplanation(message.route_trigger, specialist?.role ?? slug)}
+                className="inline-flex items-center gap-1.5 rounded-full border border-violet-800/60 bg-violet-950/40 px-2.5 py-1 text-xs font-medium text-violet-200"
+              >
+                <span aria-hidden="true">{specialist?.icon ?? "\u{1F9E0}"}</span>
+                {specialist?.role ?? slug}
+              </span>
+            );
+          })}
+
+          {message.self_check_verdict === "ungrounded" && (
+            /*
+              The honest surfacing of the last row of the self-check table: the
+              critic said the draft was not grounded, the step budget was spent,
+              and **the draft was kept exactly as the model wrote it**. Editing
+              an answer to add a caveat the model did not write is the one
+              outcome worse than shipping the draft, because it makes the
+              system's voice unreliable in a way no trace event records. So the
+              caveat is a chip beside the answer rather than a sentence inside
+              it.
+
+              Amber, like `stopped`, and for the same reason: this is a caveat
+              about completeness and not an error. Rose would teach the reader
+              that something broke, when what happened is that a check ran and
+              reported honestly -- which is the product working.
+            */
+            <span
+              data-testid="ungrounded-chip"
+              title="This answer was checked against the passages it cited, and some of its claims were not carried by them. The text is exactly what the model wrote -- nothing was edited."
+              aria-label="Unverified claims: this answer was checked against its sources and some claims were not carried by them."
+              className="rounded-full border border-amber-800/60 bg-amber-950/30 px-2.5 py-1 text-xs font-medium text-amber-200"
+            >
+              Unverified claims
+            </span>
+          )}
+
           {message.stopped && (
             /*
               A stopped turn is TRUNCATED, and without this it renders exactly
@@ -264,6 +327,38 @@ export default function Message({ message }: { message: ChatMessage }) {
       </div>
     </li>
   );
+}
+
+/**
+ * Which personas answered this turn, or `[]`.
+ *
+ * `specialists` wins when it holds anything, because a two-`@mention` turn is
+ * recorded as one ROUTE event with a list rather than as two half-events --
+ * so reading `specialist` first would show one pill on a turn that produced
+ * two sections. Falls back to the singular field for the ordinary routed turn
+ * and for anything replayed before the list existed.
+ */
+function routedSlugs(message: ChatMessage): string[] {
+  if (message.specialists && message.specialists.length > 0) return message.specialists;
+  return message.specialist ? [message.specialist] : [];
+}
+
+/**
+ * The pill's tooltip: who decided, in one sentence.
+ *
+ * Three triggers, three different claims, and the one worth spelling out is
+ * `"mention"` -- the user chose, and the router was skipped entirely. A
+ * tooltip saying "chosen for you" over a choice somebody made themselves is
+ * the same misattribution the trace panel avoids one level down. An
+ * unrecognised trigger degrades to naming the role without claiming a cause.
+ */
+function routeExplanation(trigger: string | null | undefined, role: string): string {
+  if (trigger === "mention") return `You asked for the ${role} by name.`;
+  if (trigger === "router") return `Answered as the ${role}, chosen for this question.`;
+  if (trigger === "fallback") {
+    return `Routing did not settle on a persona, so this was answered as the ${role}.`;
+  }
+  return `Answered as the ${role}.`;
 }
 
 /**

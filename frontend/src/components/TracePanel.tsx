@@ -36,6 +36,15 @@ import { ErrorBanner, Spinner, errorMessage } from "./ui.tsx";
  * Both maps are read through `??` at the call site, so an event type the
  * backend gains before this file hears about it degrades to a neutral pill and
  * a neutral sentence rather than crashing the panel.
+ *
+ * **That graceful degradation is exactly why a missing entry is invisible, so
+ * both maps get an entry or neither does.** ROUTE is violet because the route
+ * pill on the answer is violet -- same decision, seen twice, which is the same
+ * argument that put REWRITE and the rewritten-question banner in fuchsia.
+ * DELEGATE is teal, a colour of its own because a delegated section is a
+ * different act from choosing the persona. SELF_CHECK is amber and shares that
+ * hue with SCORE_CHECK deliberately: both are the machine grading its own
+ * evidence, and amber is this palette's caution rather than its failure.
  */
 const EVENT_STYLES: Record<string, string> = {
   RETRIEVE: "border-sky-800/60 bg-sky-950/40 text-sky-300",
@@ -47,6 +56,9 @@ const EVENT_STYLES: Record<string, string> = {
   TOOL_CALL: "border-cyan-800/60 bg-cyan-950/40 text-cyan-200",
   TOOL_RESULT: "border-cyan-800/60 bg-cyan-950/40 text-cyan-200",
   TOOL_ERROR: "border-rose-800/60 bg-rose-950/40 text-rose-200",
+  ROUTE: "border-violet-800/60 bg-violet-950/40 text-violet-300",
+  DELEGATE: "border-teal-800/60 bg-teal-950/40 text-teal-300",
+  SELF_CHECK: "border-amber-800/60 bg-amber-950/40 text-amber-300",
 };
 
 const EVENT_DESCRIPTIONS: Record<string, string> = {
@@ -60,6 +72,12 @@ const EVENT_DESCRIPTIONS: Record<string, string> = {
   TOOL_CALL: "The agent decided to use a tool and chose these arguments.",
   TOOL_RESULT: "What the tool returned.",
   TOOL_ERROR: "The tool failed. The agent was shown this and could try again.",
+  ROUTE:
+    "Chose which teaching approach answers this turn, before searching. The payload names the roster it chose from and whether the choice came from the router, from an @mention you typed, or from a fallback.",
+  DELEGATE:
+    "Answered one section of this turn as a named specialist, over the same retrieved passages as every other section -- so a citation number means the same chunk throughout.",
+  SELF_CHECK:
+    "Checked the drafted answer against the passages it cited. The signal is what triggered the check and cost nothing; the verdict is what a second model call concluded.",
 };
 
 export default function TracePanel({

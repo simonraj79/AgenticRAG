@@ -87,17 +87,23 @@ from app.db.models import (
     User,
 )
 from app.api.handouts import HandoutOut
+from app.db.specialists import BY_SLUG, roster
 from app.rag import events
 from app.rag.pipeline import HISTORY_TURNS, ChatTurn, answer_question
 from app.rag.refusal import detect_refusal
 from app.rag.retriever import META_CHUNK_ID, RERANK_SCORE_KEY
+from app.rag.route import parse_mentions
+from app.rag.selfcheck import SIGNAL_PHANTOM, markers_in
 from app.rag.trace import (
+    DELEGATE,
     GENERATE,
     REFUSE,
     RERANK,
     RETRIEVE,
     REWRITE,
+    ROUTE,
     SCORE_CHECK,
+    SELF_CHECK,
     TOOL_CALL,
     TOOL_ERROR,
     TOOL_RESULT,
@@ -243,6 +249,27 @@ class AskOut(BaseModel):
     # `tool_steps` -- see the backfill note there.
     tool_calls: int = 0
     handouts: list[HandoutOut] = Field(default_factory=list)
+
+    # Which teaching voice answered, and how that was decided. All four default
+    # to the classic value, so an agent with `specialists IS NULL` serialises
+    # exactly as it did before this feature -- the same property `tool_steps` and
+    # `handouts` above carry, one feature later.
+    #
+    # `specialist` is the primary and `specialists` is every voice that answered;
+    # a two-mention turn has both, and the message chip renders the first while
+    # the section headings show the rest.
+    specialist: str | None = None
+    specialists: list[str] = Field(default_factory=list)
+    # "router" | "mention" | "fallback". The client shows the pill differently
+    # for a mention (the user chose) than for a route (the agent chose), and
+    # `fallback` means neither happened -- the router failed and the agent's own
+    # prompt answered.
+    route_trigger: str | None = None
+    # Null on every turn where the free pre-check did not fire, which is almost
+    # all of them. "ungrounded" is the amber chip: the check found unsupported
+    # claims and there was no budget left to redraft, so the answer stands and
+    # says so rather than being edited.
+    self_check_verdict: str | None = None
 
 
 class QueryOut(BaseModel):
@@ -453,6 +480,47 @@ def normalise_citation_markers(answer: str, citations: Sequence[CitationOut]) ->
     return cleaned.strip()
 
 
+def _delegated_sections(answer: str, slugs: Sequence[str]) -> list[tuple[str, str]]:
+    """(slug, body) for each `## heading` section, in the order they appear.
+
+    **Reconstructed from the answer rather than carried out of the pipeline**,
+    and that is a deliberate limit rather than an omission. `AnswerResult` names
+    eleven routing fields and a twelfth carrying per-section text would put the
+    whole answer in the object twice; the headings are written by
+    `pipeline.answer_question` from `Specialist.heading`, so the split is
+    deterministic against a constant this module can read.
+
+    What that buys is a DELEGATE payload with real `answer_chars` and `markers`
+    per section -- the difference between "two specialists were asked" and "two
+    specialists each said something, citing these passages". A section the model
+    returned empty is dropped by the pipeline, so it simply has no heading here
+    and no row, which is the honest rendering.
+
+    Split on the STORED answer, after `normalise_citation_markers`, so `markers`
+    is the set a reader can actually click.
+    """
+    found: list[tuple[int, str, int]] = []
+    for slug in slugs:
+        specialist = BY_SLUG.get(slug)
+        if specialist is None:
+            continue
+        needle = f"## {specialist.heading}"
+        start = answer.find(needle)
+        if start < 0:
+            continue
+        found.append((start, slug, start + len(needle)))
+
+    # Position order, not mention order: they agree today, and sorting is what
+    # makes the "everything up to the next heading" slice below correct even if
+    # they ever stop agreeing.
+    found.sort()
+    sections: list[tuple[str, str]] = []
+    for index, (_, slug, body_start) in enumerate(found):
+        end = found[index + 1][0] if index + 1 < len(found) else len(answer)
+        sections.append((slug, answer[body_start:end].strip()))
+    return sections
+
+
 async def _chunk_rows(
     db: AsyncSession, agent: Agent, chunk_ids: list[uuid.UUID]
 ) -> dict[uuid.UUID, tuple[int, uuid.UUID, str]]:
@@ -564,6 +632,25 @@ async def run_turn(
     # and pushing a genuinely useful turn out past the cap.
     history = await _recent_history(db, conversation.id)
 
+    # ------------------------------------------------------------------
+    # 0. `@mentions`, parsed HERE and not in the pipeline
+    # ------------------------------------------------------------------
+    # **The raw text is stored and the stripped text is what runs.** Those are
+    # deliberately two strings. `queries.question` has to show what the user
+    # typed, or the thread renders a message they did not send; and `@feynman`
+    # means nothing in vector space, reaching a rewriter documented to mangle
+    # terms it does not recognise. Parsing inside `answer_question` would mean
+    # this function stored one string while the pipeline ran another, with
+    # nothing forcing them to be the same one.
+    #
+    # `roster(agent.specialists)` is empty for a non-orchestrator, and
+    # `parse_mentions` then returns the text untouched -- so `@risk` in an
+    # ordinary question stays literal text on every agent, and on an orchestrator
+    # only slugs and aliases in ITS OWN roster match. There is no path here
+    # through which retrieved text could name a specialist: the roster comes off
+    # the agent row, and an unmatched token is left alone rather than guessed at.
+    mention = parse_mentions(question, roster(agent.specialists))
+
     # The `queries` row is created next, as a placeholder, and flushed. Two
     # reasons, both about ordering rather than about durability.
     #
@@ -586,6 +673,7 @@ async def run_turn(
         # session attribution is not a reason to refuse an authenticated request.
         session_id=session.id if session is not None else None,
         conversation_id=conversation.id,
+        # RAW, including any `@mention`. See the parse above.
         question=question,
     )
     db.add(query)
@@ -627,8 +715,57 @@ async def run_turn(
     # because Render runs a single uvicorn worker and a blocked loop queues every
     # other in-flight request behind a 13-second generation.
     result = await answer_question(
-        agent, question, history=history, rewrite=rewrite, emit=emit
+        agent,
+        # STRIPPED. `result.question` carries this same string back, which is
+        # what everything below compares the rewrite against -- comparing
+        # against the raw text would report every mentioned turn as "rewritten"
+        # merely because the sigil is gone.
+        mention.question,
+        history=history,
+        rewrite=rewrite,
+        emit=emit,
+        mention_specialists=mention.specialists,
     )
+
+    # ------------------------------------------------------------------
+    # 1b. ROUTE -- which voice answered, and who decided
+    # ------------------------------------------------------------------
+    # Recorded on every orchestrator turn, including the one where a mention made
+    # the choice and no model ran. `trigger` is what separates the three, and
+    # they are three genuinely different facts: the router chose, the user chose,
+    # or the router failed and the agent's own prompt answered. The last is
+    # indistinguishable from the first by reading the answer, and needs the
+    # opposite response.
+    #
+    # ONE row even for a two-mention turn -- `specialists` is a list beside
+    # `specialist` -- because that is one decision with two outcomes, and two
+    # rows would claim the router ran twice.
+    #
+    # First, before REWRITE, because routing reads the RAW question: the signal
+    # it goes on ("explain", "quiz me") is a property of how the user asked, and
+    # normalising a question into a search query is exactly what flattens it.
+    if result.route_trigger is not None:
+        trace.record(
+            ROUTE,
+            payload={
+                "trigger": result.route_trigger,
+                "specialist": result.specialist,
+                "specialists": result.specialists,
+                "why": result.route_why,
+                # Null on a mention: no model was asked. Naming one anyway would
+                # credit a decision the user made to a call that never happened.
+                "model": (
+                    settings.decision_model
+                    if result.route_trigger == "router"
+                    else None
+                ),
+                # What the agent could have chosen from, so a trace read months
+                # later does not depend on the roster still being what it was.
+                "roster": list(agent.specialists or []),
+                "failed": result.route_failed,
+            },
+            duration_ms=result.route_ms,
+        )
 
     # ------------------------------------------------------------------
     # 2. REWRITE -- contextualisation, if it fired
@@ -660,9 +797,13 @@ async def run_turn(
                 # that will write REWRITE rows too, and only the trigger says
                 # which one fired.
                 "trigger": "conversation_history" if history else "first_turn",
-                "before": question,
+                # `result.question` and not the raw `question`: this field is
+                # what the rewriter was HANDED, and on a mentioned turn that is
+                # the stripped text. Identical to `question` on every turn
+                # without a mention, which is every turn on a non-orchestrator.
+                "before": result.question,
                 "after": rewritten,
-                "changed": rewritten is not None and rewritten != question,
+                "changed": rewritten is not None and rewritten != result.question,
                 # **The new key, and the reason it exists.** With the rewriter on
                 # every turn a failure is no longer "it did not run" -- it is a
                 # silently worse search on a turn that expected help.
@@ -1017,6 +1158,79 @@ async def run_turn(
     )
 
     # ------------------------------------------------------------------
+    # 7b. DELEGATE -- one row per section, when more than one voice answered
+    # ------------------------------------------------------------------
+    # GENERATE above summarises the whole generation stage; these detail it. A
+    # single-specialist turn writes none: there is nothing to distinguish from
+    # the answer itself, and a DELEGATE row per turn would make "did work get
+    # handed to a second voice?" unanswerable without arithmetic.
+    #
+    # `markers` is the real assertion here. Two sections drafted against ONE
+    # ledger means `[3]` refers to the same chunk in both, and that shared
+    # numbering is the only reason concatenating them without a synthesiser call
+    # is safe. A trace that recorded only `answer_chars` could not show it.
+    if len(result.specialists) > 1:
+        for slug, body in _delegated_sections(answer, result.specialists):
+            trace.record(
+                DELEGATE,
+                payload={
+                    "specialist": slug,
+                    # The only producer today. `"tool"` is reserved for
+                    # `consult_specialist`, which is Phase 4 and may never be
+                    # built -- it ships only if these traces show turns that
+                    # wanted a second lens.
+                    "source": "mention",
+                    # Null for the same reason: a mention carries no task. The
+                    # key is present so a `consult_specialist` row and a mention
+                    # row have one shape.
+                    "task": None,
+                    "answer_chars": len(body),
+                    "markers": sorted(markers_in(body)),
+                },
+            )
+
+    # ------------------------------------------------------------------
+    # 7c. SELF_CHECK -- only when the free pre-check fired
+    # ------------------------------------------------------------------
+    # Absent from the overwhelming majority of turns, and that absence is the
+    # design rather than a gap: the pre-check is a set operation against the
+    # ledger's own marker range, so a grounded answer costs no model call, no
+    # row and no event.
+    #
+    # `acted` is the field that stops two very different outcomes rendering
+    # identically -- "we checked and it was fine" against "we checked, it was
+    # not, and the budget was spent". CLAUDE.md records the cost of collapsing
+    # that distinction once already, where `METRIC_TIMEOUT_S` made a hang and a
+    # rate limit print the same string and they needed opposite fixes.
+    if result.self_check_signal is not None:
+        trace.record(
+            SELF_CHECK,
+            payload={
+                "signal": result.self_check_signal,
+                "verdict": result.self_check_verdict,
+                "unsupported": result.self_check_unsupported,
+                # Not carried on `AnswerResult`, which the plan pins to eleven
+                # named fields. The signal name already says a citation was
+                # invented; this key stays so a `consult_specialist`-era payload
+                # and this one have one shape.
+                "suggested_query": None,
+                # Recomputed, and ONLY when the draft survived. `acted` true
+                # means the text below is the redraft, so its markers are the
+                # corrected ones and reporting them here would say the phantom
+                # was never there. Null is the honest value in that case.
+                "phantom_markers": (
+                    sorted(markers_in(answer) - {c.marker for c in citations})
+                    if result.self_check_signal == SIGNAL_PHANTOM
+                    and not result.self_check_acted
+                    else None
+                ),
+                "ledger_size": len(result.documents),
+                "acted": result.self_check_acted,
+            },
+            duration_ms=result.self_check_ms,
+        )
+
+    # ------------------------------------------------------------------
     # 8. Refusal, from the answer text
     # ------------------------------------------------------------------
     # Scanned on the normalised text, because that is what is stored and what a
@@ -1105,7 +1319,9 @@ async def run_turn(
         rewritten_changed=(
             (
                 result.rewritten_question is not None
-                and result.rewritten_question != question
+                # Against the STRIPPED question, which is what the rewriter saw.
+                # See the REWRITE payload above.
+                and result.rewritten_question != result.question
             )
             if result.rewrite_attempted
             else None
@@ -1113,6 +1329,10 @@ async def run_turn(
         citations=citations,
         tool_steps=result.tool_steps,
         tool_calls=len(result.tool_calls),
+        specialist=result.specialist,
+        specialists=result.specialists,
+        route_trigger=result.route_trigger,
+        self_check_verdict=result.self_check_verdict,
         # Built from the pending objects rather than re-read after the commit.
         # `expire_on_commit=False` keeps them readable, and every field
         # `HandoutOut` wants was set in Python -- `created_at` is the one

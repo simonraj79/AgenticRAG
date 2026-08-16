@@ -68,6 +68,32 @@ TOOL_CALL = "TOOL_CALL"
 TOOL_RESULT = "TOOL_RESULT"
 TOOL_ERROR = "TOOL_ERROR"
 
+# Three more for the orchestrator and the self-check. The nine above answer "what
+# did each stage do?" and "why did the model act?"; these answer two questions
+# that only exist once a turn can be answered by a CHOSEN voice and then graded.
+#
+# ROUTE is one row per turn even when two specialists answer -- it carries both
+# `specialist` and `specialists`, because a two-mention turn is one decision with
+# two outcomes rather than two half-decisions, and splitting it would make the
+# trace claim the router ran twice.
+#
+# DELEGATE is separate from ROUTE rather than a list inside it, because a section
+# is a GENERATION and a route is a CHOICE: they have different durations, they
+# can fail independently, and a delegated section that came back empty has to be
+# visible next to one that did not.
+#
+# SELF_CHECK carries `acted` for the reason CLAUDE.md gives about
+# `METRIC_TIMEOUT_S` doubling as a quota ceiling: without it, "we checked and it
+# was fine" and "we checked, it was not, and the budget was spent" render
+# identically, and they need opposite responses.
+#
+# No migration: `event_type` is String(32) with no CHECK constraint and `payload`
+# is JSONB. The only gate is the frozenset below -- `record()` raises on anything
+# outside it, which is why extending it has to happen before the first write.
+ROUTE = "ROUTE"
+DELEGATE = "DELEGATE"
+SELF_CHECK = "SELF_CHECK"
+
 EVENT_TYPES = frozenset(
     {
         RETRIEVE,
@@ -79,6 +105,9 @@ EVENT_TYPES = frozenset(
         TOOL_CALL,
         TOOL_RESULT,
         TOOL_ERROR,
+        ROUTE,
+        DELEGATE,
+        SELF_CHECK,
     }
 )
 

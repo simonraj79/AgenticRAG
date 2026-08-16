@@ -55,14 +55,17 @@ tool; the loop is the *generation* step, not the retrieval one.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
-from collections.abc import Sequence
+from collections.abc import Awaitable, Sequence
 from dataclasses import dataclass, field
 from functools import lru_cache
+from typing import TypeVar
 
 from langchain_core.documents import Document
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
+from langchain_core.language_models import BaseChatModel
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables import Runnable
@@ -71,6 +74,7 @@ from pydantic import BaseModel, Field
 
 from app.config import settings
 from app.db.models import Agent
+from app.db.specialists import Specialist, roster
 from app.rag import events
 from app.rag.agent_loop import ContextLedger, ToolInvocation, run_agent_loop
 from app.rag.llm import build_chat_model
@@ -80,6 +84,15 @@ from app.rag.retriever import (
     RERANK_SCORE_KEY,
     aretrieve,
 )
+from app.rag.route import RouteResult, route_specialist
+from app.rag.selfcheck import (
+    VERDICT_UNGROUNDED,
+    SelfCheckResult,
+    correction_message,
+    run_grounding_critic,
+    self_check_signal,
+)
+from app.tools.corpus import SEARCH_CORPUS
 from app.tools.registry import ToolArtifact
 
 log = logging.getLogger("uvicorn.error")
@@ -320,6 +333,43 @@ class AnswerResult:
     tool_steps: int = 0
     # "max_steps" | "tool_error" | None
     stopped_reason: str | None = None
+
+    # ---- routing and self-evaluation. Every default below is the CLASSIC
+    # value, so an agent with `specialists IS NULL` and `self_check_enabled =
+    # false` returns exactly the object it returned before this feature -- the
+    # same argument the tool-loop fields above carry, one feature later.
+    #
+    # `specialist` is the primary (the one whose prompt was used and whose
+    # retrieval parameters were applied); `specialists` is every voice that
+    # answered. They are both here rather than one derived from the other
+    # because a two-mention turn has a primary AND a list, and collapsing them
+    # would make the trace unable to say which prompt actually ran the loop.
+    specialist: str | None = None
+    specialists: list[str] = field(default_factory=list)
+    # "router" | "mention" | "fallback". `fallback` is the one worth seeing: it
+    # means the router died or named a specialist the owner disabled, and the
+    # agent's own prompt answered instead. Indistinguishable from a good route
+    # by reading the answer, and needing the opposite response.
+    route_trigger: str | None = None
+    # One clause from the router naming what decided it. Trace only; the learner
+    # never sees it, and the generation model never sees it either.
+    route_why: str | None = None
+    route_ms: int = 0
+    route_failed: bool = False
+
+    # None unless the free pre-check fired. That is the common case and it costs
+    # nothing at all -- no model call, no event, no row.
+    self_check_signal: str | None = None
+    # "grounded" | "ungrounded" | "failed", set only when the critic ran.
+    self_check_verdict: str | None = None
+    self_check_ms: int = 0
+    self_check_unsupported: list[str] = field(default_factory=list)
+    # Whether the verdict CHANGED the answer. Without it, "we checked and it was
+    # fine" and "we checked, it was not, and there was no budget left to fix it"
+    # are the same two fields on the card -- the `METRIC_TIMEOUT_S` conflation
+    # CLAUDE.md records, where one string covered a hang and a rate limit and the
+    # two needed opposite fixes.
+    self_check_acted: bool = False
 
     @property
     def search_query(self) -> str:
@@ -585,6 +635,174 @@ def _tools_active(agent: Agent) -> bool:
     return bool(settings.agent_tools_enabled and agent.tools_enabled)
 
 
+def _orchestrating(agent: Agent) -> bool:
+    """Whether a specialist answers this turn instead of the agent's own prompt.
+
+    Deliberately the same SHAPE as `_tools_active` above and deliberately not the
+    same structure: there is one gate here, not two, because `agents.specialists`
+    carries both the switch and the roster. NULL -- and, defensively, an empty
+    list, which the API refuses but a hand-written row could hold -- means no
+    routing call, no prompt substitution, no ROUTE event and a turn identical to
+    the one this agent took before the column existed.
+
+    There is no `settings.` kill switch beside it, unlike `tools_enabled`. The
+    tool loop needed one because it changes what an agent can DO -- reach the
+    network, spawn a subprocess -- across a whole deployment. Routing changes
+    only which prompt string is used, and turning it off globally would be
+    indistinguishable from an operator emptying the roster, which they can
+    already do per agent.
+    """
+    return bool(agent.specialists)
+
+
+_T = TypeVar("_T")
+
+
+async def _none() -> None:
+    """An awaitable that resolves to None, so the gather below stays one shape.
+
+    The alternative is building the gather's argument list conditionally, which
+    makes the tuple it returns positional-by-luck -- and the slot a caller reads
+    the router out of would silently become the rewriter's on a turn where the
+    rewrite was switched off.
+    """
+    return None
+
+
+async def _timed(awaitable: Awaitable[_T]) -> tuple[_T, int]:
+    """Await something and report how long it took, individually.
+
+    Exists for the `asyncio.gather` below. Timing the gather itself would give
+    the rewriter and the router the SAME number -- the slower of the two -- and
+    the trace's whole claim is that its parts add up to the turn. A phase that
+    reports its sibling's duration is worse than one that reports none, because
+    it renders and looks measured.
+    """
+    started = time.perf_counter()
+    value = await awaitable
+    return value, int((time.perf_counter() - started) * 1000)
+
+
+def _gathered(outcome: object, fallback: _T, what: str) -> _T:
+    """Unwrap one `return_exceptions=True` slot.
+
+    Both coroutines in the gather already swallow everything they can raise --
+    `contextualize_question` degrades to the raw question and `route_specialist`
+    degrades to the agent's own prompt, each documented on the function. This is
+    belt and braces for the property that only a gather has: without
+    `return_exceptions=True`, an exception in either one cancels the OTHER, so a
+    router fault would take a working rewrite down with it and the turn would
+    lose a step it had already paid for.
+    """
+    if isinstance(outcome, BaseException):
+        log.warning("%s failed inside the gather: %s", what, outcome)
+        return fallback
+    return outcome  # type: ignore[return-value]
+
+
+# A failed route, as a constant rather than three keyword arguments repeated at
+# each of the places that can produce one.
+_ROUTE_FAILED = RouteResult(specialists=(), trigger="fallback", why=None, failed=True)
+
+
+async def _invoke_text(model: BaseChatModel, messages: list[BaseMessage]) -> str:
+    """One non-streaming generation. `.text` is a property in langchain-core 1.x."""
+    message = await model.ainvoke(messages)
+    return getattr(message, "text", "") or ""
+
+
+async def _stream_text(
+    model: BaseChatModel, messages: list[BaseMessage], emit: events.Emit
+) -> str:
+    """One streamed generation, accumulated and echoed to the browser.
+
+    Empty fragments are dropped rather than sent, matching the classic path:
+    they carry nothing, and every frame costs a `seq` a client is entitled to
+    treat as meaningful.
+    """
+    parts: list[str] = []
+    async for chunk in model.astream(messages):
+        piece = getattr(chunk, "text", "") or ""
+        if not piece:
+            continue
+        parts.append(piece)
+        await emit(events.TOKEN, {"text": piece})
+    return "".join(parts)
+
+
+def _section_messages(
+    specialist: Specialist, context: str, question: str
+) -> list[BaseMessage]:
+    """One specialist's turn over a frozen ledger. No tools, by design.
+
+    **A delegated specialist gets NO retrieval of its own**, and that is a budget
+    decision rather than a simplification (PRD open item 28). `max_tool_steps`
+    bounds steps, not calls, and the default generation model emits 1.50-2.00
+    `search_corpus` calls per step -- so three steps is already up to six
+    retrievals, measured in the browser at `tool_steps=3, tool_calls=6`. Giving
+    each additional specialist its own loop would multiply that by the number of
+    mentions, invisibly, on a turn the user experiences as one question.
+
+    It is also what makes concatenating the sections SAFE: every voice cites the
+    same numbered passages, so `[3]` means the same chunk in section one and in
+    section three. That is the only reason the sections need no synthesiser call.
+
+    `SystemMessage` and a pre-formatted `HumanMessage` rather than a
+    `ChatPromptTemplate`, so a brace in a persona prompt or in a retrieved chunk
+    is never parsed as a template variable -- the trap `answer_question` records
+    at its own prompt construction.
+    """
+    return [
+        SystemMessage(content=specialist.system_prompt),
+        HumanMessage(
+            content=USER_TEMPLATE.format(context=context, question=question)
+        ),
+    ]
+
+
+async def _delegate_section(
+    *,
+    specialist: Specialist,
+    index: int,
+    total: int,
+    model: BaseChatModel,
+    context: str,
+    question: str,
+    emit: events.Emit | None,
+) -> str:
+    """One `## heading` section, with its own phase pair.
+
+    The frames are emitted from INSIDE this coroutine rather than around the
+    gather, so each section's `finished` carries its own duration. Tokens are
+    deliberately not streamed: the sections run concurrently, so interleaving
+    two voices into one buffer would put half of the Explainer inside the Quiz
+    Writer on the user's screen.
+    """
+    if emit is not None:
+        await events.phase(
+            emit,
+            events.PHASE_DELEGATE,
+            events.STARTED,
+            specialist=specialist.slug,
+            index=index,
+            total=total,
+        )
+    started = time.perf_counter()
+    text = await _invoke_text(model, _section_messages(specialist, context, question))
+    duration_ms = int((time.perf_counter() - started) * 1000)
+    if emit is not None:
+        await events.phase(
+            emit,
+            events.PHASE_DELEGATE,
+            events.FINISHED,
+            duration_ms=duration_ms,
+            specialist=specialist.slug,
+            index=index,
+            total=total,
+        )
+    return text
+
+
 async def answer_question(
     agent: Agent,
     question: str,
@@ -593,6 +811,7 @@ async def answer_question(
     history: Sequence[ChatTurn] | None = None,
     rewrite: bool | None = None,
     emit: events.Emit | None = None,
+    mention_specialists: Sequence[Specialist] | None = None,
     **model_overrides,
 ) -> AnswerResult:
     """Run one question through the chain, and return the evidence with it.
@@ -625,8 +844,43 @@ async def answer_question(
     `answer_question` returns, so a phase emitted there would arrive once the
     stage it describes was already over. A progress event that cannot be early is
     not progress.
+
+    **`mention_specialists` is PARSED BY THE CALLER, never here.** `@feynman` has
+    to be stripped before the question is stored and before it reaches the
+    embedder -- `ask.run_turn` keeps the raw text for `queries.question` so the
+    thread shows what the user typed, and hands the stripped text down. Doing the
+    parse here would mean this function received the raw string and the caller
+    stored a different one, which is the shape that eventually stores the wrong
+    half. When mentions were given the router is skipped entirely: the user made
+    the decision, and asking a model to ratify a decision it can already read is
+    a round trip spent on obedience.
     """
     started = time.perf_counter()
+
+    # ------------------------------------------------------------------
+    # 0. Which voice answers this turn.
+    # ------------------------------------------------------------------
+    # `roster()` returns an empty tuple for a NULL `agents.specialists`, so
+    # everything below this point is `if agent_roster:` -- one condition, and the
+    # classic path never enters any of it.
+    agent_roster = roster(agent.specialists)
+    route: RouteResult | None = None
+    route_ms = 0
+    if agent_roster and mention_specialists:
+        # Parsing, not judgement. `trigger="mention"` so the trace can say the
+        # router never ran rather than leaving a reader to infer it from a null
+        # `why`.
+        route = RouteResult(
+            specialists=tuple(mention_specialists), trigger="mention", why=None
+        )
+
+    if emit is not None and agent_roster:
+        await events.phase(
+            emit,
+            events.PHASE_ROUTE,
+            events.STARTED,
+            trigger=route.trigger if route is not None else "router",
+        )
 
     # 1. Rewrite the question into the best search query for it.
     #
@@ -646,12 +900,44 @@ async def answer_question(
     # is not a cosmetic difference now that first turns rewrite: it is 1-1.6 s of
     # dead air after `start` and before `retrieve started`, with `HEARTBEAT_S`
     # at 10.0 s so nothing at all reaches the browser in the meantime.
-    rewritten = (
-        await contextualize_question(question, history or ())
-        if rewrite_attempted
-        else None
-    )
-    contextualize_ms = int((time.perf_counter() - t0) * 1000)
+    if agent_roster and route is None:
+        # **CONCURRENT, AND DELIBERATELY NOT MERGED INTO THE REWRITER'S SCHEMA.**
+        # The obvious edit is a `specialist` field on `StandaloneQuestion` -- one
+        # structured call instead of two, on a prompt that already runs every
+        # turn. That prompt is MEASURED, and this repository has already paid for
+        # editing it: adding a "leave product names alone" bullet took typo
+        # repair from 5/5 to 3/5, and an "expand acronyms" bullet made the model
+        # fabricate "Ka-band (Kurzwellen-band)". A prompt with a measurement on it
+        # has a blast radius, and `scripts/rewrite_check.py` is what would go red.
+        #
+        # Concurrency buys back the latency the merge was for. Both calls take
+        # the raw question and the same capped history and neither depends on the
+        # other, so this costs the SLOWER of the two rather than their sum.
+        #
+        # And the router reads the RAW question, not the rewrite -- "explain",
+        # "quiz me", "how do I work out" is a property of how the user ASKED, and
+        # normalising a question into a standalone search query is precisely the
+        # operation that flattens it away.
+        rewrite_outcome, route_outcome = await asyncio.gather(
+            _timed(
+                contextualize_question(question, history or ())
+                if rewrite_attempted
+                else _none()
+            ),
+            _timed(route_specialist(question, history or (), agent_roster)),
+            return_exceptions=True,
+        )
+        rewritten, contextualize_ms = _gathered(
+            rewrite_outcome, (None, 0), "Contextualisation"
+        )
+        route, route_ms = _gathered(route_outcome, (_ROUTE_FAILED, 0), "Routing")
+    else:
+        rewritten = (
+            await contextualize_question(question, history or ())
+            if rewrite_attempted
+            else None
+        )
+        contextualize_ms = int((time.perf_counter() - t0) * 1000)
     if emit is not None and rewrite_attempted:
         await events.phase(
             emit,
@@ -671,11 +957,39 @@ async def answer_question(
         )
     search_query = rewritten or question
 
+    # The specialist whose PROMPT runs and whose retrieval parameters apply.
+    # None on the classic path and on a failed route -- both of which fall back
+    # to the agent's own prompt and the agent's own numbers.
+    primary = route.primary if route is not None else None
+
+    if emit is not None and agent_roster:
+        await events.phase(
+            emit,
+            events.PHASE_ROUTE,
+            events.FINISHED,
+            duration_ms=route_ms,
+            specialist=primary.slug if primary is not None else None,
+            specialists=[s.slug for s in route.specialists] if route else [],
+            trigger=route.trigger if route is not None else None,
+        )
+
     # 2. Retrieve once, with the scores.
     t0 = time.perf_counter()
     if emit is not None:
         await events.phase(emit, events.PHASE_RETRIEVE, events.STARTED)
-    retrieval = await aretrieve(agent, search_query, rerank=rerank)
+    # **Overrides, never writes.** A routed turn retrieves at the chosen
+    # specialist's breadth -- the Quiz Writer's 40 -> 8 spreads items across the
+    # corpus, the Explainer's 20 -> 3 keeps a gap visible -- and `aretrieve`
+    # takes them as arguments precisely so nothing assigns them onto `agent`,
+    # where the turn's own commit would flush a per-question choice into the
+    # operator's saved configuration. See `retriever.aretrieve`.
+    retrieval = await aretrieve(
+        agent,
+        search_query,
+        rerank=rerank,
+        k=primary.retrieve_k if primary is not None else None,
+        top_n=primary.rerank_top_n if primary is not None else None,
+    )
     retrieval_ms = int((time.perf_counter() - t0) * 1000)
     if emit is not None:
         await events.phase(
@@ -730,7 +1044,27 @@ async def answer_question(
     # USER_TEMPLATE, which this module owns, is a template -- and values
     # substituted into it are not re-parsed, so braces in retrieved chunks or in
     # the question are already safe.
-    system_prompt = agent.system_prompt or DEFAULT_SYSTEM_PROMPT
+    #
+    # **A ROUTED TURN SUBSTITUTES THE SPECIALIST'S PROMPT. IT NEVER STACKS ON
+    # THE AGENT'S.** This is one `or` chain and it is the most consequential
+    # line of the feature, so it is worth stating what the concatenation would
+    # do. Every persona prompt opens with `GROUNDING COMES FIRST. It outranks
+    # every instruction below`. An orchestrator preamble plus a persona body puts
+    # that sentence in the prompt TWICE and buries the routing intent under both
+    # -- and `new features/loop.md` T1 is the measurement for what happens next:
+    # two competing instructions resolve in favour of the earlier, more forceful
+    # one, which is how a refusal-first prompt was found suppressing tool use
+    # entirely. Six grounding rules and one routing rule produces a prompt that
+    # does not route.
+    #
+    # `agent.system_prompt` is still the fallback, and on `adaptive-tutor` it is
+    # a complete grounded teaching prompt rather than a router preamble for
+    # exactly this reason: it is what answers the turn when routing FAILED.
+    system_prompt = (
+        (primary.system_prompt if primary is not None else None)
+        or agent.system_prompt
+        or DEFAULT_SYSTEM_PROMPT
+    )
     model = get_chat_model(agent, **model_overrides)
 
     tool_calls: list[ToolInvocation] = []
@@ -739,6 +1073,44 @@ async def answer_question(
     tool_steps = 0
     stopped_reason: str | None = None
     documents = retrieval.documents
+    # Held so the self-check and the delegated sections can read the numbered
+    # context the model was actually given. None on the classic path, where
+    # `retrieval.documents` is that context.
+    ledger: ContextLedger | None = None
+    # How many further generations a self-check redraft may spend. The tool
+    # branch sets it from what the loop left unspent.
+    steps_left = 1
+
+    # **The delegated voices, and the ordering below is load-bearing.** Two or
+    # more mentions produce two or more sections, and they run
+    # SEQUENTIALLY-THEN-PARALLEL: the FIRST specialist takes the full tool loop,
+    # so it may add to the shared `ContextLedger`; the rest then run concurrently
+    # over the ledger that produced, each a single non-tool generation.
+    #
+    # Concurrent loops sharing one ledger would RACE on marker assignment --
+    # `ContextLedger._absorb` reads `len(self._entries)` and appends, so two
+    # coroutines interleaving there hand two different chunks the same `[n]`, and
+    # nothing raises: the answer renders, the citation chips resolve, and they
+    # point at the wrong sources. The reason concatenating sections is safe at
+    # all is that a marker means the same chunk in every section.
+    #
+    # The remaining specialists get NO retrieval of their own for a second
+    # reason -- see `_section_messages` for the budget arithmetic (PRD open
+    # item 28).
+    section_specialists: list[Specialist] = (
+        list(route.specialists[1:]) if route is not None else []
+    )
+    section_total = len(route.specialists) if route is not None else 0
+
+    if emit is not None and section_specialists and primary is not None:
+        await events.phase(
+            emit,
+            events.PHASE_DELEGATE,
+            events.STARTED,
+            specialist=primary.slug,
+            index=1,
+            total=section_total,
+        )
 
     if _tools_active(agent):
         # **The branch, and it is the only structural change to this function.**
@@ -760,17 +1132,18 @@ async def answer_question(
         # and "the classic path is byte-identical when tools are off" is a hard
         # requirement here, easiest to keep by making it structurally true.
         ledger = ContextLedger.seed(retrieval)
+        max_steps = (
+            agent.max_tool_steps
+            if agent.max_tool_steps is not None
+            else settings.agent_max_tool_steps
+        )
         loop = await run_agent_loop(
             agent=agent,
             question=search_query,
             ledger=ledger,
             system_prompt=system_prompt,
             model=model,
-            max_steps=(
-                agent.max_tool_steps
-                if agent.max_tool_steps is not None
-                else settings.agent_max_tool_steps
-            ),
+            max_steps=max_steps,
             # The loop emits its own `generate` phases, one pair per step, plus
             # the three tool events -- it has to, because a tool call's timing is
             # only knowable from inside it, and `run_turn` writes the durable
@@ -785,6 +1158,11 @@ async def answer_question(
             loop.stopped_reason,
         )
         generation_ms = loop.generation_ms
+        # What the loop did NOT spend. This is the "generation budget remaining"
+        # a self-check redraft is gated on: at zero, an ungrounded verdict keeps
+        # the draft and records the finding rather than spending a step the
+        # operator's `max_tool_steps` said was not there.
+        steps_left = max(0, max_steps - loop.steps)
         # **The ledger, not the retrieval.** A search the model ran mid-turn adds
         # entries here, and `ask.run_turn` enumerates this list from 1 to build
         # `AskOut.citations` -- so a chunk the tool found is only citable if it
@@ -838,6 +1216,226 @@ async def answer_question(
                 duration_ms=generation_ms,
             )
 
+    # ------------------------------------------------------------------
+    # 3b. The remaining sections, over the now-frozen ledger.
+    # ------------------------------------------------------------------
+    if emit is not None and section_specialists and primary is not None:
+        await events.phase(
+            emit,
+            events.PHASE_DELEGATE,
+            events.FINISHED,
+            duration_ms=generation_ms,
+            specialist=primary.slug,
+            index=1,
+            total=section_total,
+        )
+
+    if section_specialists and primary is not None:
+        # The ledger is frozen from here: the first specialist's loop is the only
+        # thing that could have added to it, and it has returned. Everything
+        # below reads the same numbered context, which is what makes `[3]` mean
+        # one chunk across every section.
+        section_context = (
+            ledger.format_context()
+            if ledger is not None
+            else format_context(retrieval.documents)
+        )
+        t0 = time.perf_counter()
+        outcomes = await asyncio.gather(
+            *(
+                _delegate_section(
+                    specialist=specialist,
+                    # 1-based and starting at 2, because the primary is index 1
+                    # and its pair went out above.
+                    index=position,
+                    total=section_total,
+                    model=model,
+                    context=section_context,
+                    question=search_query,
+                    emit=emit,
+                )
+                for position, specialist in enumerate(section_specialists, start=2)
+            ),
+            return_exceptions=True,
+        )
+        # Wall clock, not the sum: these ran concurrently, and summing them would
+        # make the phase timings add up to more than the turn.
+        generation_ms += int((time.perf_counter() - t0) * 1000)
+
+        # Mention order, which `parse_mentions` preserves. Concatenated by CODE
+        # with no synthesiser call -- two specialists cost 2x generation, not 3x,
+        # and there is nothing for a synthesiser to reconcile when both answered
+        # from one context with one set of markers.
+        sections = [f"## {primary.heading}\n\n{text}".rstrip()]
+        for specialist, outcome in zip(section_specialists, outcomes, strict=True):
+            body = _gathered(outcome, "", f"Section for {specialist.slug}")
+            if not body:
+                # Dropped rather than rendered as a bare heading. A heading with
+                # nothing under it reads as the specialist having found nothing
+                # to say, which is a claim about the corpus that a failed
+                # generation has not earned.
+                continue
+            sections.append(f"## {specialist.heading}\n\n{body}".rstrip())
+        text = "\n\n".join(sections)
+
+    # ------------------------------------------------------------------
+    # 4. Self-check -- is the draft actually anchored in what was retrieved?
+    # ------------------------------------------------------------------
+    # `new features/loop.md` T2: the trigger asks whether the OUTCOME occurred,
+    # never whether an error did. An ungrounded answer raises nothing, renders
+    # perfectly, and reads better than the refusal it should have been.
+    #
+    # The pre-check is free -- a set operation against the ledger's own marker
+    # range -- so the common turn pays exactly nothing, no model call and no
+    # event. That is the whole reason this is a trigger rather than an
+    # unconditional grading pass on a system where generation is already 89% of
+    # turn latency.
+    check: SelfCheckResult | None = None
+    self_check_acted = False
+    if agent.self_check_enabled:
+        ledger_size = len(ledger) if ledger is not None else len(retrieval.documents)
+        signal = self_check_signal(
+            text,
+            ledger_size=ledger_size,
+            # The routed specialist's flag, and True when nothing routed. A
+            # Socratic turn is a question put back to the learner and a Polya
+            # phase-1 turn is "what are you given?" -- neither asserts anything,
+            # so neither has anything to cite, and firing a critic on them is the
+            # `refusal_pass = 0/2` defect rebuilt: a measurement penalising the
+            # behaviour the persona exists to produce.
+            expects_citations=(
+                primary.expects_citations if primary is not None else True
+            ),
+        )
+        if signal is not None:
+            if emit is not None:
+                await events.phase(
+                    emit,
+                    events.PHASE_SELF_CHECK,
+                    events.STARTED,
+                    signal=signal.name,
+                )
+            critic_context = (
+                ledger.format_context()
+                if ledger is not None
+                else format_context(retrieval.documents)
+            )
+            check = await run_grounding_critic(
+                answer=text, context=critic_context, signal=signal
+            )
+            if emit is not None:
+                await events.phase(
+                    emit,
+                    events.PHASE_SELF_CHECK,
+                    events.FINISHED,
+                    duration_ms=check.duration_ms,
+                    signal=check.signal,
+                    verdict=check.verdict,
+                )
+
+            # **`VERDICT_FAILED` keeps the draft, and so does an exhausted
+            # budget.** A quality control that could not run has not found a
+            # problem, and the one outcome worse than shipping a weak draft is
+            # editing the model's own text to bolt a caveat onto it -- that makes
+            # the system's voice unreliable in a way no trace event records.
+            # Nothing below ever rewrites `text` by hand; it is replaced by a
+            # whole new generation or it is left exactly as it arrived.
+            if check.verdict == VERDICT_UNGROUNDED and steps_left > 0:
+                if emit is not None:
+                    # The EXISTING frame with a new `reason`. "Text streamed,
+                    # then the draft was thrown away" is precisely what the gap
+                    # trigger already produces and what `AgentChat` already
+                    # renders -- Pattern 04 needs a new reason, not a new
+                    # interaction.
+                    await emit(
+                        events.ANSWER_RESET,
+                        {"reason": "self_check", "signal": signal.name},
+                    )
+
+                correction = correction_message(check)
+                if check.suggested_query:
+                    # The critic's own suggestion, named so the forced search
+                    # looks for the thing the critic could not find rather than
+                    # for the whole question again -- the same instruction
+                    # `GAP_NUDGE` carries, for the same reason.
+                    correction += f"\n\nSearch the corpus for: {check.suggested_query}"
+                follow_up: list[BaseMessage] = [
+                    AIMessage(content=text),
+                    HumanMessage(content=correction),
+                ]
+
+                t0 = time.perf_counter()
+                if ledger is not None:
+                    # **The SAME loop, the SAME ledger, one step budget lighter.**
+                    # Reusing `run_agent_loop` is what keeps the forced search a
+                    # single implementation: `force_first_tool` binds a NAMED
+                    # tool through the same line the gap trigger uses, because
+                    # `tool_choice="any"` is silently ignored on this route. A
+                    # second, thinner loop here would drift from that one on the
+                    # first change to either.
+                    redraft = await run_agent_loop(
+                        agent=agent,
+                        question=search_query,
+                        ledger=ledger,
+                        system_prompt=system_prompt,
+                        model=model,
+                        max_steps=steps_left,
+                        emit=emit,
+                        follow_up=follow_up,
+                        force_first_tool=(
+                            SEARCH_CORPUS if check.suggested_query else None
+                        ),
+                    )
+                    tool_calls = [*tool_calls, *redraft.tool_calls]
+                    artifacts = [*artifacts, *redraft.artifacts]
+                    tool_ms += redraft.tool_ms
+                    tool_steps += redraft.steps
+                    generation_ms += redraft.generation_ms
+                    if redraft.stopped_reason is not None:
+                        stopped_reason = redraft.stopped_reason
+                    # A redraft search may have added entries, and marker order
+                    # is list order.
+                    documents = ledger.documents
+                    if redraft.text:
+                        text = redraft.text
+                        self_check_acted = True
+                else:
+                    # Tools off. One more generation, over the same context,
+                    # carrying the draft and the complaint. `SystemMessage` plus
+                    # a pre-formatted `HumanMessage` rather than a template, so a
+                    # brace in the persona prompt or in the model's own draft is
+                    # never parsed as a variable.
+                    messages: list[BaseMessage] = [
+                        SystemMessage(content=system_prompt),
+                        HumanMessage(
+                            content=USER_TEMPLATE.format(
+                                context=critic_context, question=search_query
+                            )
+                        ),
+                        *follow_up,
+                    ]
+                    if emit is None:
+                        redrafted = await _invoke_text(model, messages)
+                    else:
+                        await events.phase(
+                            emit, events.PHASE_GENERATE, events.STARTED
+                        )
+                        redrafted = await _stream_text(model, messages, emit)
+                        await events.phase(
+                            emit,
+                            events.PHASE_GENERATE,
+                            events.FINISHED,
+                            duration_ms=int((time.perf_counter() - t0) * 1000),
+                        )
+                    # Added here rather than after the branch: the tool path
+                    # above already accounts for its own model time through
+                    # `redraft.generation_ms`, and counting the wall clock as
+                    # well would double it.
+                    generation_ms += int((time.perf_counter() - t0) * 1000)
+                    if redrafted:
+                        text = redrafted
+                        self_check_acted = True
+
     return AnswerResult(
         question=question,
         answer=text,
@@ -863,4 +1461,18 @@ async def answer_question(
         tool_ms=tool_ms,
         tool_steps=tool_steps,
         stopped_reason=stopped_reason,
+        # Every one of these is the classic value when nothing routed and no
+        # check ran, so `AnswerResult` on a `specialists IS NULL` agent is the
+        # object it was before this feature -- the property scenario S20 asserts.
+        specialist=primary.slug if primary is not None else None,
+        specialists=[s.slug for s in route.specialists] if route is not None else [],
+        route_trigger=route.trigger if route is not None else None,
+        route_why=route.why if route is not None else None,
+        route_ms=route_ms,
+        route_failed=bool(route.failed) if route is not None else False,
+        self_check_signal=check.signal if check is not None else None,
+        self_check_verdict=check.verdict if check is not None else None,
+        self_check_ms=check.duration_ms if check is not None else 0,
+        self_check_unsupported=list(check.unsupported) if check is not None else [],
+        self_check_acted=self_check_acted,
     )

@@ -71,7 +71,7 @@ from app.db.models import (
     TraceEvent,
     User,
 )
-from app.rag.trace import GENERATE, REWRITE
+from app.rag.trace import GENERATE, REWRITE, ROUTE, SELF_CHECK
 
 router = APIRouter(prefix="/api", tags=["conversations"])
 
@@ -245,6 +245,21 @@ class MessageOut(BaseModel):
     tool_calls: int = 0
     handouts: list[HandoutOut] = Field(default_factory=list)
 
+    # The four routing and self-check fields `AskOut` returns live, replayed out
+    # of the ROUTE and SELF_CHECK payloads. Same `.get`-and-default story as
+    # `tool_steps` and `tool_calls` above: there is no column for any of them,
+    # because they are facts about how a turn RAN rather than properties of the
+    # query, and `trace_events` is where those live.
+    #
+    # Every turn recorded before this feature has no ROUTE row and no SELF_CHECK
+    # row, so all four replay as the classic values -- which is exactly what
+    # those turns were. A message with no `specialist` renders no route pill,
+    # the same as it did the day it was written.
+    specialist: str | None = None
+    specialists: list[str] = Field(default_factory=list)
+    route_trigger: str | None = None
+    self_check_verdict: str | None = None
+
 
 class ConversationDetail(ConversationOut):
     messages: list[MessageOut]
@@ -380,11 +395,20 @@ async def _load_messages(db: AsyncSession, conversation_id: uuid.UUID) -> list[M
     rewrite_changed: dict[uuid.UUID, bool] = {}
     tool_steps: dict[uuid.UUID, int] = {}
     tool_calls: dict[uuid.UUID, int] = {}
+    specialist: dict[uuid.UUID, str] = {}
+    specialists: dict[uuid.UUID, list[str]] = {}
+    route_trigger: dict[uuid.UUID, str] = {}
+    self_check_verdict: dict[uuid.UUID, str] = {}
+    # Still ONE statement for what is now four event types. They are the same
+    # table, the same key set and the same index, so splitting them would buy
+    # nothing but round trips on a read path that already justifies its statement
+    # count in the docstring above. Adding a type here costs an entry in this
+    # tuple and a branch below -- never another query.
     events = await db.execute(
         select(TraceEvent.query_id, TraceEvent.event_type, TraceEvent.payload)
         .where(
             TraceEvent.query_id.in_(query_ids),
-            TraceEvent.event_type.in_((REWRITE, GENERATE)),
+            TraceEvent.event_type.in_((REWRITE, GENERATE, ROUTE, SELF_CHECK)),
         )
         # First REWRITE per query wins. One turn produces one today; Stage 2's
         # score-triggered loop will add more, and the contract's
@@ -427,6 +451,29 @@ async def _load_messages(db: AsyncSession, conversation_id: uuid.UUID) -> list[M
                 # False want the same rendering and a payload that recorded no
                 # `changed` has no way to prove it changed anything.
                 rewrite_changed.setdefault(row.query_id, bool(payload.get("changed")))
+        elif row.event_type == ROUTE:
+            # One ROUTE row per turn by construction -- a two-mention turn is one
+            # decision with two outcomes -- so `setdefault` is belt and braces
+            # rather than a tie-break, and it keeps the first row winning the way
+            # every other branch here does.
+            chosen = payload.get("specialist")
+            if isinstance(chosen, str) and chosen:
+                specialist.setdefault(row.query_id, chosen)
+            names = payload.get("specialists")
+            if isinstance(names, list):
+                specialists.setdefault(
+                    row.query_id, [n for n in names if isinstance(n, str)]
+                )
+            trigger = payload.get("trigger")
+            if isinstance(trigger, str) and trigger:
+                route_trigger.setdefault(row.query_id, trigger)
+        elif row.event_type == SELF_CHECK:
+            # A row exists only when the pre-check fired, so a null here means
+            # "not checked" rather than "checked and clean" -- which is what the
+            # amber chip has to gate on, or every turn would carry one.
+            verdict = payload.get("verdict")
+            if isinstance(verdict, str) and verdict:
+                self_check_verdict.setdefault(row.query_id, verdict)
         else:
             # `tool_steps` is absent from every GENERATE payload written before
             # the loop existed, so `.get` with a default is the migration: old
@@ -481,6 +528,10 @@ async def _load_messages(db: AsyncSession, conversation_id: uuid.UUID) -> list[M
             tool_steps=tool_steps.get(row.id, 0),
             tool_calls=tool_calls.get(row.id, 0),
             handouts=handouts.get(row.id, []),
+            specialist=specialist.get(row.id),
+            specialists=specialists.get(row.id, []),
+            route_trigger=route_trigger.get(row.id),
+            self_check_verdict=self_check_verdict.get(row.id),
         )
         for row in rows
     ]

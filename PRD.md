@@ -511,9 +511,10 @@ unless noted.
 
 #### Teaching personas
 
-Eight templates ship. Three are parameter presets; **five are teaching personas grounded in
+Nine templates ship. Three are parameter presets; **five are teaching personas grounded in
 learning science**, because the workshop corpus is course material and "what the agent
-retrieves" matters less to a learner than "what it does with it".
+retrieves" matters less to a learner than "what it does with it"; and one is an
+**orchestrator** that chooses among the five per turn.
 
 | Slug | Persona | Rests on | k / top_n |
 |---|---|---|---|
@@ -524,7 +525,17 @@ retrieves" matters less to a learner than "what it does with it".
 | `polya-coach` | Problem coach | Pólya's four phases, *How to Solve It* | 20 / 5 |
 | `quiz-generator` | Quiz writer | Retrieval practice / testing effect (Roediger & Karpicke) | **40 / 8** |
 | `reflective-coach` | Reflection guide | Gibbs' reflective cycle; Schön | **12 / 4** |
+| **`adaptive-tutor`** | **Teaching orchestrator** | **Adaptive instruction; the expertise-reversal effect — guidance that helps a novice measurably hinders a learner who already has the schema, so the useful unit is a *choice between kinds of help*** | **24 / 5, overridden per routed specialist** |
 | `from-scratch` | Blank canvas | Model defaults | 20 / 3 |
+
+**`adaptive-tutor` routes between the five, and that is PRD-catalogue "query routing" rotated
+onto the only axis this system has.** Routing between *sources* is architecturally closed
+here and deliberately so — one namespace per agent, and `SearchCorpusArgs` has a single field
+precisely so a prompt-injected model cannot name another corpus. Routing between *teaching
+strategies* is the decision this product actually has, and it moves retrieval breadth
+(`retrieve_k`, `rerank_top_n`) as well as voice. It cannot move `chunk_size`, which is fixed
+at ingest. Full design in
+[new features/11-orchestrator-and-self-check.md](new%20features/11-orchestrator-and-self-check.md).
 
 Retrieval parameters differ *per persona* rather than being copied: a quiz generator draws
 items from across the whole corpus and needs breadth; a reflection guide works a narrow
@@ -1271,6 +1282,42 @@ rounds; the generation model emits 1.50–2.00 tool calls per round, measured to
 controls something roughly half as large as its label implies. Both numbers are now
 recorded and the turn chip renders the larger, so it is visible rather than hidden — but
 whether the *budget* should count calls is unresolved.
+
+---
+
+### Opened 2026-08-16 by the orchestrator and self-check build
+
+Full record in
+[new features/11-orchestrator-and-self-check.md](new%20features/11-orchestrator-and-self-check.md).
+
+**29. The routing fallback path is unexercised.** The router measured **18/18** across six
+probes and reached all five specialists, with zero fallbacks — so `trigger="fallback"` is
+reasoned-about rather than observed. It is reached only by an exception or by a model naming
+a slug the owner disabled, and both are forced down the same branch as the agent's own
+prompt. Nothing has run it. A probe that *makes* routing fail is the missing measurement.
+
+**30. Self-check is unmeasured against a golden set, and it must not be measured with
+faithfulness.** The critic exempts labelled analogies, questions to the learner and
+"the material does not cover X", because open item 20 records faithfulness scoring exactly
+those as unsupported and then advising their deletion. That makes Ragas the wrong instrument
+for the thing this feature does — scoring the self-check with the metric it was built to
+disagree with would confirm whichever one ran last. What it needs is a trajectory measure
+(open item 23, Stage 4), not a faithfulness-shaped one.
+
+**31. Routing costs ~222 ms and the orchestrator's `chunk_size` cannot be routed.** Measured
+n=9: rewrite alone 1,211 ms, router alone 1,368 ms, both under `asyncio.gather` 1,433 ms — so
+concurrency holds and the marginal cost is small against a 6.3 s persona turn. The unresolved
+half is granularity: `quiz-generator` is seeded at `chunk_size=500` and an `adaptive-tutor`
+corpus is ingested at 800, so a routed quiz turn gets the right *breadth* and the wrong
+*chunking*. Fixing it properly means indexing one corpus at two granularities, which is the
+same shape as open item 17 and should be decided with it.
+
+**32. `queries` still has no column for any of this.** `specialist`, `route_trigger` and
+`self_check_verdict` live only in `trace_events.payload` and are replayed with
+`.get`-and-default, exactly as `tool_steps` is. That was the right call for shipping — JSONB,
+no CHECK, no migration — and it means none of the three is queryable in aggregate. The first
+question anyone asks of this feature ("which specialist does this agent actually get routed
+to?") needs a JSONB scan or a column.
 
 ---
 

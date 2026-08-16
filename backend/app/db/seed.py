@@ -31,6 +31,7 @@ from __future__ import annotations
 from typing import Any
 
 from app.db.personas import PERSONA_TEMPLATES
+from app.db.specialists import ORCHESTRATOR_TEMPLATES
 
 # --------------------------------------------------------------------------
 # System prompts
@@ -214,9 +215,15 @@ AGENT_TEMPLATES: list[dict[str, Any]] = [
 # rejected all the others. Hence the splice rather than a `+`.
 _BLANK_CANVAS_SLUG = "from-scratch"
 
+# The orchestrator goes AFTER the five personas and BEFORE the blank canvas, so
+# the picker reads: retrieval configurations, then the teaching methods, then the
+# thing that chooses among them, then the fallback. Spliced for the same reason
+# the personas are -- concatenating onto the end would put the blank canvas
+# eighth of nine, which is the one position it must never occupy.
 ALL_TEMPLATES: list[dict[str, Any]] = [
     *(t for t in AGENT_TEMPLATES if t["slug"] != _BLANK_CANVAS_SLUG),
     *PERSONA_TEMPLATES,
+    *ORCHESTRATOR_TEMPLATES,
     *(t for t in AGENT_TEMPLATES if t["slug"] == _BLANK_CANVAS_SLUG),
 ]
 

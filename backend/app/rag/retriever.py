@@ -175,7 +175,7 @@ def get_vector_store(agent: Agent) -> PineconeVectorStore:
     )
 
 
-def _build_compressor(agent: Agent) -> CohereRerank:
+def _build_compressor(agent: Agent, *, top_n: int | None = None) -> CohereRerank:
     """The reranker. One construction site, two consumers.
 
     `build_retriever` hands this to `ContextualCompressionRetriever`;
@@ -184,10 +184,13 @@ def _build_compressor(agent: Agent) -> CohereRerank:
     compressor over whatever its base retriever returned -- and they are written
     against one constructor so that changing the model or `top_n` cannot fix one
     path and quietly miss the other.
+
+    `top_n` overrides `agent.rerank_top_n` for one call. See `aretrieve` for the
+    rule that makes that safe.
     """
     return CohereRerank(
         model=settings.rerank_model,
-        top_n=agent.rerank_top_n,
+        top_n=agent.rerank_top_n if top_n is None else top_n,
         cohere_api_key=settings.cohere_api_key,
     )
 
@@ -273,9 +276,31 @@ class Retrieval:
 
 
 async def aretrieve(
-    agent: Agent, query: str, *, rerank: bool | None = None, k: int | None = None
+    agent: Agent,
+    query: str,
+    *,
+    rerank: bool | None = None,
+    k: int | None = None,
+    top_n: int | None = None,
 ) -> Retrieval:
     """Retrieve once, keeping the scores. The path the pipeline uses.
+
+    **`k` and `top_n` are PER-CALL OVERRIDES and are never written back onto the
+    `Agent`.** They exist so a routed turn can retrieve at the chosen
+    specialist's breadth -- the Quiz Writer needs 40 -> 8 to spread items across
+    the corpus while the Explainer wants 20 -> 3, because a gap is visible across
+    three focused passages and invisible across eight. `None` means "use the
+    agent's own value", so every existing caller is unchanged.
+
+    The prohibition is the load-bearing half. Setting `agent.retrieve_k = 40` for
+    the duration of a turn would be the obvious implementation and is a data-loss
+    bug: the `Agent` is a live ORM object inside the request's session, and
+    `ask.run_turn` commits that session at the end of the turn -- so a value the
+    router picked for one question would be FLUSHED into the operator's saved
+    configuration and silently become the agent's permanent setting. Nothing
+    would raise, the answer would be fine, and the next eval run would measure
+    parameters nobody chose. Hence arguments, and hence `Specialist` being frozen.
+
 
     **This exists because `BaseRetriever` has nowhere to put a score.** Its
     interface returns `list[Document]`, so anything needing
@@ -315,7 +340,9 @@ async def aretrieve(
         # list(), because CohereRerank returns a Sequence and everything
         # downstream indexes, slices and enumerates it.
         documents = list(
-            await _build_compressor(agent).acompress_documents(documents, query)
+            await _build_compressor(agent, top_n=top_n).acompress_documents(
+                documents, query
+            )
         )
 
     return Retrieval(

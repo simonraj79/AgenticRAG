@@ -47,6 +47,8 @@ import type {
 } from "../lib/types.ts";
 import { ConfirmDeleteButton, ErrorBanner, Spinner, errorMessage } from "../components/ui.tsx";
 import Message from "../components/Message.tsx";
+import MentionPopup, { useMentions } from "../components/MentionPopup.tsx";
+import { specialistLabel } from "../lib/specialists.ts";
 import HandoutDock from "../components/HandoutDock.tsx";
 import HandoutsPanel from "../components/HandoutsPanel.tsx";
 import SourceRail from "../components/SourceRail.tsx";
@@ -132,6 +134,14 @@ type TurnFacts = {
   /** Counted from `tool_call` frames, so a stopped turn still carries the chip
    *  saying it searched. */
   toolSteps: number;
+  /** From the `route` phase, for the same reason `rewritten` is here: a turn
+   *  the user stopped reading still knows which persona was answering it, and
+   *  the route pill is the one thing on a truncated bubble that explains why it
+   *  sounded like a quiz. `self_check_verdict` is deliberately NOT tracked --
+   *  a verdict is about a complete draft, and a prefix has none. */
+  specialist: string | null;
+  specialists: string[];
+  routeTrigger: string | null;
   startedAt: number;
 };
 
@@ -174,11 +184,23 @@ const NEAR_BOTTOM_PX = 48;
 
 export default function AgentChat({
   agentId,
+  specialists,
   onCorpusChanged,
   initialRailTab = "sources",
   onAnswered,
 }: {
   agentId: string;
+  /**
+   * `Agent.specialists` -- the roster this agent may route a turn to, or null.
+   *
+   * Passed down rather than fetched, because the owner already holds the agent
+   * record and a second request for a column that arrived with it is a round
+   * trip for a constant. **Null or empty switches the `@mention` popup off
+   * entirely**, which is what makes a classic agent behave exactly as it did
+   * before this existed: the composer keeps plain Enter-to-send and nothing
+   * intercepts a keystroke.
+   */
+  specialists?: string[] | null;
   /** Uploading or deleting a source moves the agent's `document_count` and
    *  `status`, which the bar above renders. Handed up so one owner refetches,
    *  exactly as the Documents tab did before the corpus moved into the rail. */
@@ -271,6 +293,9 @@ export default function AgentChat({
     rewritten: null,
     rewrittenChanged: null,
     toolSteps: 0,
+    specialist: null,
+    specialists: [],
+    routeTrigger: null,
     startedAt: 0,
   });
   /** Whether the reader is pinned to the bottom. Maintained by the scroller's
@@ -279,6 +304,24 @@ export default function AgentChat({
    *  to explain. */
   const stickToBottom = useRef(true);
   const scrollFrame = useRef<number | null>(null);
+
+  /**
+   * The `@mention` autocomplete, or an inert object on an agent with no
+   * roster.
+   *
+   * Called unconditionally -- it is a hook -- and it is the ROSTER rather than
+   * the call that is conditional: `useMentions` returns `open: false` and a
+   * `handleKeyDown` that consumes nothing when there is nothing to mention. So
+   * a classic agent runs the same code and behaves exactly as it did before,
+   * which is the property S20 asserts on the server side of this feature.
+   */
+  const mentions = useMentions({
+    roster: specialists,
+    value: question,
+    setValue: setQuestion,
+    inputRef: input,
+  });
+
   useEffect(() => {
     activeIdNow.current = activeId;
   }, [activeId]);
@@ -514,6 +557,9 @@ export default function AgentChat({
       rewritten: null,
       rewrittenChanged: null,
       toolSteps: 0,
+      specialist: null,
+      specialists: [],
+      routeTrigger: null,
       startedAt: Date.now(),
     };
     setPending({ question: text, threadId, queryId: null, conversationId: null });
@@ -567,6 +613,13 @@ export default function AgentChat({
           turn.current.rewritten = event.rewritten_question ?? null;
           turn.current.rewrittenChanged = event.rewritten_changed ?? null;
         }
+        // Recorded above the address guard, like the rewrite: a turn the user
+        // wandered away from and stopped still needs its pill.
+        if (event.name === "route" && event.status === "finished") {
+          turn.current.specialist = event.specialist ?? null;
+          turn.current.specialists = event.specialists ?? [];
+          turn.current.routeTrigger = event.trigger ?? null;
+        }
         if (!onAddress()) return;
         const line = phaseLine(event);
         if (line) note(line);
@@ -591,18 +644,34 @@ export default function AgentChat({
 
       onAnswerReset: (event) => {
         // A user-visible retraction: a complete-looking half answer disappears
-        // and is replaced. Bounded to once per turn server-side, and given a
-        // line of its own rather than a silent wipe, because this is the most
-        // interesting thing the agent loop does and hiding it would be a waste
-        // as well as a surprise.
+        // and is replaced. Given a line of its own rather than a silent wipe,
+        // because this is the most interesting thing the agent loop does and
+        // hiding it would be a waste as well as a surprise.
+        //
+        // **Two reasons now, and they are different admissions.** The gap
+        // detector fires when the model SAID it did not know something, so the
+        // copy quotes the phrase back. The self-check fires when the draft
+        // cited a passage that does not exist or anchored nothing at all --
+        // there is no phrase to quote, and the honest sentence names what was
+        // wrong with the draft rather than what the loop did next. An
+        // unrecognised reason falls through to the gap wording, which is the
+        // older and more general of the two.
         turn.current.text = "";
         if (!onAddress()) return;
         setStreamText("");
-        note({
-          key: `reset-${event.seq}`,
-          label: "Discarded that draft and searched instead",
-          detail: `it said "${event.marker}"`,
-        });
+        note(
+          event.reason === "self_check"
+            ? {
+                key: `reset-${event.seq}`,
+                label: "Discarded that draft: it made claims the sources do not carry",
+                detail: signalDetail(event.signal),
+              }
+            : {
+                key: `reset-${event.seq}`,
+                label: "Discarded that draft and searched instead",
+                detail: event.marker ? `it said "${event.marker}"` : null,
+              },
+        );
       },
     };
 
@@ -732,9 +801,17 @@ export default function AgentChat({
   }
 
   function onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
-    // Shift+Enter newlines, Enter sends. `isComposing` guards an IME candidate
-    // window, where Enter commits the candidate and must not also send.
-    if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) return;
+    // `isComposing` FIRST, and it now guards two things rather than one. An IME
+    // candidate window uses Enter to commit and the arrow keys to move through
+    // candidates, so a mention popup that read either would fight the composer
+    // for exactly the users it is hardest to test with.
+    if (event.nativeEvent.isComposing) return;
+    // The popup gets first refusal and reports whether it took the key. It
+    // takes nothing while it is shut, which is what leaves Enter-to-send and
+    // Shift+Enter-newline untouched on every agent without a roster.
+    if (mentions.handleKeyDown(event)) return;
+    // Shift+Enter newlines, Enter sends.
+    if (event.key !== "Enter" || event.shiftKey) return;
     event.preventDefault();
     void send();
   }
@@ -1185,17 +1262,52 @@ export default function AgentChat({
               Question
             </label>
             <div className="flex min-w-0 items-end gap-2">
-              <textarea
-                id="chat-question"
-                ref={input}
-                data-testid="chat-input"
-                rows={2}
-                value={question}
-                onChange={(event) => setQuestion(event.target.value)}
-                onKeyDown={onKeyDown}
-                placeholder="Ask a question. Enter sends, Shift+Enter adds a line."
-                className="min-h-12 min-w-0 flex-1 resize-y rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 outline-none focus:border-slate-500"
-              />
+              {/*
+                `relative` so the popup can anchor to the TEXTAREA rather than
+                to the row -- anchoring to the row would put it above the Send
+                button too, and the extra element is what keeps `inset-x-0`
+                meaning "the width of the input".
+
+                No `overflow` on this wrapper, deliberately. It is the ancestor
+                the popup escapes upward through, and a clip here would hide
+                the whole feature while every check stayed green.
+              */}
+              <div className="relative flex min-w-0 flex-1 flex-col">
+                <MentionPopup state={mentions} />
+                <textarea
+                  id="chat-question"
+                  ref={input}
+                  data-testid="chat-input"
+                  rows={2}
+                  value={question}
+                  onChange={(event) => {
+                    setQuestion(event.target.value);
+                    mentions.noteCaret(event.target);
+                  }}
+                  // The caret can move without the value changing -- an arrow
+                  // key, a click into the middle of a line -- and the popup
+                  // follows the caret, not the string. Both are cheap: they set
+                  // one number, and setting it to the value it already holds
+                  // does not re-render.
+                  onKeyUp={(event) => mentions.noteCaret(event.currentTarget)}
+                  onClick={(event) => mentions.noteCaret(event.currentTarget)}
+                  onKeyDown={onKeyDown}
+                  // Per WAI-ARIA's combobox pattern, minus the role: focus
+                  // never leaves this element, so the active suggestion is
+                  // named rather than focused. All three are `undefined` when
+                  // there is no roster, so a classic agent's textarea is
+                  // announced exactly as it was.
+                  aria-expanded={mentions.open ? true : undefined}
+                  aria-controls={mentions.open ? mentions.listboxId : undefined}
+                  aria-activedescendant={mentions.activeDescendant}
+                  placeholder={
+                    specialists && specialists.length > 0
+                      ? "Ask a question, or @mention a specialist. Enter sends, Shift+Enter adds a line."
+                      : "Ask a question. Enter sends, Shift+Enter adds a line."
+                  }
+                  className="min-h-12 w-full min-w-0 resize-y rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 outline-none focus:border-slate-500"
+                />
+              </div>
               {pending ? (
                 /*
                   "Stop", not "Stop waiting", now that there is something to
@@ -1302,6 +1414,15 @@ function toMessage(question: string, result: AskResult): ChatMessage {
     handouts: result.handouts,
     tool_steps: result.tool_steps,
     tool_calls: result.tool_calls,
+    // Straight through, for the same reason `handouts` is: a fresh turn that
+    // renders without its route pill while the same turn re-read from the
+    // server renders with one is exactly the divergence this fold exists to
+    // avoid. The server omits all four on a classic agent, so there is nothing
+    // to substitute for.
+    specialist: result.specialist,
+    specialists: result.specialists,
+    route_trigger: result.route_trigger,
+    self_check_verdict: result.self_check_verdict,
   };
 }
 
@@ -1345,6 +1466,14 @@ function stoppedMessage(question: string, turn: TurnFacts): ChatMessage {
     // of the two, so the chip falls back to the step count rather than claiming
     // the turn searched nothing.
     tool_calls: 0,
+    // Real, off the `route` frame, which lands long before any text does -- so
+    // a truncated bubble still says which persona was writing it.
+    specialist: turn.specialist,
+    specialists: turn.specialists,
+    route_trigger: turn.routeTrigger,
+    // Absent, deliberately. The self-check grades a COMPLETE draft against its
+    // ledger, and a prefix has no verdict; claiming one would be the same
+    // mistake as running the refusal detector over half an answer.
     stopped: true,
   };
 }
@@ -1364,7 +1493,12 @@ function stoppedMessage(question: string, turn: TurnFacts): ChatMessage {
 function phaseLine(event: AskStreamPhase): ProgressEntry | null {
   const finished = event.status === "finished";
   const step = event.step ?? 1;
-  const key = `phase-${event.name}-${event.name === "generate" ? step : 0}`;
+  // `delegate` repeats once per mentioned specialist, so it keys on its index
+  // for the same reason `generate` keys on its step: two sections must be two
+  // lines, or the second one silently overwrites the first and the log claims
+  // one specialist answered when two did.
+  const slot = event.name === "generate" ? step : event.name === "delegate" ? event.index ?? 1 : 0;
+  const key = `phase-${event.name}-${slot}`;
 
   switch (event.name) {
     case "rewrite":
@@ -1418,9 +1552,106 @@ function phaseLine(event: AskStreamPhase): ProgressEntry | null {
             : "Writing the answer",
         detail: null,
       };
+    case "route": {
+      /*
+        "Choosing an approach", not "choosing a specialist" -- the routing
+        decision this product has is which TEACHING STRATEGY answers the turn,
+        and the personas are how that is spelled internally. A user who has
+        never opened the settings sheet has no idea what a specialist is.
+
+        The three triggers get three sentences rather than one, because they
+        are three different claims about who decided. Crediting the router with
+        a choice the user made in their own `@mention` is the same misreading
+        `tool_call.trigger` exists to prevent, one level up.
+      */
+      if (!finished) return { key, label: "Choosing an approach", detail: null };
+      if (event.trigger === "fallback") {
+        return { key, label: "Answering directly", detail: null };
+      }
+      const names = routedNames(event);
+      if (names === null) return { key, label: "Chose an approach", detail: null };
+      return {
+        key,
+        label: event.trigger === "mention" ? `You asked for ${names}` : `Routed to ${names}`,
+        detail: null,
+      };
+    }
+    case "delegate": {
+      // Present tense while it writes, past tense once it has. The count is in
+      // the label rather than the detail because "(2 of 2)" is part of the
+      // sentence -- a detail is a measurement, and this is a position.
+      const who = event.specialist ? specialistLabel(event.specialist) : "a specialist";
+      const total = event.total ?? 1;
+      const suffix = total > 1 ? ` (${event.index ?? 1} of ${total})` : "";
+      return {
+        key,
+        label: `${finished ? "Answered" : "Answering"} as ${who}${suffix}`,
+        detail: null,
+      };
+    }
+    case "self_check": {
+      /*
+        The finished line reports the VERDICT and not the fact of having
+        checked, because "Checked the answer" on a turn that then discarded
+        its draft would leave the discard unexplained -- and the discard is the
+        visible part. A `failed` critic reads as "Could not check the answer",
+        which is honest: the draft was kept, nothing was verified, and saying
+        it was checked would be the worst of the three.
+      */
+      if (!finished) {
+        return {
+          key,
+          label: "Checking the answer against its sources",
+          detail: signalDetail(event.signal),
+        };
+      }
+      if (event.verdict === "ungrounded") {
+        return { key, label: "Found claims the sources do not carry", detail: null };
+      }
+      if (event.verdict === "failed") {
+        return { key, label: "Could not check the answer", detail: null };
+      }
+      return { key, label: "Checked the answer", detail: null };
+    }
     default:
       return null;
   }
+}
+
+/**
+ * "the Explainer", or "the Explainer and the Problem coach", or `null`.
+ *
+ * `specialists` wins over `specialist` when it holds more than one, so a
+ * two-`@mention` turn reads as one sentence rather than two half-events -- the
+ * same reason the ROUTE payload carries both. A slug this client has never
+ * heard of comes back verbatim from `specialistLabel` rather than being
+ * dropped: naming what the server said beats inventing a fluent sentence about
+ * something unknown.
+ */
+function routedNames(event: AskStreamPhase): string | null {
+  const slugs =
+    event.specialists && event.specialists.length > 0
+      ? event.specialists
+      : event.specialist
+        ? [event.specialist]
+        : [];
+  if (slugs.length === 0) return null;
+  return slugs.map(specialistLabel).join(" and ");
+}
+
+/**
+ * What the free pre-check noticed, in a clause.
+ *
+ * Two signals, and the distinction is worth showing rather than collapsing to
+ * "the check fired": a phantom marker is a fabricated citation, which is worse
+ * than an unsupported sentence because the `[n]` chip ASSERTS provenance the
+ * user can click. An unrecognised signal returns null and the line simply
+ * carries no detail.
+ */
+function signalDetail(signal: string | undefined): string | null {
+  if (signal === "phantom_marker") return "it cited a passage that does not exist";
+  if (signal === "no_citations") return "it cited nothing at all";
+  return null;
 }
 
 /** "8 passages", plus the top similarity when the frame carries one. Shown
