@@ -89,6 +89,40 @@ Verification is green: `npm test` **2/2**, `npm run build`, and `scripts/ui_chec
 **15/15**. The 390x844 pass specifically verified that the creation panel fits the viewport,
 its action bar remains visible, and the page has zero horizontal overflow.
 
+### 2026-08-16 orchestrator, @mentions and self-check
+
+Live on commit `86a0f15`. Both Render services report `live`; the backend answers
+`{"status":"ok","database":"ok"}` and the static site serves a fresh hashed bundle. The
+migration `bc307f5fc31f -> d4e91c2a7b58` was applied before the merge, so the start command's
+`alembic upgrade head` was a no-op rather than a first run against production traffic.
+
+What shipped, and the reasoning is in
+[new features/11-orchestrator-and-self-check.md](new%20features/11-orchestrator-and-self-check.md):
+
+1. **`adaptive-tutor`**, a ninth template that routes each question to one of the five
+   teaching personas. Routing moves retrieval breadth as well as voice — it cannot move
+   `chunk_size`, which is fixed at ingest.
+2. **`@feynman`** overrides the router; two mentions produce two sections over one citation
+   ledger, so `[2]` means the same passage in both.
+3. **Self-check**, off by default, per agent. A free set operation against the citation ledger
+   decides whether a critic runs at all.
+
+Three of the five catalogue patterns already shipped here (ReAct, rewriting, multi-hop).
+**Routing between SOURCES was deliberately not built**: one namespace per agent, and
+`SearchCorpusArgs` has a single field precisely so a prompt-injected model cannot name another
+corpus. Building it means adding back the parameter that omission exists to prevent.
+
+Measured before the wiring existed: the router chose correctly **18/18** across six probes and
+reached all five specialists; rewrite alone 1,211 ms, router alone 1,368 ms, both under
+`asyncio.gather` **1,433 ms** — so routing costs ~222 ms on a 6.3 s persona turn.
+
+Verification: `agentic_check.py` S20–S27 **9/9** live, `route_specialist_check.py` **40/40**,
+`mention_popup_check.py` **17/17**, `ui_check.py` **15/15**, `npm test` **35/35** (was 2/2).
+
+**Off is off.** `agents.specialists IS NULL` and `self_check_enabled = false` *are* the classic
+path, so the migration needed no backfill — unlike `bc307f5fc31f`, which had to `UPDATE` every
+existing row. All six pre-existing agents are unaffected.
+
 ### Code: full RAG product, evaluation and handouts
 
 **Exists:**
@@ -97,20 +131,26 @@ its action bar remains visible, and the page has zero horizontal overflow.
 backend/app/
 ├── api/           agents, conversations, documents, evaluation, handouts
 ├── auth/          Google OAuth plus the gated local dev-login shim
-├── db/            SQLAlchemy models and async sessions
+├── db/            models, async sessions, seeds, and personas.py /
+│                  specialists.py (the roster)
 ├── eval/          golden-set generation, Ragas scoring, background jobs
-├── rag/           ingest, retrieval seam, pipeline, bounded agent loop, traces
+├── rag/           ingest, retrieval seam, pipeline, bounded agent loop, traces,
+│                  specialist routing (route.py) and answer self-check (selfcheck.py)
 └── tools/         corpus search and the sandboxed Python tool
 frontend/src/
 ├── views/         Login, Dashboard, Chat, Sources and Evaluate
-├── components/    workspace shell, drawers, messages, citations, traces, handouts
+├── components/    workspace shell, drawers, messages, citations, traces, handouts,
+│                  the @mention popup
 └── lib/           API/types/hooks; the frontend's only door to the backend
 scripts/           provisioning plus offline, agentic and browser harnesses
 ```
 
 The original RAG slice remains a useful low-cost smoke test, but it is no longer the product
-boundary. The live system includes multi-turn conversations, model-driven corpus search,
-sandboxed Python handouts, stored traces, golden-set authoring and Ragas scorecards.
+boundary. The live system includes multi-turn conversations, SSE streaming, model-driven
+corpus search, sandboxed Python handouts, stored traces, golden-set authoring, Ragas
+scorecards, and — since 2026-08-16 — an orchestrator persona that routes each question to one
+of five teaching specialists, `@mentions` that override the routing, and an optional
+self-check that can discard an ungrounded draft and try again.
 
 ---
 
@@ -159,24 +199,40 @@ authoritative tracker.
 
 | # | Item | Why it matters |
 |---|---|---|
-| 1 | **SSE streaming** (PRD 13) | The tool loop made a turn longer again — a search adds ~1.6 s and `run_python` adds ~1–3 s. Nothing shows progress between "sent" and the whole answer |
-| 2 | **`eval_runs` does not record `tools_enabled`** (PRD 23) | Two scorecards for one agent are incomparable if tools were toggled between them, and nothing on the card says so |
+| 1 | **The routing fallback path has never run** (PRD 29) | The router measured 18/18 with zero failures, so `trigger="fallback"` is reasoned-about rather than observed. The first time it fires will be in front of a user. A probe that *makes* routing fail is the missing measurement |
+| 2 | **`eval_runs` records neither `tools_enabled` nor the specialist roster** (PRD 23, 29) | Two scorecards for one agent are incomparable if either was toggled between them, and nothing on the card says so. An orchestrator run averages across teaching methods — EVAL.md §5 |
 | 3 | **Blocking SDK calls inside `async def`** (PRD 19) | Pinecone, Cohere and embeddings are sync at the in-request call sites in `ingest.py`. One uvicorn worker on Render. Fix them together |
 | 4 | **Deleting a document destroys past queries' contexts** (PRD 18) | FK cascade. Costs Stage 3 its evidence while the scores still render |
 | 5 | **Faithfulness penalises a teaching persona** (PRD 20) | The weakest-metric pointer currently advises deleting the pedagogy |
 | 6 | Object storage for handouts and slide images (PRD 10, 25) | Handout bytes are in Postgres, capped at 5 MB and 200 per agent |
+| 7 | **Self-check is unmeasured, and faithfulness is the wrong instrument** (PRD 30) | The critic exempts exactly the sentences faithfulness penalises, so the two disagree by design. Needs a trajectory measure, not a faithfulness-shaped one |
+
+**SSE streaming is done** and has been since `new features/08-streaming-and-followups.md` —
+`app/api/stream.py`, `apiStream` in `lib/api.ts`. It was item 1 on this list and PRD item 13
+still reads "Open"; both are stale, and the code is the authority.
 
 Verify anything you change with the four layers, lowest layer first — a fix in
 `app/tools/` or `app/rag/` invalidates the layers above it:
 
 ```bash
-backend/.venv/Scripts/python.exe scripts/sandbox_check.py    # 16 cases, no DB, seconds
-backend/.venv/Scripts/python.exe scripts/ledger_check.py     # citation markers, no DB
-cd frontend && npm test                                     # component behavior
-backend/.venv/Scripts/python.exe scripts/agentic_check.py --setup   # then --run, then --cleanup
+backend/.venv/Scripts/python.exe scripts/sandbox_check.py             # 16 cases, no DB, seconds
+backend/.venv/Scripts/python.exe scripts/ledger_check.py              # citation markers, no DB
+backend/.venv/Scripts/python.exe scripts/refusal_check.py             # refusal + gap detectors
+backend/.venv/Scripts/python.exe scripts/route_specialist_check.py    # mentions, routing, self-check
+backend/.venv/Scripts/python.exe scripts/llm_check.py                 # request body, no network
+cd frontend && npm test                                              # component behavior
+backend/.venv/Scripts/python.exe scripts/agentic_check.py --setup    # then --run, then --cleanup
 cd frontend && npm run build
-python scripts/ui_check.py                                  # both servers running
+python scripts/ui_check.py                                           # both servers running
+python scripts/mention_popup_check.py                                # both servers, popup OPEN
 ```
+
+**There is no CI — every one of these is run by hand**, so the ordering above is the whole
+protocol rather than a suggestion. The first five need no database, no provider and no
+browser and take seconds; the rest need one of the three. **`ui_check.py` and
+`mention_popup_check.py` are two files for a reason**: `ui_check` passes with the mention
+popup never rendering, because its fixture agent has no roster and nothing types `@`. A check
+that cannot fail reports success.
 
 `--cleanup` matters more than usual: a leaked Pinecone namespace is a real cost, and the
 Builder plan's 1,000-namespace cap *is* the maximum number of agents this deployment can
@@ -217,7 +273,8 @@ The full list is PRD §7. These are the ones that fail *without an error*:
 - **Check `pywin32` after every `pip freeze`.** `mcp` requires it only on Windows, but
   `pip freeze` drops environment markers, leaving a bare `pywin32==312` that Render's Linux
   build cannot install. It must read `pywin32==312; sys_platform == "win32"`. Freezing on
-  Windows flattens it again every time, and the failure lands in CI, not locally.
+  Windows flattens it again every time, and with no CI the failure lands in the Render build
+  minutes after the push, where it reads as an outage rather than as a mistake.
 
 ## Local setup
 
@@ -279,7 +336,21 @@ cd frontend && npm test && npm run build          # fast frontend gate
 
 ```bash
 python scripts/ui_check.py                        # browser UI/accessibility gate
+python scripts/mention_popup_check.py             # the @mention popup, measured OPEN
 ```
+
+```bash
+# Why is production behaving unlike local? Compare env vars BY VALUE, not by key.
+curl -s -H "Authorization: Bearer $RENDER_API_KEY" \
+  "https://api.render.com/v1/services/srv-d9vtuhpt0dsc738dmgsg/env-vars?limit=100"
+```
+
+That last one found a stale Cohere **trial** key on production in August, present and
+correct-looking, differing only under load. Compare by hash to find candidates, then *test* the
+key — on 2026-08-16 a hash comparison flagged `PINECONE_API_KEY` as drift and a functional test
+showed both keys reach the identical index. The hash finds candidates; only the test decides.
+Note that `DATABASE_URL`, `ENVIRONMENT`, `FRONTEND_URL` and `OAUTH_REDIRECT_URI` differ
+legitimately, and `RENDER_API_KEY` must never be on the service at all.
 
 ## Notes for whoever picks this up
 

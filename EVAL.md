@@ -252,6 +252,35 @@ pointer actionable.
 | `generation_model` | `NULL` → service default | faithfulness, **and what the agent does** — see below |
 | `tools_enabled` | `true` (new agents) / `false` (pre-existing) | **all four, and it is not a tuning knob** |
 | `max_tool_steps` | `3` | context_recall, latency |
+| `specialists` | `NULL` | **all four, and it makes a run a MIXTURE rather than a measurement** — see below |
+| `self_check_enabled` | `false` | faithfulness, latency — it can replace the answer being scored |
+
+**`specialists` is the row that most changes what a scorecard means, and NULL is the only
+value that keeps a run comparable to every baseline in §10.**
+
+A non-null roster makes the agent an orchestrator, and routing runs per question. So a
+ten-question golden set on one agent can be answered by four different personas — one
+explaining, one asking a question back, one writing quiz items — and the four metric means are
+then averaged **across teaching methods**, not across questions. The weakest-metric pointer
+does not know that, and will name faithfulness on a run where two answers were Socratic
+questions with nothing to be faithful to.
+
+Worse, it is not stable: routing is a model call at temperature 1.0, so re-running the same
+set can route differently and move a mean with no change to the agent. That is the same
+confound §8 warns about for regenerated answers, one level up.
+
+`eval_runs` records `judge_model` and `generation_model`, and **records neither the roster nor
+which specialist answered each question** — that lives only in the per-turn `ROUTE` trace
+payload. So unlike `generation_model`, a scorecard cannot tell you this happened. Evaluate an
+orchestrator by pointing the golden set at a single-persona agent over the same corpus, or
+read the `ROUTE` rows before believing a mean.
+
+**`self_check_enabled` is milder but has the same shape.** When the check fires and the draft
+is redrafted, the answer Ragas scores is the *second* one. That is the correct product
+behaviour and it is a confound in a measurement: two runs of the same set can score different
+answers to the same question because the check fired on one and not the other. It fires rarely
+by construction — the trigger is free and most answers pass it — but "rarely" is not "never",
+and the `SELF_CHECK` trace rows are the only record that it happened.
 
 **`generation_model` became editable in the settings sheet on 2026-08-16, and it is the
 second row here that changes what is being measured.** It used to be reachable only by
@@ -513,6 +542,24 @@ verbatim from its context, scored **0.000** by Gemma and **1.000** by Flash.
 | — | Judge and golden-set author are the same model | **Resolved 2026-08-16** — `GOLDEN_SET_MODEL` is `minimax/minimax-m3`, a third vendor. It cost a short-reference regression that a prompt mitigation holds down; §7.1 |
 | — | `reference_answer` length depends on a prompt string with nothing enforcing it at write time | Open — `scripts/goldenset_check.py` measures it out of band, but a short reference still saves cleanly |
 | — | The rewrite is stored only in the REWRITE trace payload, so a rewritten question cannot be read back from `queries` | Open — the reason eval turns skip the rewriter entirely (§4.6) rather than rewriting and recording |
+| **29** | **A run on an orchestrator averages across teaching methods, and the scorecard cannot say so.** `eval_runs` records the judge and generation models but not the roster or the per-question route | **Open** — §5. Evaluate a single-persona agent, or read the `ROUTE` trace rows |
+| **30** | **Self-check must not be scored with faithfulness, and the reason is that they disagree by design** | **Open** — see below |
+
+**On #30, and it is the sharpest instrument problem in this file.** The self-check's critic
+prompt *explicitly exempts* labelled analogies, questions put to the learner, and "the
+material does not cover X". Faithfulness *counts those as unsupported claims* — that is
+defect #20, measured in run 3.
+
+So the two instruments are built to disagree about the same sentences, deliberately, and
+scoring the self-check with faithfulness would confirm whichever one ran last rather than
+measuring anything. A run where the check fired and redrafted could score **worse** on
+faithfulness precisely because the redraft kept the pedagogy the critic was told to allow.
+
+What it actually needs is a trajectory measure — did the check fire when it should have, and
+stay quiet when it should not — which is PRD open item 23 and Stage 4. Until then the honest
+statement is that self-check is **unmeasured**, and `scripts/route_specialist_check.py` cases
+25 and 26 are the only assertion standing behind it: the run-3 teaching answer must not fire
+the check, and the same answer with its citations stripped must.
 
 On #20, measured in run 3 — every corpus fact in these answers was correct and retrieval
 worked:
