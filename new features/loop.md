@@ -237,6 +237,10 @@ means "wait sixty seconds" sends its reader to debug working code — the same c
 
 ## 6. Checklist — adding a third tool
 
+> Starting a session for one of these? [loop-prompt.md](loop-prompt.md) is the prompt
+> structure that front-loads steps 1, 2 and 5 below — the ones that are cheap to answer on
+> paper and expensive to discover after the loop is built, which is how the first one went.
+
 1. **Is it a tool?** Does it change what the agent can *find* or what it can *output*? If
    neither, it is a prompt change. If it must run every time, call it yourself.
 2. **Write the args schema with the smallest possible surface.** Anything the server already
