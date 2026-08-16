@@ -53,7 +53,7 @@
  */
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { FormEvent, ReactNode } from "react";
+import type { FormEvent, ReactNode, RefObject } from "react";
 import { api } from "../lib/api.ts";
 import type { Agent, Template } from "../lib/types.ts";
 import {
@@ -268,6 +268,7 @@ export default function CreateAgentWizard({
   templates,
   existingNames,
   onCreated,
+  initialNameRef,
 }: {
   templates: Template[];
   /** Names the user already owns. `agents` is unique on (owner, name), so a
@@ -275,6 +276,8 @@ export default function CreateAgentWizard({
    *  a four-step flow into a hint before the flow starts. */
   existingNames: string[];
   onCreated: (agent: Agent) => void | Promise<void>;
+  /** Shared with the modal drawer so the required field is focused on open. */
+  initialNameRef?: RefObject<HTMLInputElement | null>;
 }) {
   const [step, setStep] = useState<StepNumber>(1);
   const [furthest, setFurthest] = useState<StepNumber>(1);
@@ -298,7 +301,8 @@ export default function CreateAgentWizard({
   const [busy, setBusy] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
 
-  const nameRef = useRef<HTMLInputElement>(null);
+  const ownNameRef = useRef<HTMLInputElement>(null);
+  const nameRef = initialNameRef ?? ownNameRef;
   const headingRef = useRef<HTMLHeadingElement>(null);
   const overlapRef = useRef<HTMLInputElement>(null);
 
@@ -536,7 +540,11 @@ export default function CreateAgentWizard({
     }
   }
 
-  const showNameProblem = nameTouched && nameProblem;
+  // Keep the untouched empty field calm on first paint, but do not hide a
+  // duplicate or overlong value behind a blur the now-disabled Next button can
+  // never cause. Once somebody has typed a value, explain immediately why the
+  // flow cannot advance.
+  const showNameProblem = Boolean(nameProblem && (nameTouched || trimmedName.length > 0));
 
   return (
     <form
@@ -553,11 +561,11 @@ export default function CreateAgentWizard({
       noValidate
       data-testid="create-agent-wizard"
       data-step={step}
-      className="rounded-xl border border-slate-800 bg-slate-900/50 p-5"
+      className="flex min-h-full flex-col"
     >
       <StepRail current={step} furthest={furthest} onJump={goTo} />
 
-      <div className="mt-6 border-t border-slate-800 pt-6">
+      <div className="mt-5 flex-1 border-t border-slate-800 pt-5">
         {/* -------------------------------------------------- Step 1: Name */}
         {step === 1 && (
           <section aria-labelledby="wizard-heading">
@@ -619,8 +627,8 @@ export default function CreateAgentWizard({
                 </p>
               ) : (
                 <p id="agent-name-hint" className="mt-2 text-xs text-slate-400">
-                  Name it after the material it will answer from -- a topic, a module, a
-                  handbook.
+                  Required. Name it after the material it will answer from -- a topic, a
+                  module, a handbook.
                 </p>
               )}
 
@@ -1081,7 +1089,7 @@ export default function CreateAgentWizard({
       </div>
 
       {/* ------------------------------------------------------- Controls */}
-      <div className="mt-6 flex flex-wrap items-center gap-3 border-t border-slate-800 pt-5">
+      <div className="sticky bottom-0 z-10 -mx-4 -mb-4 mt-6 flex flex-wrap items-center gap-3 border-t border-slate-700 bg-slate-900/95 px-4 pt-4 pb-[max(1rem,env(safe-area-inset-bottom))] backdrop-blur">
         {step > 1 && (
           <button
             type="button"
@@ -1097,11 +1105,12 @@ export default function CreateAgentWizard({
           <button
             type="submit"
             data-testid="wizard-next"
-            // Deliberately NOT disabled when the step is incomplete. A dead
-            // button says "no" without saying why, and the reason is exactly
-            // what the user is missing; pressing it focuses the field and names
-            // the problem instead.
-            className="min-h-11 rounded-md bg-emerald-500 px-4 py-2 text-sm font-semibold text-emerald-950 transition hover:bg-emerald-400"
+            // Step 1 is the only required identity field in the flow. Its
+            // persistent helper/error text explains the gate, so disabling the
+            // action prevents a mobile user from tapping a control that cannot
+            // advance and then hunting above the fold for the reason.
+            disabled={step === 1 && nameProblem !== null}
+            className="min-h-11 rounded-md bg-emerald-500 px-4 py-2 text-sm font-semibold text-emerald-950 transition hover:bg-emerald-400 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
           >
             {/* Looked up rather than indexed: `step < 4` does not narrow a
                 numeric literal union in TypeScript, so `STEPS[step]` is an

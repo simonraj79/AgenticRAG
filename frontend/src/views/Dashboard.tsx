@@ -28,10 +28,11 @@
  * delete button confirms, and why it is not placed beside Open.
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../lib/api.ts";
 import type { Agent, Template } from "../lib/types.ts";
 import CreateAgentWizard from "../components/CreateAgentWizard.tsx";
+import Drawer from "../components/Drawer.tsx";
 import {
   CategoryBadge,
   ConfirmDeleteButton,
@@ -50,6 +51,8 @@ export default function Dashboard({ onOpenAgent }: { onOpenAgent: (agentId: stri
   const [error, setError] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
+  const createButtonRef = useRef<HTMLButtonElement>(null);
+  const wizardNameRef = useRef<HTMLInputElement>(null);
 
   const loadAgents = useCallback(async () => {
     setAgents(await api<Agent[]>("/api/agents"));
@@ -104,8 +107,28 @@ export default function Dashboard({ onOpenAgent }: { onOpenAgent: (agentId: stri
     }
   }
 
+  function closeCreate() {
+    setCreateOpen(false);
+    // The drawer normally restores the trigger itself. This explicit return
+    // also covers the first-run case, where the drawer opened automatically
+    // because the account had no agents and therefore had no focused trigger.
+    window.requestAnimationFrame(() => createButtonRef.current?.focus());
+  }
+
   return (
-    <div className="mx-auto max-w-6xl px-4 py-8 sm:px-6 sm:py-10">
+    <>
+      {/*
+        A creation flow is a focused task, not another dashboard section. While
+        its modal drawer is open the dashboard is removed from both the tab
+        order and the accessibility tree, so mobile users do not encounter the
+        card list "behind" step 1. The backdrop provides the same separation
+        visually and catches an intentional click-away.
+      */}
+      <div
+        aria-hidden={createOpen ? true : undefined}
+        inert={createOpen}
+        className="mx-auto max-w-6xl px-4 py-8 sm:px-6 sm:py-10"
+      >
       <header className="mb-8 flex flex-wrap items-start justify-between gap-4">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight text-slate-100">Your agents</h1>
@@ -116,42 +139,21 @@ export default function Dashboard({ onOpenAgent }: { onOpenAgent: (agentId: stri
         </div>
 
         <button
+          ref={createButtonRef}
           type="button"
           data-testid="create-agent-toggle"
           aria-expanded={createOpen}
           aria-controls="create-agent-panel"
-          onClick={() => setCreateOpen((open) => !open)}
-          className={`min-h-11 rounded-md border px-4 py-2 text-sm font-medium transition ${
-            createOpen
-              ? "border-slate-700 bg-slate-900 text-slate-300 hover:border-slate-600"
-              : "border-emerald-500 bg-emerald-500 text-emerald-950 hover:bg-emerald-400"
-          }`}
+          onClick={() => setCreateOpen(true)}
+          className="min-h-11 rounded-md border border-emerald-500 bg-emerald-500 px-4 py-2 text-sm font-medium text-emerald-950 transition hover:bg-emerald-400"
         >
-          {createOpen ? "Close" : "New agent"}
+          New agent
         </button>
       </header>
 
       <div className="mb-8">
         <ErrorBanner error={error} />
       </div>
-
-      {createOpen && (
-        <div id="create-agent-panel" className="mb-10">
-          <CreateAgentWizard
-            templates={templates}
-            // `agents` is unique on (owner, name). Handing the wizard the names
-            // already taken lets it say so on step 1, instead of the server
-            // saying it as a 409 after four steps of work.
-            existingNames={agents.map((agent) => agent.name)}
-            onCreated={async (agent) => {
-              setError(null);
-              setCreateOpen(false);
-              await loadAgents();
-              onOpenAgent(agent.id);
-            }}
-          />
-        </div>
-      )}
 
       <section>
         <h2 className="mb-4 text-sm font-medium tracking-wide text-slate-400 uppercase">
@@ -240,6 +242,31 @@ export default function Dashboard({ onOpenAgent }: { onOpenAgent: (agentId: stri
           ))}
         </ul>
       </section>
-    </div>
+      </div>
+
+      <Drawer
+        open={createOpen}
+        onClose={closeCreate}
+        title="Create a new agent"
+        testId="create-agent-panel"
+        width="lg"
+        initialFocusRef={wizardNameRef}
+      >
+        <CreateAgentWizard
+          templates={templates}
+          initialNameRef={wizardNameRef}
+          // `agents` is unique on (owner, name). Handing the wizard the names
+          // already taken lets it say so on step 1, instead of the server
+          // saying it as a 409 after four steps of work.
+          existingNames={agents.map((agent) => agent.name)}
+          onCreated={async (agent) => {
+            setError(null);
+            setCreateOpen(false);
+            await loadAgents();
+            onOpenAgent(agent.id);
+          }}
+        />
+      </Drawer>
+    </>
   );
 }
