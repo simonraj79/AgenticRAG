@@ -214,6 +214,24 @@ class AskOut(BaseModel):
     rewritten_question: str | None = None
     citations: list[CitationOut]
     tool_steps: int = 0
+    # Round-TRIPS, where `tool_steps` counts ROUNDS. They were the same number
+    # until 2026-08-16 and are not any more.
+    #
+    # `google/gemma-4-31b-it` emitted at most one call per step, so a client could
+    # honestly render `tool_steps` as "searched twice". Measured on
+    # `deepseek/deepseek-v4-flash-0731`, 8/8 steps emitted TWO `search_corpus`
+    # calls, several of them near-duplicates -- so a turn that ran two retrievals
+    # reported "searched once", understating the work by half.
+    #
+    # That matters here more than it would elsewhere: the product exists to make
+    # the pipeline inspectable, and `max_tool_steps` is a slider a workshop
+    # attendee is invited to tune. A student watching the step budget had no way
+    # to see that three steps can be six retrievals.
+    #
+    # Defaults to 0 and is absent from every GENERATE payload written before this
+    # landed, which `conversations.py` handles the same way it already handles
+    # `tool_steps` -- see the backfill note there.
+    tool_calls: int = 0
     handouts: list[HandoutOut] = Field(default_factory=list)
 
 
@@ -938,6 +956,12 @@ async def run_turn(
             # the second is the one worth seeing, because it means the answer was
             # forced rather than finished.
             "tool_steps": result.tool_steps,
+            # Rounds and round-trips diverged when the generation model started
+            # emitting several calls per step -- see `AskOut.tool_calls`. Recorded
+            # separately rather than derived, because `conversations.py` rebuilds
+            # a turn's summary from this payload alone and counting TOOL_CALL rows
+            # there would make the two views disagree on old turns.
+            "tool_calls": len(result.tool_calls),
             "stopped_reason": result.stopped_reason,
             "tool_ms": result.tool_ms,
             "handouts": len(handout_rows),
@@ -1047,6 +1071,7 @@ async def run_turn(
         rewritten_question=result.rewritten_question,
         citations=citations,
         tool_steps=result.tool_steps,
+        tool_calls=len(result.tool_calls),
         # Built from the pending objects rather than re-read after the commit.
         # `expire_on_commit=False` keeps them readable, and every field
         # `HandoutOut` wants was set in Python -- `created_at` is the one

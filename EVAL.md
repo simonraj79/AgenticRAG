@@ -105,7 +105,8 @@ the committed template is [`.env.example`](.env.example).
 
 | Variable | Default | What it does |
 |---|---|---|
-| `GENERATION_MODEL` | `google/gemma-4-31b-it` | Writes the answers being graded |
+| `GENERATION_MODEL` | `deepseek/deepseek-v4-flash-0731` | Writes the answers being graded |
+| `GENERATION_REASONING` | `false` | Thinking on the generation path. On, it was 60–79% of billed output tokens |
 | `DECISION_MODEL` | `google/gemma-4-31b-it` | Per-turn question rewrite / contextualisation |
 | `GOLDEN_SET_MODEL` | `google/gemini-3.7-flash` | **Drafts** the golden set (§7) |
 | `RAGAS_JUDGE_MODEL` | `google/gemini-3.7-flash` | **Grades** the answers |
@@ -116,6 +117,29 @@ the committed template is [`.env.example`](.env.example).
 
 Model ids are **`author/model`**. A bare `gemma-4-31b-it` returns a 404 naming a model that
 plainly exists; `app/rag/llm.py` maps the known legacy ids and warns rather than guessing.
+
+> **The generation model changed on 2026-08-16, and every scorecard recorded before that
+> date was written by a different agent.** `eval_runs` captures `generation_model` per run
+> precisely so this is visible rather than inferred — read it before comparing two runs, and
+> treat a comparison across the boundary as two measurements, not a trend. Judge
+> independence is unaffected and slightly improved: generation and judge were already
+> different models, and still are.
+>
+> Two things change what a scorecard *means*, beyond the numbers moving:
+>
+> - **The agent now searches on its own.** Answers are drawn from chunks retrieved
+>   mid-turn, not only from the initial retrieval, so `contexts` for a question can differ
+>   run to run even with identical retrieval parameters. Context precision and recall are
+>   measuring a wider and less deterministic set than they were.
+> - **`refusal_pass` should read slightly higher for a reason that is not the agent.** Two
+>   detector fixes landed with the swap: the marker lists now match through markdown
+>   emphasis (`does **not** mention` was defeating them), and two markers lost a hard-coded
+>   determiner, so `"not covered in this briefing"` now scores like `"not covered in the
+>   briefing"` — it previously did not. Some of any improvement is the measurement being
+>   repaired, not the agent improving; that is the confound §10 already warns about, and it
+>   has now occurred five times in this project.
+>
+> `new features/09-deepseek-agentic.md` has the measurements.
 
 ### 4.3 Sampling — one configuration, not four knobs
 

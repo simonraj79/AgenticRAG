@@ -101,6 +101,27 @@ tools, and the migration backfilled every pre-existing agent to `false` for the 
 
 ### T1 — Assume the model will not call your tool
 
+> **AMENDED 2026-08-16. This is a fact about a model, not about models**, and the model
+> changed. `deepseek/deepseek-v4-flash-0731` self-initiated a search **6/6** on this
+> identical probe — same one-chunk context, same two-part question, same refusal-first
+> persona prompt — where Gemma scored 0. The advice below is still the right *default*,
+> because assuming a trigger is needed costs a paragraph and assuming it is not costs a
+> rebuild. But **re-run the table when the model changes**; do not inherit its conclusion.
+> [09-deepseek-agentic.md](09-deepseek-agentic.md) has the full inversion and what had to
+> become conditional as a result.
+>
+> Two things outlived the table and are worth more than it was:
+>
+> - **The structural explanation below is still correct, and it is what predicts which
+>   models need a trigger.** A model drilled to treat a missing fact as a cue to *decline*
+>   will not spontaneously treat it as a cue to *search*. Gemma is drilled that way;
+>   DeepSeek is not. Ask that question of a new model rather than re-measuring blind.
+> - **The inverse failure is real, and nothing here was watching for it.** The new model
+>   emits 1.50–2.00 search calls per step, several near-duplicates, and `max_tool_steps`
+>   bounds *steps* rather than *calls* — so the retrieval budget silently doubled. A year
+>   of assuming under-calling left the suite with no assertion that could see
+>   over-calling. **When you invert an assumption, look for the test you never wrote.**
+
 Budget for designing a trigger, not for wordsmithing guidance. Measured against
 `google/gemma-4-31b-it` with one chunk of context, a two-part question, and `search_corpus`
 bound:
@@ -176,6 +197,14 @@ rate-limit detector, which matched `"too many requests"` and missed Cohere's
 That is worse than an error, and in the same family as the `max_completion_tokens` 404 in
 [CLAUDE.md](../CLAUDE.md): a parameter accepted and not honoured. A dropped "required" is
 indistinguishable from a model that considered the tools and declined.
+
+> **AMENDED 2026-08-16, and the amendment strengthens the rule rather than relaxing it.**
+> `tool_choice="any"` **is** honoured by `deepseek/deepseek-v4-flash-0731`. So the
+> behaviour is per-model, which means a codebase that switched to `"any"` on the strength
+> of that would break silently the next time an agent is pointed at Gemma — and
+> `agents.generation_model` lets an operator do exactly that. A named tool works on both.
+> **Keep naming it.** When a workaround is free and its alternative is conditional on the
+> model, the workaround is the portable choice, not the legacy one.
 
 ### T5 — Do not widen a tool-bound request
 

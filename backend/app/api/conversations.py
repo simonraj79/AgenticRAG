@@ -220,6 +220,11 @@ class MessageOut(BaseModel):
     created_at: datetime
     citations: list[CitationOut]
     tool_steps: int = 0
+    # See `AskOut.tool_calls`. Zero on every turn recorded before 2026-08-16,
+    # which the chat view renders as "searched N times" from `tool_steps` exactly
+    # as it always did -- an old turn is not retroactively wrong, it was taken by
+    # a model that made one call per step.
+    tool_calls: int = 0
     handouts: list[HandoutOut] = Field(default_factory=list)
 
 
@@ -355,6 +360,7 @@ async def _load_messages(db: AsyncSession, conversation_id: uuid.UUID) -> list[M
     # count in the docstring above.
     rewrites: dict[uuid.UUID, str] = {}
     tool_steps: dict[uuid.UUID, int] = {}
+    tool_calls: dict[uuid.UUID, int] = {}
     events = await db.execute(
         select(TraceEvent.query_id, TraceEvent.event_type, TraceEvent.payload)
         .where(
@@ -381,6 +387,14 @@ async def _load_messages(db: AsyncSession, conversation_id: uuid.UUID) -> list[M
             steps = payload.get("tool_steps")
             if isinstance(steps, int):
                 tool_steps.setdefault(row.query_id, steps)
+            # Same `.get`-as-migration, one generation later: `tool_calls` is
+            # absent from every payload written before rounds and round-trips
+            # became different numbers. Absent replays as zero, and the client
+            # falls back to `tool_steps` for those turns rather than claiming a
+            # turn made no calls at all.
+            calls = payload.get("tool_calls")
+            if isinstance(calls, int):
+                tool_calls.setdefault(row.query_id, calls)
 
     # A fourth statement, and it earns itself the same way the other three do:
     # the alternative is a lazy load per message, which on an async session
@@ -417,6 +431,7 @@ async def _load_messages(db: AsyncSession, conversation_id: uuid.UUID) -> list[M
             created_at=row.created_at,
             citations=citations.get(row.id, []),
             tool_steps=tool_steps.get(row.id, 0),
+            tool_calls=tool_calls.get(row.id, 0),
             handouts=handouts.get(row.id, []),
         )
         for row in rows

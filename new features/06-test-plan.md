@@ -3,10 +3,29 @@
 Three layers, run in this order. Each catches what the next cannot see.
 
 ```
-1. sandbox harness        no DB, no API, no model.        scripts/sandbox_check.py
+1. offline harnesses      no DB, no API, no model, no network.
+     scripts/sandbox_check.py    the sandbox and its controls
+     scripts/ledger_check.py     the citation-marker contract
+     scripts/refusal_check.py    the refusal and gap detectors      (added by 09)
+     scripts/llm_check.py        the OpenRouter request body        (added by 09)
 2. agentic harness        real DB, real model, no browser. scripts/agentic_check.py
-3. Playwright MCP         real browser, three viewports.
+3. Playwright             real browser, three viewports.
+     scripts/ui_check.py         scripted, GLOBAL interpreter       (added by 07)
+     Playwright MCP              exploratory, for what a script cannot judge
 ```
+
+**Layer 1 grew twice, and both additions came from the same realisation.** Layer 2
+needs a database, a live model, a Pinecone namespace and several minutes; anything
+it is the *only* check for is a thing nobody verifies while iterating. So when
+[09](09-deepseek-agentic.md) found the refusal markers wrong a fourth time and the
+request body carrying a parameter it should not, neither got a layer-2 scenario —
+both are pure functions of their inputs, and a pure function tested through a
+20-minute integration suite is a pure function that is not tested.
+
+The rule that follows: **before writing a layer-2 scenario, ask what part of the
+property is decidable offline, and move that part down.** `refusal_check.py` runs
+27 cases in under a second; the layer-2 scenario that would have covered one of
+them costs a full agent turn.
 
 ---
 

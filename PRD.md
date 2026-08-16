@@ -1191,6 +1191,42 @@ The `docs/` directory in §9.1 assumes they stay; adjust if not.
 
 ---
 
+### Opened 2026-08-16 by the DeepSeek swap
+
+Full record in [new features/09-deepseek-agentic.md](new%20features/09-deepseek-agentic.md).
+
+**26. `agents.generation_model` is unreachable from the API.** The column exists, is
+nullable free text, and is read by four code paths — but it is absent from `AgentTunables`
+and `AgentOut`, and `AgentUpdate` sets `extra="forbid"`, so a PATCH carrying it returns 422.
+It can only be set by direct SQL. `llm.py` calls it "a free-text column an operator can type
+into", which is true of the database and of no shipped interface.
+
+This mattered little while every agent used one model. It matters now: pointing an agent
+back at `google/gemma-4-31b-it` is a meaningful operation — it is the configuration whose
+gap trigger `agentic_check.py` S13 exists to protect — and there is no supported way to do
+it. Either expose it (and decide whether a workshop attendee should be able to change the
+model mid-session) or delete the column and read the setting.
+
+**27. `"does not contain"` sits in the hard refusal tier, against the stated rule.**
+CLAUDE.md's rule is that the hard tier is for phrases a model would *never* write while
+answering. `"does not contain"` fails it — `refusal.py`'s own docstring example is an
+answer containing it, and that answer scores as a refusal.
+
+Moving it to the position-gated caveat tier would follow the rule and would change what
+`queries.refused` counts, and therefore what every scorecard in [EVAL.md](EVAL.md) is
+comparable to. **That is an evaluation decision, not a swap decision.** Pinned by
+`scripts/refusal_check.py` case 15b so the current behaviour cannot drift while it is
+undecided.
+
+**28. The retrieval budget is bounded in steps, not calls.** `max_tool_steps` limits
+rounds; the generation model emits 1.50–2.00 tool calls per round, measured to
+`tool_steps=3, tool_calls=6` on one turn. The slider a workshop attendee tunes therefore
+controls something roughly half as large as its label implies. Both numbers are now
+recorded and the turn chip renders the larger, so it is visible rather than hidden — but
+whether the *budget* should count calls is unresolved.
+
+---
+
 ## 11. Out of scope
 
 Acknowledged as real production concerns, deliberately not built:

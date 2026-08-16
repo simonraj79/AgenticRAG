@@ -2,6 +2,14 @@
 
 Planning documents for one change set: **agentic tools + Handouts**.
 
+> **[09-deepseek-agentic.md](09-deepseek-agentic.md) is the one to read next after
+> [loop.md](loop.md).** It is the first change here that made loop.md *wrong* rather
+> than merely applying it: T1's "assume the model will not call your tool" is a fact
+> about `google/gemma-4-31b-it`, and the model driving the loop today calls it 6/6
+> unprompted. loop.md has been amended rather than duplicated, per the rule at the
+> bottom of this file — but 09 carries the measurements and the machinery that had to
+> become conditional as a result.
+
 **[loop.md](loop.md) and [loop-prompt.md](loop-prompt.md) are the living documents here.**
 Everything else records a change that has shipped. `loop.md` is the design pattern extracted
 from it — read before adding a tool, a retry, or any feature where the model decides
@@ -34,6 +42,7 @@ the shape of the screen.
 | [06-test-plan.md](06-test-plan.md) | Three test layers and the iteration protocol between them |
 | [07-workspace-shell.md](07-workspace-shell.md) | The workspace shell, the editable settings sheet, and the de-NotebookLM pass — plus `scripts/ui_check.py`, which finally executes 05's acceptance criteria |
 | [08-streaming-and-followups.md](08-streaming-and-followups.md) | SSE streaming, and the two defects that came from how the work was divided rather than how it was written — including why an unadvertised parameter sometimes 404s and sometimes does not |
+| **[09-deepseek-agentic.md](09-deepseek-agentic.md)** | The move to `deepseek/deepseek-v4-flash-0731` — **the change that inverted [loop.md](loop.md) T1**, why turning reasoning off is only safe because a Gemma-era paragraph survives, and the two new layer-1 harnesses |
 
 ---
 

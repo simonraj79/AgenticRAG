@@ -90,8 +90,31 @@ REFUSAL_MARKERS = (
     "unable to answer",
     "i do not know",
     "i don't know",
-    "not found in the",
-    "not covered in the",
+    # **The determiner is deliberately absent, and this is the FIFTH correction
+    # to this list.** Both of these read `"... in the"` until 2026-08-16, which
+    # locked them to one determiner and made them miss every other member of their
+    # own family: `"not covered in this briefing"`, `"not covered in this
+    # material"`, `"not covered in that document"`.
+    #
+    # Found by `agentic_check.py` S7 going red on a textbook refusal:
+    #
+    #     "The corpus explicitly states that the modulation and coding schemes
+    #      ... are not covered in this briefing. ... The search did not surface
+    #      any additional material containing this information."
+    #
+    # `refused` came back False. The same miss had already occurred, unnoticed,
+    # in a browser turn that wrote `"not covered in this material"` -- and there
+    # it defeated `detect_gap` as well, so one over-specified marker was
+    # suppressing a retry AND corrupting a metric.
+    #
+    # The four earlier corrections were missing PHRASES and produced the
+    # `does not <reporting verb>` family. This one was not missing at all; it was
+    # too specific. Same lesson from the other side: `new features/loop.md` T3
+    # says to add the shape rather than the string, and a determiner is not part
+    # of the shape. Truncating costs nothing -- every string these matched before,
+    # they still match.
+    "not found in",
+    "not covered in",
     "outside the scope",
 )
 
@@ -180,6 +203,51 @@ CAVEAT_MARKERS = (
 )
 
 
+# Markdown emphasis, removed before any marker is matched against anything.
+#
+# **THE MARKER LIST HAS NOW BEEN WRONG A FOURTH TIME, AND THE FOURTH ONE IS NOT A
+# MISSING PHRASE.** The first three were: `"does not say"`, `"does not cover"`,
+# `"does not state"` -- three separate discoveries of one gap, which is what
+# produced the `does not <reporting verb>` family below and the rule in
+# `new features/loop.md` T3: when a list has been wrong three times, stop adding
+# the string you just saw and add the shape it belongs to.
+#
+# This is the same lesson one level up. Measured 2026-08-16 against
+# `deepseek/deepseek-v4-flash-0731`, 10 questions a one-chunk corpus cannot
+# answer, `detect_gap` fired on 8. One of the two misses:
+#
+#     "The material does **not** mention the cell chemistry vendor."
+#
+# `"does not mention"` is in CAVEAT_MARKERS and has been for some time. The phrase
+# is present, the meaning is present, and the substring match cannot see it,
+# because the model bolded the negation. Whitespace was already normalised here
+# for exactly this class of reason ("does not  contain" is the same refusal);
+# markdown emphasis is the same problem arriving through a different character.
+#
+# So the list was not short of a phrase -- **the normaliser was short of a rule**,
+# and every phrase in both tiers was equally blind. Fixing it in the list would
+# have meant a bolded variant of all 34 markers.
+#
+# This matters beyond the retry: `detect_refusal` shares these tiers and writes
+# `queries.refused`, a Stage 3 metric. CLAUDE.md records three separate occasions
+# where a detector miss produced a scorecard that blamed the agent for the
+# measurement. A model that bolds its negations -- which is an extremely ordinary
+# habit -- would have done it a fourth time, silently.
+#
+# `~` is included for completeness; no marker spans a strikethrough today.
+_EMPHASIS = re.compile(r"[*_`~]+")
+
+
+def strip_emphasis(text: str) -> str:
+    """Markdown emphasis removed, newlines preserved.
+
+    Newlines survive on purpose: `sentences` splits on blank lines, and
+    collapsing whitespace here would delete that boundary before it is read.
+    Per-sentence whitespace normalisation still happens at the point of match.
+    """
+    return _EMPHASIS.sub("", text)
+
+
 def sentences(text: str) -> list[str]:
     """Split into sentences, for the refusal scan only.
 
@@ -209,9 +277,14 @@ def detect_refusal(answer: str) -> str | None:
     CAVEAT_MARKERS for why the markers are in two tiers. Whitespace is normalised
     inside each sentence because generated text wraps, and "does not  contain" is
     the same refusal as "does not contain".
+
+    Markdown emphasis is stripped before splitting, for the reason given at
+    `_EMPHASIS`. That also makes the character budget slightly more honest than
+    it was: `REFUSAL_LEAD_CHARS` is meant to measure how much *content* preceded
+    the phrase, and `**` was being charged against it as though it were content.
     """
     consumed = 0
-    for sentence in sentences(answer):
+    for sentence in sentences(strip_emphasis(answer)):
         lowered = " ".join(sentence.lower().split())
         for marker in REFUSAL_MARKERS:
             if marker in lowered:
@@ -239,24 +312,48 @@ def detect_gap(answer: str) -> str | None:
     """The phrase in which the answer admitted something was missing, or None.
 
     Deliberately NOT `detect_refusal`, and the difference is the reason this
-    module has two functions. Measured 2026-08-16, `agentic_check.py` S3, with
-    one chunk of context and a two-part question:
+    module has two functions. The shape, from `agentic_check.py` S3 with one chunk
+    of context and a two-part question -- an answer, and then an admission:
 
         "The platform carries twenty-four lithium-ion battery modules [1]. The
-         provided text does not contain information regarding the onboard
-         storage for science instruments."
+         provided text does not cover the onboard storage for science
+         instruments."
 
     `detect_refusal` returns None for that, correctly -- the turn answered, and
     scoring it as a refusal would corrupt `refusal_pass`. But it is exactly the
     turn that should have searched, and the admission sits in the second
-    sentence where every position rule this module has is designed to ignore it.
+    sentence where the position rules protecting that metric are designed to
+    ignore it.
+
+    **The example matters more than it looks, and an earlier version of this
+    docstring got it wrong.** It used `"does not contain"`, which is a HARD-tier
+    marker, and hard markers match in ANY sentence within the 200-char lead --
+    so `detect_refusal` returned `"does not contain"` for it and the paragraph
+    above was false about its own module. Only a CAVEAT-tier phrase is
+    position-gated to the preamble, so only a caveat-tier phrase demonstrates the
+    asymmetry this function exists for. `"does not cover"` is one; see
+    `scripts/refusal_check.py` cases 14-18, which pin both tiers in both
+    directions so the next version of this paragraph cannot drift from the code.
+
+    That leaves a real open question rather than a bug: CLAUDE.md's rule is that a
+    phrase belongs in the hard tier "only if a model would never say it while
+    answering", and `"does not contain"` plainly fails that test -- the original
+    example is itself an answer containing it. Moving it would change what
+    `queries.refused` means, and therefore what every scorecard in EVAL.md is
+    comparable to, so it is left alone and written down instead.
 
     So: no sentence budget, no preamble window, both tiers, anywhere in the text.
     The two tiers exist to protect a metric; this function feeds a retry, and a
     retry that fires once too often costs a search while one that fires too
     rarely costs the feature.
+
+    **What this function no longer decides on its own.** The loop now also
+    requires that no `search_corpus` call has run this turn before acting on a
+    detected gap -- see `agent_loop.py`. The default model self-initiates
+    searches, so "the text admits a gap" stopped implying "the model never went
+    looking". This function still answers only the question it is named for.
     """
-    lowered = " ".join(answer.lower().split())
+    lowered = " ".join(strip_emphasis(answer).lower().split())
     for marker in _ALL_MARKERS:
         if marker in lowered:
             return marker

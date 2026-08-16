@@ -82,8 +82,27 @@ def _model_for(agent: Agent):
 
     `top_k` is passed and may be dropped: `build_chat_model` strips it for the
     Gemini family, because under `provider.require_parameters` a `top_k` that no
-    Gemini endpoint advertises leaves zero eligible providers and 404s. Agents
-    can be pointed at either family, so this call site must not decide.
+    Gemini endpoint advertises leaves zero eligible providers and 404s -- and now
+    for DeepSeek too, where it does NOT 404 but silently routes around the only
+    endpoint with a 10x cheaper cache. Agents can be pointed at any of the three,
+    so this call site must not decide.
+
+    `reasoning` reads the same setting the chat path does, and that shared value
+    is a measurement rather than an economy. The expectation was that this call
+    site -- which writes a program -- would want thinking ON where a generation
+    turn does not. Measured 2026-08-16 on `deepseek/deepseek-v4-flash-0731`, 6
+    chart recipes per arm, scoring the outcome this module already triggers on
+    (`chart.png` present on the FIRST attempt, not "the call succeeded"):
+
+        reasoning on   ->  5/6 first try,  p50 30.4s
+        reasoning off  ->  6/6 first try,  p50  8.1s
+
+    Off won on both axes, so there is no second setting. Note WHAT was scored: a
+    first-attempt miss is invisible to an "did it error" check, because `_problem`
+    catches it and the retry usually succeeds -- the run still ends `ready`. It
+    costs a whole extra model call and sandbox run, and only the artefact-absence
+    question surfaces it. That is `new features/loop.md` T2 applied to a config
+    choice rather than to a feature.
     """
     return build_chat_model(
         agent.generation_model or settings.generation_model,
@@ -91,6 +110,7 @@ def _model_for(agent: Agent):
         top_p=settings.generation_top_p,
         top_k=settings.generation_top_k,
         max_tokens=CODE_MAX_TOKENS,
+        reasoning=settings.generation_reasoning,
     )
 
 

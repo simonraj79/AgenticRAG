@@ -88,7 +88,11 @@ export default function Message({ message }: { message: ChatMessage }) {
   );
   const components = useMemo(() => createMarkdownComponents(inline), [inline]);
   const sourcesId = `sources-${message.query_id}`;
-  const toolActivity = summariseToolActivity(message.tool_steps, message.handouts.length);
+  const toolActivity = summariseToolActivity(
+    message.tool_steps,
+    message.handouts.length,
+    message.tool_calls,
+  );
 
   return (
     <li data-testid="chat-message" className="space-y-2.5">
@@ -364,20 +368,37 @@ function CitationChip({
  * case, including every turn taken by an agent with tools switched off and every
  * turn recorded before the loop existed.
  *
- * `tool_steps` counts every tool round-trip rather than searches specifically,
- * and "searched" is the plain reading of the overwhelming majority of them; the
- * second half names the round-trips that produced something instead. The exact
- * per-step detail is in the trace, which is what the chip opens.
+ * "searched" is the plain reading of the overwhelming majority of tool activity;
+ * the second half names the round-trips that produced something instead. The
+ * exact per-step detail is in the trace, which is what the chip opens.
+ *
+ * **It counts CALLS, not ROUNDS, and it did not always have to.** Until
+ * 2026-08-16 the generation model emitted at most one call per step, so
+ * `tool_steps` was an honest search count. The current model emits two
+ * `search_corpus` calls in a single step -- measured 8/8 -- so a turn that ran
+ * two retrievals rendered "searched once", understating the work by half in a
+ * product whose entire purpose is making the pipeline legible.
+ *
+ * `Math.max` rather than preferring `tool_calls` outright, because it is 0 on
+ * every turn recorded before the server sent it. Taking it unconditionally would
+ * relabel an old two-step turn as no searches at all -- replacing an undercount
+ * with a wrong count, which is worse, and invisible on exactly the historical
+ * conversations nobody re-reads.
  *
  * "once" and "twice" rather than "1 time" and "2 times", because this is a
  * sentence fragment in prose and not a counter.
  */
-function summariseToolActivity(steps: number, handouts: number): string | null {
+function summariseToolActivity(
+  steps: number,
+  handouts: number,
+  calls = 0,
+): string | null {
   const parts: string[] = [];
+  const searches = Math.max(steps, calls);
 
-  if (steps === 1) parts.push("searched once");
-  else if (steps === 2) parts.push("searched twice");
-  else if (steps > 2) parts.push(`searched ${steps} times`);
+  if (searches === 1) parts.push("searched once");
+  else if (searches === 2) parts.push("searched twice");
+  else if (searches > 2) parts.push(`searched ${searches} times`);
 
   if (handouts === 1) parts.push("made 1 handout");
   else if (handouts > 1) parts.push(`made ${handouts} handouts`);
