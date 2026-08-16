@@ -139,7 +139,14 @@ async def run(args) -> int:
             return 1
 
         rule("0. Configuration")
-        print(f"  embedding      : {settings.embedding_model} @ {settings.embedding_dimension}d")
+        # The route is printed beside the model because it is the one piece of
+        # embedding configuration that cannot report its own mistake: querying
+        # through a different space than the vectors were written in returns
+        # results, ranked wrongly, with nothing raising. The model string is
+        # identical on both roads by design (see `get_embeddings`), so without
+        # the route this line looks the same whichever gateway is live.
+        print(f"  embedding      : {settings.embedding_model} @ "
+              f"{settings.embedding_dimension}d via {settings.embedding_route}")
         print(f"  generation     : {settings.generation_model}")
         print(f"  decision       : {settings.decision_model} ({settings.structured_output_method})")
         print(f"  reranker       : {settings.rerank_model}")

@@ -125,6 +125,10 @@ type TurnFacts = {
   /** From the `rewrite` phase, so a stopped turn can still show what was
    *  actually searched for. */
   rewritten: string | null;
+  /** From the same frame. Carried separately because the banner renders on this
+   *  and not on the string -- a stopped turn whose rewrite changed nothing must
+   *  not claim it searched for something else. */
+  rewrittenChanged: boolean | null;
   /** Counted from `tool_call` frames, so a stopped turn still carries the chip
    *  saying it searched. */
   toolSteps: number;
@@ -265,6 +269,7 @@ export default function AgentChat({
     queryId: null,
     text: "",
     rewritten: null,
+    rewrittenChanged: null,
     toolSteps: 0,
     startedAt: 0,
   });
@@ -507,6 +512,7 @@ export default function AgentChat({
       queryId: null,
       text: "",
       rewritten: null,
+      rewrittenChanged: null,
       toolSteps: 0,
       startedAt: Date.now(),
     };
@@ -559,6 +565,7 @@ export default function AgentChat({
       onPhase: (event) => {
         if (event.name === "rewrite" && event.status === "finished") {
           turn.current.rewritten = event.rewritten_question ?? null;
+          turn.current.rewrittenChanged = event.rewritten_changed ?? null;
         }
         if (!onAddress()) return;
         const line = phaseLine(event);
@@ -1283,6 +1290,7 @@ function toMessage(question: string, result: AskResult): ChatMessage {
     latency_ms: result.latency_ms,
     model_used: result.model_used,
     rewritten_question: result.rewritten_question,
+    rewritten_changed: result.rewritten_changed,
     created_at: new Date().toISOString(),
     citations: result.citations,
     // Both carried straight through rather than defaulted to `[]` / `0` here.
@@ -1324,6 +1332,7 @@ function stoppedMessage(question: string, turn: TurnFacts): ChatMessage {
     latency_ms: Date.now() - turn.startedAt,
     model_used: null,
     rewritten_question: turn.rewritten,
+    rewritten_changed: turn.rewrittenChanged,
     created_at: new Date().toISOString(),
     citations: [],
     handouts: [],
@@ -1361,11 +1370,16 @@ function phaseLine(event: AskStreamPhase): ProgressEntry | null {
     case "rewrite":
       return {
         key,
-        label: finished ? "Rewrote the question" : "Working out what the question refers to",
-        // Null and unchanged are different facts, and the difference is worth a
-        // word: "unchanged" says the rewriter ran and left the question alone.
+        // "Working out what the question refers to" was coreference-specific and
+        // is now wrong on the majority of turns: on a first turn there is
+        // nothing to refer to, and the step is repairing spelling and shorthand
+        // instead. The copy names the OUTCOME, which covers both jobs.
+        label: finished ? "Rewrote the question for search" : "Preparing the search query",
+        // Three states, not two. `rewritten_changed` distinguishes "read it and
+        // left it alone" from "came back with nothing", which the string alone
+        // cannot: an unchanged rewrite and a raw question are the same text.
         detail: finished
-          ? event.rewritten_question
+          ? event.rewritten_changed && event.rewritten_question
             ? `"${event.rewritten_question}"`
             : "unchanged"
           : null,

@@ -196,8 +196,25 @@ class MessageOut(BaseModel):
     types both non-null because it is only ever built from a turn that finished.
 
     `rewritten_question` is read back out of the REWRITE trace event, not off a
-    column -- there is no `queries.rewritten_question`. Null means
-    contextualisation did not run at all.
+    column -- there is no `queries.rewritten_question`. Null means no rewritten
+    string was recorded: either the rewriter was never asked (every turn before
+    2026-08-16 that had no history) or it was asked and failed.
+
+    `rewritten_changed` comes out of the same payload and is what the chat view
+    renders on. **It is not a new key and this is not the `.get`-as-migration
+    story `tool_steps` tells below**: `changed` was already on the REWRITE
+    payload before the rewriter began running on every turn (2026-08-16), so
+    every follow-up recorded under the old behaviour replays with a NON-null
+    flag and keeps its banner. What 2026-08-16 added to that payload is
+    `failed` and the computed trigger, neither of which this model reads.
+
+    Null therefore means one thing only: no REWRITE payload supplied a rewritten
+    string. Either the query has no REWRITE row at all (a first turn taken before
+    the rewriter began running on first turns), or the rows it has all recorded
+    `failed`, whose `after` is null. It is null exactly when `rewritten_question`
+    is, because both are filled from the same payload in the same branch -- see
+    `_load_messages`. Null reads as "do not claim the question was rewritten",
+    which is the safe direction for a replayed turn nobody can re-measure.
 
     `tool_steps` is read back the same way, out of the GENERATE payload, and for
     the same reason: it is a fact about how the turn ran rather than a property
@@ -217,6 +234,7 @@ class MessageOut(BaseModel):
     latency_ms: int | None = None
     model_used: str | None = None
     rewritten_question: str | None = None
+    rewritten_changed: bool | None = None
     created_at: datetime
     citations: list[CitationOut]
     tool_steps: int = 0
@@ -359,6 +377,7 @@ async def _load_messages(db: AsyncSession, conversation_id: uuid.UUID) -> list[M
     # but a second round trip on a read path that already justifies its statement
     # count in the docstring above.
     rewrites: dict[uuid.UUID, str] = {}
+    rewrite_changed: dict[uuid.UUID, bool] = {}
     tool_steps: dict[uuid.UUID, int] = {}
     tool_calls: dict[uuid.UUID, int] = {}
     events = await db.execute(
@@ -372,14 +391,42 @@ async def _load_messages(db: AsyncSession, conversation_id: uuid.UUID) -> list[M
         # `rewritten_question` is the string that was searched, so the earliest
         # is the wrong one to keep once that lands. Flagged rather than guessed
         # at -- see this module's notes.
+        #
+        # **A second row breaks two things, not one, and the second is worse
+        # because it renders.** The first is the ordering above. The second is
+        # that `rewritten_question` and `rewritten_changed` are two dicts read
+        # back as one fact by the chat view, whose banner gate is
+        # `rewritten_changed AND rewritten_question`. They must therefore be
+        # filled from the SAME payload -- a failed first attempt followed by a
+        # successful second one would otherwise contribute the string from one
+        # row and the flag from the other, and a `False` flag beside a real
+        # rewritten string silently deletes the banner on exactly the turn most
+        # worth showing. Hence the single branch below rather than two.
+        #
+        # Running the rewriter on every turn (2026-08-16) does NOT break either
+        # assumption: it is still one call and therefore one row per query, on
+        # first turns as well as follow-ups. What changed is how many queries
+        # have a row at all, which is the count, not the ordering.
         .order_by(TraceEvent.query_id, TraceEvent.step_index)
     )
     for row in events:
         payload = row.payload or {}
         if row.event_type == REWRITE:
             after = payload.get("after")
+            # **One branch, two dicts, one payload.** Both `setdefault` calls are
+            # gated on the same condition on purpose: whichever REWRITE row wins
+            # for a query must supply the string AND the flag, because the client
+            # reads them as a pair. Filling `rewrite_changed` unconditionally --
+            # which is what this did until the pairing was noticed -- is
+            # indistinguishable from correct while there is one row per query,
+            # and pairs a real string with the wrong flag the moment there are
+            # two. See the ordering note on the query above.
             if isinstance(after, str) and after:
                 rewrites.setdefault(row.query_id, after)
+                # `bool()` rather than an isinstance guard, because absent and
+                # False want the same rendering and a payload that recorded no
+                # `changed` has no way to prove it changed anything.
+                rewrite_changed.setdefault(row.query_id, bool(payload.get("changed")))
         else:
             # `tool_steps` is absent from every GENERATE payload written before
             # the loop existed, so `.get` with a default is the migration: old
@@ -428,6 +475,7 @@ async def _load_messages(db: AsyncSession, conversation_id: uuid.UUID) -> list[M
             latency_ms=row.latency_ms,
             model_used=row.model_used,
             rewritten_question=rewrites.get(row.id),
+            rewritten_changed=rewrite_changed.get(row.id),
             created_at=row.created_at,
             citations=citations.get(row.id, []),
             tool_steps=tool_steps.get(row.id, 0),

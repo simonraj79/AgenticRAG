@@ -138,11 +138,39 @@ class SuggestedQuestion(BaseModel):
             "the way a learner would actually type it."
         )
     )
+    # **The most load-bearing string in this file, and it is a mitigation rather
+    # than a description.** "In one or two sentences" was enough for
+    # `google/gemini-3.7-flash` and is not enough for `minimax/minimax-m3`.
+    # Measured 2026-08-16, pooled over 8 runs on the same corpus and prompt:
+    #
+    #                                MiniMax M3    Flash
+    #     reference answer, median      24 chars   95 chars
+    #     references under 20 chars          43%         0%
+    #     shortest seen             '14 knots', '31 hours'
+    #
+    # That is the same defect `config.py` rejected Gemma as the drafting model
+    # for ("Nineteen", 8 characters), arriving through the model this project
+    # moved TO for judge independence. It is silent: a bare figure is a correct
+    # answer and validates perfectly, and `LLMContextRecall` -- which decomposes
+    # this field into claims and attributes each to the retrieved contexts --
+    # gets nothing to decompose, so a quarter of the scorecard quietly measures
+    # air while still printing a number. Two of the four metrics read this field.
+    #
+    # Hence the worked example. Naming the failure ("a bare figure") and showing
+    # the pair is what the short instruction lacked; `scripts/goldenset_check.py`
+    # measures the length distribution because a wording change here can undo it
+    # without anything raising.
     reference_answer: str = Field(
         description=(
             "For an answerable question: the correct answer, taken from the "
-            "passages, in one or two sentences. For a refusal question: one "
-            "sentence naming what the passages do not say."
+            "passages, as a COMPLETE SENTENCE that names the subject as well as "
+            "the value. Write 'The maximum sustained crosswind at launch is 14 "
+            "knots', never '14 knots'. A bare figure or a bare noun phrase is "
+            "not acceptable: LLMContextRecall decomposes this field into claims "
+            "and checks each one against the retrieved passages, and a bare "
+            "figure decomposes into no claims at all. For a refusal question: "
+            "one complete sentence naming the subject and stating what the "
+            "passages do not say about it."
         )
     )
     expected_behaviour: Literal["answer", "refuse"] = Field(
@@ -214,6 +242,23 @@ class SuggestedGoldenSet(BaseModel):
 # "write a question this material cannot answer" is trivially satisfiable by
 # changing the subject, and changing the subject produces a test that always
 # passes.
+#
+# **The complete-sentence rule for reference_answer is stated HERE as well as on
+# the field, and the duplication is the measurement rather than an oversight.**
+# On the field alone, `minimax/minimax-m3` went from a median reference of 24
+# characters to 68 and still returned 34% of them under 20 -- an improvement that
+# fails. With the rule in this prompt too the median reached 132-157 with zero
+# short references over five 5-run samples. A schema field description reads as
+# documentation *about a field*; a system prompt reads as the job. Deleting
+# either half is a silent regression; `scripts/goldenset_check.py` cases 0a/0b
+# assert both, and case 2 measures what they are for.
+#
+# **Keep this bullet short, and prefer trimming it to trimming anything below.**
+# Prompt real estate here is zero-sum and was measured to be: the first version
+# of that rule ran to ~90 words of rationale, and the refusal section -- the part
+# this comment opens by calling the most important -- lost, with 3 of 12
+# populated runs returning no refusal question at all. Cut to the worked example
+# and one clause, the length result held and the refusal probes came back.
 SUGGEST_SYSTEM_PROMPT = """\
 You write evaluation sets for a retrieval-augmented question answering system.
 
@@ -230,6 +275,11 @@ that answers it, do not write it.
 decoration: the scoring metric context_recall is computed against it, and a \
 missing or invented reference answer silently disables a quarter of the \
 scorecard while everything still renders a number.
+- Write every reference_answer as a COMPLETE SENTENCE naming the subject as \
+well as the value: "The combined design rejection capacity is 40.3 kW", never \
+"40.3 kW". context_recall breaks the reference into claims, and a bare figure \
+breaks into none. This holds for every answerable question, including the ones \
+whose answer is a single number.
 - Ask about substance. "What does this document discuss?" is not a test.
 
 REFUSAL QUESTIONS -- READ THIS TWICE. IT IS THE HARDEST PART AND THE MOST \
@@ -541,6 +591,18 @@ def _sample_corpus(
 # nested set came back correctly populated in 2.5 s -- so the array-of-objects
 # failure that ruled out `function_calling` here is still avoided, and this is
 # the one call in the project that deliberately does NOT use function calling.
+#
+# **`minimax/minimax-m3` does NOT reproduce the Gemma defect, and that is not a
+# reason to tidy this back.** Measured 2026-08-16: 48/48 structured parses
+# through `json_schema` and 6/6 through `function_calling`, arrays populated
+# either way. The exception exists so this call site survives `golden_set_model`
+# being pointed back at Gemma -- which is one free-text write away and fails
+# silently, with every array empty -- not because the current model needs it.
+# The two methods also route on different endpoint sets for `minimax-m3`:
+# `json_schema` needs `structured_outputs` (4 of 12 endpoints eligible while
+# `top_k` is carried, 5 without it), `function_calling` needs `tools` +
+# `tool_choice` (6 of 12). Neither is comfortable, so re-check endpoints rather
+# than assuming headroom before adding a parameter to this request.
 STRUCTURED_OUTPUT_METHOD = "json_schema"
 
 
@@ -592,6 +654,29 @@ def _get_suggester() -> Runnable:
         top_p=settings.generation_top_p,
         top_k=settings.generation_top_k,
         max_tokens=MAX_OUTPUT_TOKENS,
+        # **Unconditional, and safe unconditionally.** `minimax/minimax-m3`
+        # reports `reasoning.mandatory=false, default_enabled=true`, so passing
+        # no flag is a decision and an expensive one. Measured 2026-08-16 on this
+        # prompt at MAX_OUTPUT_TOKENS=4096:
+        #
+        #     reasoning default, top_k=64 : completion=3378  reasoning=3154  (93%)
+        #     reasoning default, no top_k : completion=4033  reasoning=4032  (99.98%)
+        #     reasoning=False,   top_k=64 : completion= 409  reasoning=   0
+        #
+        # and three consecutive calls at this module's production counts (8
+        # answerable + 2 refusal) came back `finish_reason=length`. Same shape as
+        # `settings.generation_reasoning`'s 60-79% finding on DeepSeek, but worse
+        # here: MAX_OUTPUT_TOKENS is sized for the golden-set JSON, so the
+        # headroom thinking eats is the headroom the questions needed, and the
+        # failure is a truncated set rather than a larger bill.
+        #
+        # All 12 endpoints serving the model advertise `reasoning`, so unlike
+        # `top_k` this narrows routing not at all. And it is safe to pass without
+        # asking which model is configured: `build_chat_model` withholds the flag
+        # for `_REASONING_ALWAYS_ON_PREFIXES`, so reverting `golden_set_model` to
+        # `google/gemini-3.7-flash` -- where the flag is a hard 400 -- keeps
+        # working without an edit here.
+        reasoning=False,
     )
     # The model CLASS, not a schema dict. Handed a class, LangChain validates
     # the reply through it and yields a `SuggestedGoldenSet`; handed a dict it

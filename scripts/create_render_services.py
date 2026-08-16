@@ -61,6 +61,18 @@ BACKEND_SECRET_KEYS = [
     "SESSION_SECRET_KEY",
 ]
 
+# NOT a secret, which is why it is absent from the list above -- and it still
+# belongs on the service, where it is currently not set at all. `EMBEDDING_ROUTE`
+# picks which gateway embeds ("openrouter" ships, "google" is the rollback), and
+# the deployed backend is on the correct road today only because `config.py`'s
+# default happens to be the shipped one. That is the drift shape the paragraph
+# above warns about, with the sign reversed: not a variable missing from the
+# template, but a variable whose correctness is INHERITED rather than declared --
+# so the rollback becomes a code change instead of a dashboard edit, and a future
+# change of default moves production silently. It is the one setting whose fault
+# returns confident nonsense rather than an error. Set it explicitly on the
+# service; `BACKEND_LITERAL_ENV` below is where it would go.
+
 # Sent as a literal, not read from `.env`, and it must not be omitted.
 #
 # `settings.environment` DEFAULTS to "development", which is one of the three

@@ -52,7 +52,8 @@ const EVENT_STYLES: Record<string, string> = {
 const EVENT_DESCRIPTIONS: Record<string, string> = {
   RETRIEVE: "Searched the indexed document chunks.",
   SCORE_CHECK: "Checked whether the retrieved evidence was strong enough.",
-  REWRITE: "Rephrased the question to improve retrieval.",
+  REWRITE:
+    "Read the question for typos, shorthand and references before searching. This runs on every turn and most often returns the question unchanged.",
   RERANK: "Reordered the retrieved passages by relevance.",
   GENERATE: "Generated the response from the selected context.",
   REFUSE: "Declined because the retrieved context did not support an answer.",

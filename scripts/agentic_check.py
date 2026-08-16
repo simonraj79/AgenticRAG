@@ -22,8 +22,10 @@ one-search answer from a two-search one.
 **Scenarios S1 and S7 are the regression tests and matter most.** Everything else
 checks that the new feature works; those two check that it did not eat the old
 one. S1 asserts an agent with tools off produces exactly the six pre-existing
-trace event types, and S7 asserts that giving a model tools did not turn "the
-corpus does not cover this" into an invention.
+trace event types -- and, since 2026-08-16, that REWRITE is among them, because
+the subset check alone passed whether the rewriter ran or had been deleted. S7
+asserts that giving a model tools did not turn "the corpus does not cover this"
+into an invention.
 
 HTTP routes are exercised through an ASGI transport rather than a running server,
 with `current_user` overridden. `owned_agent` still runs for real, so the tenancy
@@ -44,7 +46,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "backend"))
 
-from sqlalchemy import delete, select  # noqa: E402
+from sqlalchemy import delete, func, select  # noqa: E402
 
 from app.config import settings  # noqa: E402
 from app.db.models import (  # noqa: E402
@@ -60,7 +62,7 @@ from app.db.models import (  # noqa: E402
 )
 from app.db.session import SessionLocal, engine  # noqa: E402
 from app.rag.ingest import ingest_file  # noqa: E402
-from app.rag.retriever import get_vector_store  # noqa: E402
+from app.rag.retriever import aretrieve, get_vector_store  # noqa: E402
 
 SEED_SUB = "agentic-check-local"
 AGENT_NAME = "Agentic Check"
@@ -348,7 +350,13 @@ async def s1_classic_path(db, agent, user) -> Outcome:
         )
         seen = set(event_types(events))
         stray = seen - CLASSIC_EVENTS
-        ok = not stray and "RETRIEVE" in seen and "GENERATE" in seen
+        # **`REWRITE in seen` was added 2026-08-16, and its absence was a real
+        # hole.** `stray` is a SUBSET check against a set that already contains
+        # REWRITE, so this scenario passed identically whether the rewriter ran
+        # or had been deleted -- it could see the feature neither appear nor
+        # disappear. It runs on every turn now, first ones included, so its row
+        # is an invariant of a turn rather than a property of a thread.
+        ok = not stray and "RETRIEVE" in seen and "GENERATE" in seen and "REWRITE" in seen
         return Outcome(
             "S1 classic path unchanged", ok,
             f"events={sorted(seen)}" + (f" STRAY={sorted(stray)}" if stray else ""),
@@ -766,6 +774,226 @@ async def s16_tool_use_has_a_belt_and_braces(db, agent, user) -> Outcome:
 
 
 # --------------------------------------------------------------------------
+# S18-S19 -- the rewriter on every turn. See `new features/10-*.md`.
+#
+# The rewriter is a plain code path, not a tool and not a trigger (`loop.md`
+# section 6 item 1), so there is no trigger to design -- which moves the whole
+# design risk onto proving the thing is NEEDED. These two are the halves of that:
+# S18 says the rewrite reaches a chunk the raw question cannot, S19 says it does
+# not maul the questions that were already fine.
+# --------------------------------------------------------------------------
+
+S18_RAW = "how much dos the uhf lnk drw whl actv"
+# comms-subsystem.md chunk 1, the power-draw paragraph. Unique in the corpus:
+# no other chunk contains the string, checked against all seven.
+S18_TARGET = "0.5 kW"
+
+# How far BEHIND the winning chunk the target has to sit before "the raw form
+# cannot reach it" is a finding rather than a coin flip.
+#
+# **This constant is the fix, and the number that forced it was 0.0002.** The
+# probe this scenario shipped with -- "how meny km is the prox lnk gd for" ->
+# "200 km" -- was adopted on a bare `missed_raw=True`, which is a boolean over a
+# continuous quantity. An independent reading put the winner at 0.5422 against
+# the target chunk's 0.5420; this machine measures the same probe at +0.0066
+# with a DIFFERENT chunk winning. Two readings, two winners, and the boolean
+# said "necessary" both times.
+#
+# 0.02 comes from the measured spread, not from taste. The same string embedded
+# three times in one process moves 0.000000 -- the endpoint is bit-deterministic
+# -- so the noise is not in the model. It is in the batch: the same probe scored
+# against the LIVE namespace and against locally re-embedded chunks differs by
+# up to 0.005, because those vectors were written by different `embed_documents`
+# calls. 0.02 is four times that drift, and the shipped probe clears 0.02 by
+# 1.7x. It is deliberately not tuned down to admit a near-miss: `loop.md`
+# section 5 is that a scenario which can pass without exercising the feature is
+# worse than no scenario, and a red row that means "re-run me" teaches its
+# reader to ignore red.
+S18_MIN_MISS_MARGIN = 0.02
+
+
+def target_margin(retrieval, target: str) -> tuple[float | None, int | None]:
+    """(margin, rank) of the best-scoring retrieved chunk containing `target`.
+
+    The margin is `top score - best target score` in Pinecone cosine: 0.0 when
+    the target IS the winner, and positive by exactly how much the query missed
+    by. Returns `(None, None)` when nothing retrieved contains the target at
+    all, which is a louder failure than a large margin and must not be read as
+    one -- hence None rather than a sentinel float that would compare.
+
+    Sorted here rather than trusted: Pinecone returns descending today, and an
+    assertion resting on that staying true forever is one more thing a provider
+    change can invert without raising.
+    """
+    scored = [(doc, float(score)) for doc, score in retrieval.scored]
+    if not scored:
+        return None, None
+    scored.sort(key=lambda pair: -pair[1])
+    hits = [i for i, (doc, _) in enumerate(scored) if target in doc.page_content]
+    if not hits:
+        return None, None
+    return scored[0][1] - scored[hits[0]][1], hits[0] + 1
+
+
+async def s18_rewrite_is_necessary(db, agent, user) -> Outcome:
+    """A question the RAW form cannot retrieve, and the rewritten form can.
+
+    Both halves matter. `new features/loop.md` section 5 records S3 passing twice
+    while proving nothing, because the scenario never checked that the un-helped
+    path FAILED. A rewriter that has completely stopped working still produces: a
+    successful turn, a WARNING nobody reads, no exception, and marginally worse
+    retrieval. Every error-shaped check passes over it -- "did it return", "did
+    the turn answer", "is there a REWRITE row" (a dead rewriter that returns the
+    input unchanged still writes one), and even "after != before" (a rewriter
+    that MANGLES the question also passes that).
+
+    **The assertion is a MARGIN and not a boolean, and that is the 2026-08-16
+    fix.** The version before this one asserted `target not in the k=1 result`,
+    which is section 5's trap one level down: the boolean was True on a gap of
+    two ten-thousandths of a cosine, so the single assertion carrying the whole
+    rewriter change was a coin flip that had come up heads. `target_margin`
+    above reports how far behind the target actually is, `S18_MIN_MISS_MARGIN`
+    is what that has to clear, and the number is PRINTED in the detail so a
+    near-miss is visible in the run that produced it rather than in the run
+    after it flips.
+
+    **The probe was chosen by measurement over 81 candidates across both fixture
+    files** -- misspellings, shorthand, and vocabulary the corpus never writes --
+    each re-split with the shipped splitter at the fixture agent's own 250/40,
+    embedded through `retriever.get_embeddings()` and ranked by cosine.
+    Fourteen missed by >= 0.02; twelve of those went through the REAL
+    `contextualize_question`, five to seven trials each; four survived both
+    halves. Measured live against the ingested namespace, 2026-08-16 --
+    raw top-1 chunk, best chunk holding the target, and the gap:
+
+        how much dos the uhf lnk drw whl actv   -> "0.5 kW"      <- SHIPPED
+            comms#2 0.6218  comms#1 0.5881  +0.0337  rank 3 of 7
+            rewrite 7/7 byte-identical, target at rank 1 (0.7222, next 0.7045)
+        wat dos the uhf lnk drw whn its actv    -> "0.5 kW"
+            comms#2 0.6581  comms#1 0.6252  +0.0329  rank 3 of 7
+            rewrite 7/7 to rank 1, in two spellings
+        how much does the uhf lnk drw whn actv  -> "0.5 kW"
+            comms#2 0.6309  comms#1 0.6073  +0.0236  rank 3 of 7
+            rewrite 7/7 byte-identical to rank 1
+
+    **Both probes this docstring used to carry were wrong, and the second was
+    wrong in the dangerous direction.** `"how meny km is the prox lnk gd for"`
+    -> `"200 km"` measures +0.0066, a coin flip rather than the stable miss it
+    was adopted as. `"wats the bcklg drain hrzn in days"` -> `"eighteen days"`
+    was recorded here as "5/5 and 5/5": it measures +0.0077 on this machine,
+    while the reviewer measured the RAW form retrieving that target at rank 1
+    (comms#1, 0.6023) -- so swapping to it would have made S18 permanently red.
+    Two readings, opposite winners, eight thousandths apart. **A pass count
+    cannot tell a stable miss from a coin flip**, which is why every line above
+    carries a margin instead of a tally.
+
+    **A large raw miss and a working rewrite pull AGAINST each other**, which is
+    the transferable half if this corpus is ever edited. The biggest miss
+    measured was +0.0785 -- `"how much for cmd data hndlng n avncs"` ->
+    `"2.4 kW"`, target at rank 6 of 7 -- and its rewrite fails 0/5: shorthand
+    mangled enough to destroy the embedding is usually mangled enough that the
+    rewriter guesses too. "avncs" came back as "advances", and "drw" in
+    `"wat does the ka bnd xmtr n its pntng mech drw"` (+0.0573) came back as
+    "drawing show" in 4 of 5 trials. Conversely, shorthand the rewriter repairs
+    cleanly is usually shorthand the embedding already survived. The band that
+    satisfies both is narrow, and "uhf lnk drw whl actv" sits in it because
+    every token repairs exactly one way while the mangled form lands on comms#2
+    -- the least topically specific chunk in the corpus (Ka-band availability
+    plus "what this briefing does not cover"), and the attractor for most of the
+    measured misses.
+
+    **No reranking in the two measurement retrievals, deliberately.** The turn
+    is still starved to `retrieve_k=1, rerank_top_n=1` so the model's own
+    context is the un-helped one, and at k=1 reranking a single document cannot
+    reorder anything -- the vector ranking IS the outcome. Measuring it directly
+    reports the distance rather than the boolean a reranked k=1 call could only
+    have returned, and costs two fewer Cohere calls in a suite CLAUDE.md records
+    tripping a rate limit.
+
+    `k` is the corpus chunk count read from the database rather than a literal
+    7. A window smaller than the corpus can leave the target outside it, and
+    `target_margin` would then report "not retrieved at all" for a reason that
+    has nothing to do with the rewriter.
+    """
+    prior_k, prior_n = agent.retrieve_k, agent.rerank_top_n
+    # Owned, not inherited: on a seven-chunk corpus at the fixture's own k=3 the
+    # candidate set is nearly half the corpus and the raw form cannot fail. Same
+    # reasoning as S3 and S13, restored in the `finally` the same way.
+    agent.retrieve_k, agent.rerank_top_n = 1, 1
+    await db.commit()
+    try:
+        # Through the real turn, so the string under test is the one the PIPELINE
+        # produced and recorded -- not one this scenario asked for separately.
+        _out, events, _ = await ask(db, agent, user, S18_RAW)
+        payload = (payloads_of(events, "REWRITE") or [{}])[0]
+        after = payload.get("after")
+        corpus = await db.scalar(
+            select(func.count(Chunk.id))
+            .join(Document, Chunk.document_id == Document.id)
+            .where(Document.agent_id == agent.id)
+        ) or 0
+        raw = await aretrieve(agent, S18_RAW, rerank=False, k=corpus)
+        new = await aretrieve(agent, after or S18_RAW, rerank=False, k=corpus)
+    finally:
+        agent.retrieve_k, agent.rerank_top_n = prior_k, prior_n
+        await db.commit()
+
+    raw_margin, raw_rank = target_margin(raw, S18_TARGET)
+    _new_margin, new_rank = target_margin(new, S18_TARGET)
+    ok = (
+        bool(after)
+        and raw_margin is not None
+        and raw_margin >= S18_MIN_MISS_MARGIN
+        and new_rank == 1
+    )
+    shown = "--" if raw_margin is None else format(raw_margin, "+.4f")
+    return Outcome(
+        "S18 the rewrite is necessary", ok,
+        f"raw_margin={shown} (needs >= +{S18_MIN_MISS_MARGIN:.4f}) "
+        f"raw_rank={raw_rank}/{corpus} rewritten_rank={new_rank} "
+        f"trigger={payload.get('trigger')} after={preview(after or '', 70)}",
+    )
+
+
+async def s19_no_over_firing(db, agent, user) -> Outcome:
+    """A clean question must survive the rewriter byte-identical.
+
+    **The over-firing guard, and it is the half that protects the user's
+    meaning.** The asymmetry is stated above `CONTEXTUALIZE_SYSTEM_PROMPT`: a
+    false positive rewrites a question that was already fine and can change what
+    was asked, while a false negative leaves a typo and costs slightly worse
+    retrieval. Every number in EVAL.md was also measured on unrewritten text.
+
+    One scenario catches four different failures at once, which is why it asserts
+    three keys rather than one: the rewriter dead (no row at all), the rewriter
+    mangling clean questions (`changed=True`), the rewriter silently failing
+    (`failed=True` -- `contextualize_question` swallows every exception, so this
+    key is the only place that shows), and the trigger label being wrong
+    (`first_turn`, which was hardcoded to `conversation_history` until
+    2026-08-16 and mislabelled every first turn).
+
+    The question is the one `scripts/rewrite_check.py` case 8 measured at 5/5
+    byte-identical, so a red here is a change in behaviour rather than a sample.
+    """
+    question = "How much power do the solar arrays generate?"
+    _out, events, _ = await ask(db, agent, user, question)
+    rows = payloads_of(events, "REWRITE")
+    payload = rows[0] if rows else {}
+    ok = (
+        len(rows) == 1
+        and payload.get("trigger") == "first_turn"
+        and payload.get("failed") is False
+        and payload.get("changed") is False
+    )
+    return Outcome(
+        "S19 clean question is left alone", ok,
+        f"rows={len(rows)} trigger={payload.get('trigger')} "
+        f"failed={payload.get('failed')} changed={payload.get('changed')} "
+        f"after={preview(str(payload.get('after')), 80)}",
+    )
+
+
+# --------------------------------------------------------------------------
 # HTTP scenarios -- the handout routes
 # --------------------------------------------------------------------------
 
@@ -968,6 +1196,11 @@ SCENARIOS = [
     s15_model_initiates_search,
     s14_no_redundant_gap_search,
     s13_gap_trigger_still_fires,
+    # S19 before S18, for the S16-before-S15 reason: S19 is the cheaper one and
+    # it names the failure -- a red S19 says the rewriter is dead or mangling,
+    # which explains a red S18 without anyone re-deriving a retrieval probe.
+    s19_no_over_firing,
+    s18_rewrite_is_necessary,
 ]
 
 

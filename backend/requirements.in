@@ -35,14 +35,20 @@ langchain-google-genai
 langchain-pinecone
 langchain-cohere
 
-# The OpenRouter client. `ChatOpenAI` pointed at openrouter.ai is an
-# OpenAI-PROTOCOL client, not a call to OpenAI -- no OPENAI_API_KEY is needed and
-# nothing here talks to OpenAI. It was already installed as a langchain-pinecone
-# transitive, which is exactly why it is listed now: app/rag/llm.py imports it
-# directly, so a future change to langchain-pinecone's dependencies would
-# otherwise break every chat model in the project with an ImportError nowhere
-# near the cause. `langchain-google-genai` above stays for EMBEDDINGS -- those
-# deliberately did not move (see app/rag/llm.py).
+# The OpenRouter client. `ChatOpenAI` and `OpenAIEmbeddings` pointed at
+# openrouter.ai are OpenAI-PROTOCOL clients, not calls to OpenAI -- no
+# OPENAI_API_KEY is needed and nothing here talks to OpenAI. It was already
+# installed as a langchain-pinecone transitive, which is exactly why it is listed
+# now: app/rag/llm.py and app/rag/retriever.py both import it directly, so a
+# future change to langchain-pinecone's dependencies would otherwise break every
+# chat model AND every embedding call in the project with an ImportError nowhere
+# near the cause.
+#
+# As of 2026-08-16 it carries BOTH halves of the model layer. `langchain-google-genai`
+# above no longer stays for embeddings -- those moved to OpenRouter, same model
+# and same 768d space, no re-ingest. It stays solely as the ROLLBACK route
+# selected by `settings.embedding_route = "google"`, which is why removing it is
+# a decision about rollback rather than a cleanup.
 langchain-openai
 
 # ContextualCompressionRetriever -- the class PRD section 3.5 names as the Stage 1

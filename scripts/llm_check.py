@@ -6,7 +6,7 @@ They are all decidable offline. `build_chat_model` returns a configured
 `ChatOpenAI`, so what it put in `extra_body`, `disabled_params` and `model` can be
 inspected directly -- no key, no quota, no 404.
 
-The four this pins, and what each cost when it was loose:
+The five this pins, and what each cost when it was loose:
 
   1. `max_tokens` must travel in `extra_body`, never as `ChatOpenAI(max_tokens=)`.
      The class renames it to `max_completion_tokens` unconditionally; OpenRouter
@@ -19,19 +19,44 @@ The four this pins, and what each cost when it was loose:
      serving `deepseek/deepseek-v4-flash-0731` advertises it, so sending it would
      collapse routing from 28 providers to 1.
 
-  3. `top_k` must be dropped for `google/gemini-` and `deepseek/`, and PRESERVED
-     for Gemma. The Gemini case 404s loudly. The DeepSeek case does not fail at
-     all -- it silently routes around the one endpoint with a 10x cheaper cache,
-     which is the harder bug to ever notice.
+  3. `top_k` must be dropped for `google/gemini-`, `deepseek/` and `minimax/`,
+     and PRESERVED for Gemma. The Gemini case 404s loudly. The other two do not
+     fail at all -- an endpoint that does not advertise `top_k` is EXCLUDED by
+     `require_parameters`, so the request silently lands on a different (and
+     measurably more expensive) provider. That is the harder bug to ever notice.
 
   4. `reasoning` must be off by default on the generation path and ABSENT
      entirely when nobody asked, so that every pre-existing caller's request is
      unchanged.
 
+  5. **Nothing in this repo may narrow or reorder routing.** No `provider.order`
+     -- the DeepSeek pin was probed on 2026-08-16 and is a NO_GO, because it
+     returned 200 on 3/3 while being served by Baidu -- and no `provider.sort`,
+     which opts out of quality-based provider selection on tool-calling
+     requests, and every generation turn here is one.
+
 Case 9 is the one to read first if this file ever goes red: it asserts the
 DEFAULT path is byte-identical to before the reasoning parameter existed.
 
-    backend/.venv/Scripts/python.exe scripts/llm_check.py
+**What this file structurally CANNOT check**, and the reason case 27-29 exist as
+a tripwire rather than as proof: it asserts what the repo put in the request,
+never what OpenRouter did with it. A pin that is silently ignored looks exactly
+like a pin that worked. Only a live call reading the response's served-provider
+field can tell those apart.
+
+**`scripts/route_check.py` is that live call, and it is the other half of this
+file.** It makes three cheap generations through `build_chat_model` and reads the
+SERVED provider back, so run it whenever anything here changes the request body.
+Two of its findings are worth knowing before reading this file's green output as
+proof: langchain-openai DROPS OpenRouter's top-level `provider` field (the
+`llm_output` whitelist at base.py:1873), so the served endpoint is recoverable
+only via `GET /generation?id=`; and one model with one parameter set drew FOUR
+different providers in four calls inside twenty seconds. On a pool that wide, a
+preference that is ignored and a preference that lost a coin toss look identical
+from in here.
+
+    backend/.venv/Scripts/python.exe scripts/llm_check.py             # this file, offline
+    backend/.venv/Scripts/python.exe scripts/route_check.py --live    # what OpenRouter did
 
 ASCII in print(), exit 1 on any failure -- `new features/06-test-plan.md`.
 """
@@ -50,6 +75,7 @@ from app.rag.llm import build_chat_model, openrouter_slug  # noqa: E402
 GEMMA = "google/gemma-4-31b-it"
 DEEPSEEK = "deepseek/deepseek-v4-flash-0731"
 GEMINI = "google/gemini-3.7-flash"
+MINIMAX = "minimax/minimax-m3"
 
 failures: list[str] = []
 
@@ -81,7 +107,7 @@ check(
 )
 
 # ---------------------------------------------------------------------------
-print("\n-- top_k: one rule, three families, two different consequences --")
+print("\n-- top_k: one rule, four families, two different consequences --")
 check(
     "4. gemma KEEPS top_k (its card gives it as one sampling config)",
     body(GEMMA, top_k=64).get("top_k") == 64,
@@ -93,7 +119,7 @@ check(
     str(body(GEMINI, top_k=64)),
 )
 check(
-    "6. deepseek DROPS top_k (routes fine, but around the cached endpoint)",
+    "6. deepseek DROPS top_k (routes fine, but around the 2 cheapest endpoints)",
     "top_k" not in body(DEEPSEEK, top_k=64),
     str(body(DEEPSEEK, top_k=64)),
 )
@@ -237,6 +263,46 @@ check(
     all("/" in v for v in _LEGACY_SLUGS.values()),
     f"targets={sorted(_LEGACY_SLUGS.values())}",
 )
+
+# ---------------------------------------------------------------------------
+# 26-29. Routing WIDTH. Every case above asks "is the parameter there?". These
+#        ask the opposite question -- "did anything shrink or reorder the set of
+#        providers allowed to serve this request?" -- because that failure
+#        arrives as a correct answer from the wrong endpoint, with nothing
+#        erroring anywhere. It is the one class of bug this file was built for
+#        and the one it can only half-see: it asserts what the repo put in the
+#        request, never what OpenRouter did with it. `scripts/route_check.py
+#        --live` is the other half -- it reads the SERVED provider back, which is
+#        the only evidence that separates a pin that worked from a pin that was
+#        accepted and ignored.
+# ---------------------------------------------------------------------------
+print("\n-- routing width: nothing here may narrow or reorder it --")
+check(
+    "26. minimax DROPS top_k (its card gives none; json_schema routing 4 -> 5)",
+    "top_k" not in body(MINIMAX, top_k=64),
+    str(body(MINIMAX, top_k=64)),
+)
+# 27-29 are a decision, not a property, and this is the only place it is
+# ENFORCED rather than written down. The DeepSeek provider pin was probed live
+# on 2026-08-16 and is a NO_GO: `order: ["DeepSeek"]` returned http=200 on 3/3
+# and was served by Baidu every time, because this account's privacy setting
+# removes the first-party endpoint -- a line that does nothing and reports
+# success. `sort` is the same tripwire from the other side: it is one of exactly
+# three documented ways to opt OUT of quality-based provider selection for
+# tool-calling requests, and `agent_loop.py` binds tools on all three model
+# invocations, so every generation turn here is one. Asserted for all three
+# families because a pin would arrive keyed on a prefix.
+for num, name, slug in (
+    (27, "gemma", GEMMA),
+    (28, "deepseek", DEEPSEEK),
+    (29, "minimax", MINIMAX),
+):
+    prov = body(slug).get("provider") or {}
+    check(
+        f"{num}. {name} carries no provider.order (NO_GO) and no provider.sort",
+        "order" not in prov and "sort" not in prov,
+        str(prov),
+    )
 
 print("\n" + "=" * 74)
 if failures:

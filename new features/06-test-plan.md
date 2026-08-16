@@ -1,13 +1,18 @@
 # Feature 6 — test plan
 
-Four layers, run in this order. Each catches what the next cannot see.
+Five layers, run in this order. Each catches what the next cannot see.
 
 ```
 1. offline harnesses      no DB, no API, no model, no network.
      scripts/sandbox_check.py    the sandbox and its controls
      scripts/ledger_check.py     the citation-marker contract
      scripts/refusal_check.py    the refusal and gap detectors      (added by 09)
-     scripts/llm_check.py        the OpenRouter request body        (added by 09)
+     scripts/llm_check.py        request body + routing width       (added by 09, extended by 10)
+     scripts/rewrite_check.py    cases 1-5, prompt structure        (added by 10)
+1.5 network harnesses     real provider calls. NO DB, no Pinecone, no writes.  (added by 10)
+     scripts/embed_check.py      both embedding routes, one space
+     scripts/goldenset_check.py  golden-set reference-length distribution
+     scripts/rewrite_check.py    cases 6-11, live rewrites (--models for a bake-off)
 2. frontend unit tests    jsdom, no backend. cd frontend && npm test
 3. agentic harness        real DB, real model, no browser. scripts/agentic_check.py
 4. Playwright             real browser, four viewports.
@@ -28,6 +33,27 @@ property is decidable offline, and move that part down.** `refusal_check.py` run
 27 cases in under a second; the layer-3 scenario that would have covered one of
 them costs a full agent turn.
 
+**[10](10-routing-and-embeddings.md) then found the rule had a gap, and layer 1.5 is
+it.** Three of its properties are not decidable offline and do not need a database
+either: a cosine between two embedding providers, a reference-length distribution
+over real drafting runs, and whether a live model actually leaves a clean question
+alone. Under the old two-way split those land in layer 3 by default — a database, a
+namespace and twenty minutes to measure something that needs none of them, which is
+the same "nobody runs it while iterating" outcome the rule was written to prevent.
+So the axis is not *offline vs integrated*, it is **what state does this need**, and
+"a network call and nothing else" is a real answer.
+
+Two structural rules carried over into the new layer:
+
+- **Order structural cases before behavioural ones inside one file.**
+  `rewrite_check.py` is layer 1 for cases 1–5 and layer 1.5 for 6–11, in that order,
+  so a red structural case *explains* a red behavioural one rather than sending the
+  reader to debug a model over a prompt that no longer says what they think it says.
+  Same S16-before-S15 ordering `agentic_check.py` arrived at.
+- **Run the production constructor, not a copy.** `embed_check.py` goes through
+  `app.rag.retriever.get_embeddings` rather than building its own client. A harness
+  that builds its own client certifies a configuration the application does not use.
+
 ---
 
 ## 1. Sandbox harness — `scripts/sandbox_check.py`
@@ -44,6 +70,69 @@ script dies while reporting a result. Status markers are `[ok]` / `[FAIL]`, and 
 echoed back from a model or the database goes through `ascii()`.
 
 Exit code 1 on any failure, so it can gate a commit.
+
+---
+
+## 1.5 Network harnesses — added by [10](10-routing-and-embeddings.md)
+
+Real provider calls, **no database, no Pinecone, no writes**. Each one measures a
+property that has no error attached to it, so every assertion names an outcome rather
+than the absence of a failure ([loop.md](loop.md) T2).
+
+### `scripts/embed_check.py` — both embedding routes land on one vector
+
+Needs `OPENROUTER_API_KEY` and `GEMINI_API_KEY`; roughly 115 texts across six
+requests.
+
+| Case | Asserts | Catches |
+|---|---|---|
+| 1–2 | The two routes agree on `embed_documents` **and** `embed_query` | a document/query space split — `langchain-google-genai` injects `RETRIEVAL_DOCUMENT`/`RETRIEVAL_QUERY` at call time, the OpenRouter route sends neither, and the index is written with one shape and queried with the other |
+| 3 | Cross-string control scores far below 1.0 | a similarity metric that hands out 1.000000 for free |
+| 5 | **101** texts succeed in one `embed_documents` call | a missing `chunk_size` — a hard 100-input provider ceiling. 25 or 100 texts fit in one request, succeed, and certify a broken configuration |
+| 6 | 768 dimensions and an L2 norm of 1.0 | a dropped `dimensions` (3072 comes back with **no error**); and anyone re-adding the manual normalisation `gemini-embedding-001` needed, which would double-normalise silently |
+
+Case 5 is the one to read if this file is ever trimmed. It is the **only** case that
+can see a missing `chunk_size`, and `app/rag/ingest.py` hands a whole document's
+chunks to `store.add_texts` in one call — so the first document over 100 chunks is
+where a passing 25-text probe gets paid for.
+
+### `scripts/goldenset_check.py` — reference answers that decompose into claims
+
+A **distribution, not a pass/fail**, because 48/48 golden sets parsed while the median
+reference sat at 24 characters. "Did it parse" and "did it raise" both stay green
+through the failure this file exists for: `context_recall` decomposes
+`reference_answer` into claims, and a bare `"14 knots"` decomposes into none while
+still rendering a number on the scorecard.
+
+Cases 0a/0b assert that the complete-sentence rule is present in **both**
+`generate.py` prompt strings — the field description and `SUGGEST_SYSTEM_PROMPT` —
+because the field alone was measured as insufficient. Case 2 measures what they are
+for; cases 4–5 guard the `reasoning=False` that keeps the set from being truncated.
+
+### `scripts/rewrite_check.py` cases 6–11 — the rewriter, live
+
+Real OpenRouter calls through `pipeline.contextualize_question`, about a minute.
+Cases 1–5 in the same file are layer 1 and run first.
+
+Two mechanics that are not optional:
+
+- **Trials, not single samples.** The rewriter runs at temperature 1.0, so one call is
+  an anecdote — the acronym fabrication that motivated cases 7a–7c appeared in 2 of 5.
+  Repair cases tolerate one bad sample in five; **case 8, the over-firing guard, is
+  held to 5/5**, because it is the only assertion protecting the user's meaning.
+- **7a–7c guard a prohibition, not a feature.** Acronym expansion was built, measured
+  fabricating, narrowed to a conditional version that scored 5/5, and then removed
+  outright — so 7a asserts the acronym survives *while the typo beside it is still
+  repaired*, 7c asserts nothing is invented for an unknown one (`"LS&T"`), and **7b
+  asserts groundedness rather than silence**: coreference may still legitimately
+  produce the spelled-out term when the conversation supplied it, and a silence
+  assertion would fail the turn that behaved correctly.
+  [10-routing-and-embeddings.md](10-routing-and-embeddings.md) §5.2 is the record.
+- **`get_contextualizer.cache_clear()` before anything that changes the prompt or the
+  settings the chain was built from.** The chain is `@lru_cache(maxsize=1)`; without
+  it the file tests the previously-built chain and reports green.
+
+`--models` runs a model bake-off instead of the standard pass.
 
 ---
 
@@ -185,15 +274,19 @@ Findings are fixed in this order, because a fix at a lower layer invalidates the
 above it:
 
 ```
-offline harnesses  ->  frontend unit  ->  agentic harness  ->  Playwright
-       ^                    ^                  ^                  |
-       +--------------------+------------------+------------------+
-                          re-run from the lowest layer touched
+offline  ->  network  ->  frontend unit  ->  agentic harness  ->  Playwright
+   ^           ^               ^                   ^                  |
+   +-----------+---------------+-------------------+------------------+
+                        re-run from the lowest layer touched
 ```
 
 A frontend-only fix runs `npm test`, `npm run build`, then Playwright. Anything touching
 `app/tools/` or `app/rag/` re-runs from layer 1. Start at the lowest layer that can decide
 the property, but always finish with the first real-browser layer for UI changes.
+
+**Layer 1.5 sits where it does because it is cheap enough to run on every backend
+change and expensive enough that it is not free.** A change to `app/rag/retriever.py`
+or either eval prompt should re-run it; a change to a route handler need not.
 
 **Stop condition** is the [00-IMPLEMENTATION-PLAN.md §7](00-IMPLEMENTATION-PLAN.md)
 checklist, not a feeling that it looks finished.

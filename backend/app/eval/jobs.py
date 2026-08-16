@@ -309,8 +309,14 @@ async def _run_one_question(
     # The scorecard would then be measuring a different set of questions than the
     # editor shows, and the difference would not appear anywhere.
     #
-    # A fresh thread has no history, so contextualisation does not fire and the
-    # question is embedded verbatim. That is what a golden set means.
+    # A fresh thread has no history, so no pronoun is resolved against a
+    # conversation that only exists because of how the eval was run.
+    #
+    # **That used to be the whole of the guarantee and is not any more.** Until
+    # 2026-08-16 "no history" also meant "no rewrite at all", so a fresh thread
+    # embedded the question verbatim by accident of its emptiness. The rewriter
+    # now runs on first turns too, and `rewrite=` below is what buys the verbatim
+    # embedding back deliberately rather than as a side effect.
     #
     # `is_archived=True` keeps ten machine-generated threads out of the user's
     # chat sidebar while preserving every trace hanging off them -- the column
@@ -340,6 +346,15 @@ async def _run_one_question(
         session=None,
         conversation=conversation,
         question=question.question,
+        # **The rewriter is skipped for eval turns, and that is a measurement
+        # decision rather than a default.** A fresh thread used to guarantee
+        # verbatim embedding by accident of having no history; with the rewriter
+        # on every turn that guarantee is gone, every EVAL.md baseline silently
+        # stops being comparable, and the golden-question editor keeps showing a
+        # question that is not the one that was asked.
+        # `settings.eval_rewrite_questions` turns it back on for anyone willing
+        # to re-run the baselines and build an editor that shows the rewrite.
+        rewrite=settings.eval_rewrite_questions,
     )
 
     contexts = await _contexts_for_query(db, answer.query_id)
