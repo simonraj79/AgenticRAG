@@ -134,6 +134,13 @@ export default function HandoutsPanel({
 
   const briefRef = useRef<HTMLTextAreaElement>(null);
   const briefId = useId();
+  const recipeId = useId();
+
+  /** The picked recipe's copy, for the blurb beside the select. `undefined`
+   *  rather than a fallback object: the blurb is simply absent while nothing is
+   *  chosen, and a placeholder there would read as a description OF the
+   *  placeholder. */
+  const selectedRecipe = RECIPES.find((entry) => entry.key === recipe);
 
   /**
    * What each handout this session created was asked for.
@@ -376,36 +383,59 @@ export default function HandoutsPanel({
           Make a handout
         </h3>
 
-        <div className="mt-2 grid grid-cols-2 gap-2">
-          {RECIPES.map((entry) => {
-            const selected = entry.key === recipe;
-            return (
-              <button
-                key={entry.key}
-                type="button"
-                data-testid="handout-recipe"
-                data-recipe={entry.key}
-                aria-pressed={selected}
-                onClick={() => {
-                  // Pressing the selected recipe again closes the composer,
-                  // which is the only way back out of it that does not require
-                  // finding the Cancel button below the fold on a phone.
-                  setRecipe((current) => (current === entry.key ? null : entry.key));
-                }}
-                className={`flex min-h-11 min-w-0 flex-col items-start gap-0.5 rounded-md border px-3 py-2 text-left transition ${
-                  selected
-                    ? "border-emerald-600 bg-emerald-950/30"
-                    : "border-slate-700 bg-slate-900 hover:border-slate-600"
-                }`}
-              >
-                <span className="text-base leading-none" aria-hidden="true">
-                  {entry.icon}
-                </span>
-                <span className="text-sm font-medium text-slate-200">{entry.label}</span>
-                <span className="text-[0.7rem] leading-snug text-slate-400">{entry.blurb}</span>
-              </button>
-            );
-          })}
+        {/*
+          One control, not four cards, and this is the single change that stops
+          the panel reading as NotebookLM's Studio.
+
+          Four fixed generators drawn as a 2x2 grid of emoji-over-label-over-blurb
+          cards, each firing a background job that returns a row underneath, IS
+          Studio -- Audio Overview / Mind Map / Reports / Study guide, at the same
+          count, in the same shape, with the same lifecycle. The four recipes
+          themselves are fine and are unchanged; it was only ever the shape.
+
+          It is also the cheaper layout. The dock this now lives in is a wide,
+          short box rather than a tall narrow column, and four stacked cards were
+          sized for the column. A select plus the brief on one row is what fits.
+
+          `data-testid="handout-recipe"` MOVES to the select rather than being
+          deleted, and `data-recipe` still carries the current value -- so a
+          locator that used to match one of four buttons now matches one control,
+          which is what it was always trying to express.
+        */}
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <label htmlFor={recipeId} className="sr-only">
+            Handout kind
+          </label>
+          <select
+            id={recipeId}
+            data-testid="handout-recipe"
+            data-recipe={recipe ?? ""}
+            value={recipe ?? ""}
+            onChange={(event) => {
+              const next = event.target.value;
+              setRecipe(next === "" ? null : next);
+            }}
+            className="min-h-11 min-w-0 flex-1 rounded-md border border-slate-700 bg-slate-900 px-3 text-sm text-slate-200 outline-none transition hover:border-slate-600 focus:border-slate-500 sm:flex-none"
+          >
+            {/* The empty option is the closed state, and it is what preserves the
+                old "press the selected recipe again to close the composer"
+                escape route -- a select always has a value, so without a null
+                member there would be no way back out of the form except Cancel,
+                which on a phone was the button below the fold. */}
+            <option value="">Choose a handout kind…</option>
+            {RECIPES.map((entry) => (
+              <option key={entry.key} value={entry.key}>
+                {entry.label}
+              </option>
+            ))}
+          </select>
+
+          {/* The blurb still earns its place: "Table" and "Study sheet" are
+              indistinguishable until you know one is a .csv for a spreadsheet
+              and the other is markdown. It just no longer needs a card each. */}
+          {selectedRecipe && (
+            <span className="min-w-0 text-xs text-slate-400">{selectedRecipe.blurb}</span>
+          )}
         </div>
 
         {recipe && (

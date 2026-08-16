@@ -23,6 +23,8 @@
  */
 
 import type {
+  Agent,
+  AgentPatch,
   ApiInit,
   AskResult,
   Conversation,
@@ -194,6 +196,62 @@ export async function api<T>(path: string, init: ApiInit = {}): Promise<T> {
     );
   }
 }
+
+// --------------------------------------------------------------------------
+// Agents
+// --------------------------------------------------------------------------
+
+/**
+ * Read and retune one agent.
+ *
+ * `get` is a thin wrapper over the request `AgentDetail` was already making
+ * inline, and it is here so the two cannot drift: `update` returns the same
+ * `AgentOut` shape, so a settings screen swaps the response straight into
+ * whatever `get` filled. Two hand-written paths that must agree on a response
+ * type is the shape of mistake this file exists to prevent.
+ *
+ * **Errors are not wrapped, and that is a decision rather than an omission.**
+ * `api()` already throws `ApiError` carrying both the server's `detail` string
+ * and the HTTP status, so a caller renders `errorMessage(cause)` like every
+ * other view and branches with `cause instanceof ApiError && cause.status ===
+ * 409` where it needs to. Three statuses are worth telling apart here and all
+ * three arrive with a usable message:
+ *
+ * - **409** -- the new name collides with another of this owner's agents. The
+ *   only one the user fixes by editing the field they just touched, so it is
+ *   the one worth attaching to the name input rather than to a banner.
+ * - **422** -- an explicit null at a NOT NULL column, an unknown key (see
+ *   `AgentPatch`), or `chunk_overlap >= chunk_size`. The last is evaluated
+ *   against the MERGED configuration, so a patch that sends only
+ *   `chunk_overlap` can be refused for a `chunk_size` it never mentioned; the
+ *   detail names the fields.
+ * - **400** -- an attempt to change `embedding_model`. `AgentPatch` cannot
+ *   express it, so this should be unreachable from this client.
+ */
+export const agents = {
+  /** One agent, including `document_count`. */
+  get: (agentId: string) => api<Agent>(`/api/agents/${encodeURIComponent(agentId)}`),
+
+  /**
+   * Apply a partial config change and get the whole updated record back.
+   *
+   * **Send only the keys that changed.** The server applies exactly what it
+   * receives, so a screen that posts every field it rendered will overwrite
+   * values another tab may have moved, and -- worse -- will send `null` for
+   * every field it has no value for, which is a 422 rather than a no-op.
+   *
+   * Retuning chunking here does NOT re-chunk what is already indexed: existing
+   * vectors keep the size they were built with and the new value applies to the
+   * next upload, so an agent can hold two chunkings at once. A settings UI has
+   * to say "applies to new uploads" next to those fields, because nothing in
+   * the response reveals it.
+   */
+  update: (agentId: string, patch: AgentPatch) =>
+    api<Agent>(`/api/agents/${encodeURIComponent(agentId)}`, {
+      method: "PATCH",
+      json: patch,
+    }),
+};
 
 // --------------------------------------------------------------------------
 // Chat

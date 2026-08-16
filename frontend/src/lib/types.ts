@@ -105,6 +105,73 @@ export type Agent = {
 };
 
 /**
+ * The body of `PATCH /api/agents/{id}` -- the fields an agent-settings screen may
+ * write, and nothing else.
+ *
+ * **Omitted means "leave alone"; an explicit `null` means "set null".** The
+ * handler dumps the body with `exclude_unset=True`, so those two are genuinely
+ * different requests and `undefined` is not a way to spell null. That is why
+ * every field is `?` and only two are `| null`: `description` and
+ * `system_prompt` are the only patchable columns that are actually nullable, and
+ * clearing a prompt back to the pipeline default is a request somebody
+ * legitimately makes. Send `null` at any other key and the server answers 422
+ * naming it -- refused deliberately, because before that check existed the null
+ * reached a NOT NULL column and came back a 500.
+ *
+ * **The persona fields are absent on purpose, and this is the one omission worth
+ * stating.** `AgentUpdate` sets `extra="forbid"`, so `icon`, `persona_role`,
+ * `pedagogy`, `category`, `template_id`, `status`, `visibility` and
+ * `document_count` are not merely ignored -- every one of them is a 422 that
+ * fails the whole request. Adding a field here to "match `Agent`" would
+ * therefore compile cleanly and fail at runtime, in the browser, on a user's
+ * save. The asymmetry is the backend's design: an ignored extra field on create
+ * costs a PATCH, while an ignored extra field on update is a tuning UI that
+ * lies. This type is the client half of that contract, so it stays a strict
+ * subset of `Agent` rather than a `Partial<Agent>`.
+ *
+ * `embedding_model` is patchable in the strictest sense -- the server accepts it
+ * if the value is UNCHANGED and 400s otherwise, purely so a read-edit-write
+ * round trip of a whole `Agent` is not rejected for changing nothing. There is
+ * no value this client could usefully send, so it is not offered: the vectors in
+ * a namespace were built by one model and a query embedded with another searches
+ * a different space, which returns plausible nonsense rather than failing.
+ *
+ * Bounds are the server's (`chunk_size` 64-8192, `chunk_overlap` 0-4096,
+ * `retrieve_k` and `rerank_top_n` 1-100, `score_threshold` 0.0-1.0,
+ * `max_rewrites` 0-5, `max_tool_steps` 0-8, `name` 1-128 after stripping).
+ * TypeScript cannot express them, so they are documented here and enforced
+ * there -- and `chunk_overlap >= chunk_size` is checked against the MERGED
+ * configuration, meaning a patch sending only `chunk_overlap` can be refused for
+ * a `chunk_size` already on the row.
+ */
+export type AgentPatch = {
+  name?: string;
+  description?: string | null;
+  chunk_size?: number;
+  chunk_overlap?: number;
+  /**
+   * A union here, where `Agent.splitter` above is a plain `string` -- the
+   * looseness convention inverts between reading and writing. A read type stays
+   * loose so an unrecognised value renders instead of crashing; a write type is
+   * checked against `Literal["markdown", "recursive"]`, and the enumeration
+   * exists precisely so that "markdwon" is a 422 rather than a silent downgrade
+   * to a splitter the user did not choose. Catching that typo at build time is
+   * strictly better than catching it on save.
+   */
+  splitter?: "markdown" | "recursive";
+  retrieve_k?: number;
+  rerank_enabled?: boolean;
+  rerank_top_n?: number;
+  score_threshold?: number;
+  max_rewrites?: number;
+  /** Nullable, and the null is meaningful: it CLEARS the prompt back to the
+   *  pipeline default rather than leaving it untouched. */
+  system_prompt?: string | null;
+  tools_enabled?: boolean;
+  max_tool_steps?: number;
+};
+
+/**
  * `status`: "pending" | "processing" | "indexed" | "failed".
  *
  * Genuinely asynchronous now: the upload returns 202 with "pending" and the

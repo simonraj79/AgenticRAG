@@ -1,5 +1,27 @@
 # Feature 5 — UI/UX overhaul, desktop and mobile
 
+> **The layout half of this document is superseded by
+> [07-workspace-shell.md](07-workspace-shell.md).** Read that one for the shape of the
+> screen; read this one for the reasoning behind the tap-target, overflow and modal work,
+> which still stands and is now enforced by `scripts/ui_check.py`.
+>
+> Three things here did not survive, and it is worth knowing which:
+>
+> - **§1 P4 and the three-column chat tab.** `xl:grid-cols-[15rem_1fr_22rem]` — a narrow
+>   fixed left rail, an elastic middle and a wider fixed right rail — turned out to be
+>   NotebookLM's Sources │ Chat │ Studio silhouette at almost exactly its proportions. The
+>   workspace has two tracks now, with a switchable rail, and Handouts is a dock under the
+>   composer.
+> - **§2.1's docked/drawer split.** One panel in one frame at every width, so
+>   `useIsWideViewport`, the docked `<aside>` and the `Drawer` branch are gone.
+> - **§5's acceptance criteria were never executed.** They were specified in prose and
+>   carried for two features as an intention. They run now, as A5–A8 in
+>   `scripts/ui_check.py`, and they pass — but the layout they were written against had a
+>   defect none of them could see: opening the header disclosures collapsed the chat pane to
+>   24px with **zero** visible thread, and nothing threw.
+>
+> Everything in §1 P1–P3 and §2.2–2.3 shipped and is intact.
+
 > Every item below came out of the frontend audit with a file and a line. Nothing here is a
 > taste preference dressed as a defect; where something *is* taste, it says so.
 

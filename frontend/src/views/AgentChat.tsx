@@ -29,58 +29,51 @@ import { chat } from "../lib/api.ts";
 import type { AskResult, ChatMessage, Conversation, Handout } from "../lib/types.ts";
 import { ConfirmDeleteButton, ErrorBanner, Spinner, errorMessage } from "../components/ui.tsx";
 import Message from "../components/Message.tsx";
-import Drawer from "../components/Drawer.tsx";
+import HandoutDock from "../components/HandoutDock.tsx";
 import HandoutsPanel from "../components/HandoutsPanel.tsx";
+import SourceRail from "../components/SourceRail.tsx";
 
 /**
- * Tailwind's `xl`, as a media query, because the Handouts panel is the one
- * thing on this screen that CSS alone cannot place.
+ * What the rail is showing. The rail is ONE column whose content switches,
+ * which is the structural difference from the layout this replaces.
  *
- * At `xl` the panel is a docked third grid column; below it, the same panel is
- * the body of a `Drawer`, which is `position: fixed`. Those are two different
- * places in the DOM, and no breakpoint utility moves a node -- so the choice has
- * to be made in JavaScript.
+ * The old chat tab was `xl:grid-cols-[15rem_minmax(0,1fr)_22rem]` -- a narrow
+ * fixed left rail, an elastic middle, a wider fixed right rail. That is
+ * NotebookLM's Sources | Chat | Studio at almost exactly its proportions, and it
+ * was the strongest single signal in the codebase. Two tracks with a switchable
+ * first one is a different idea rather than the same one recoloured: NotebookLM
+ * shows Sources and Studio simultaneously and permanently, because its sources
+ * carry per-source checkboxes that scope the next question. Nothing here scopes
+ * anything -- an agent retrieves over its whole namespace, always -- so a
+ * permanent panel would be spending a third of the screen on a filter that does
+ * not exist.
  *
- * Rendering BOTH and hiding one with `xl:hidden` would be the CSS-only version
- * and it is worse than it looks: the drawer keeps its children mounted while
- * closed (visibility is state, animation is decoration), so there would be two
- * live panels, two three-second polls against the same list, two `onCountChange`
- * callbacks fighting over one badge, and the seeded handouts from a turn
- * prepended twice. One instance, placed by a media query, avoids all of it.
- *
- * `80rem` rather than `1280px` so this tracks Tailwind's own definition of `xl`
- * even under a root font size the user has changed.
+ * `sources` is the default because it answers the question a first-time visitor
+ * has, which is what this agent knows. It is also the tab that makes the empty
+ * corpus visible, and an empty corpus is why a brand-new agent refuses
+ * everything.
  */
-const XL_QUERY = "(min-width: 80rem)";
-
-function useIsWideViewport(): boolean {
-  // Read synchronously in the initialiser so the first paint is already
-  // correct. A `false` first render followed by an effect would mount the
-  // drawer, then unmount it and mount the docked column -- two mounts of the
-  // panel, and two list requests, on every arrival at a desktop width.
-  const [wide, setWide] = useState(
-    () => typeof window !== "undefined" && window.matchMedia(XL_QUERY).matches,
-  );
-
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    const list = window.matchMedia(XL_QUERY);
-    // Re-read on subscribe: the viewport can change between the initialiser
-    // running and this effect, and the listener only fires on transitions.
-    setWide(list.matches);
-    const onChange = (event: MediaQueryListEvent) => setWide(event.matches);
-    list.addEventListener("change", onChange);
-    return () => list.removeEventListener("change", onChange);
-  }, []);
-
-  return wide;
-}
+type RailTab = "sources" | "threads";
 
 export default function AgentChat({
   agentId,
+  onCorpusChanged,
+  initialRailTab = "sources",
   onAnswered,
 }: {
   agentId: string;
+  /** Uploading or deleting a source moves the agent's `document_count` and
+   *  `status`, which the bar above renders. Handed up so one owner refetches,
+   *  exactly as the Documents tab did before the corpus moved into the rail. */
+  onCorpusChanged?: () => void;
+  /** Which rail tab to open on. Decided by the owner because it depends on the
+   *  agent record -- an empty corpus is the thing that has to be fixed first, so
+   *  it opens on Sources; otherwise Threads is the more useful landing and the
+   *  sources are one tap away. Read once, as an initial value: recomputing it
+   *  would swap the rail out from under a user the moment their first upload
+   *  moved `document_count` off zero, which is precisely while they are watching
+   *  that upload. */
+  initialRailTab?: RailTab;
   /** Optional: hands each new `query_id` up, for a shell that still keeps a
    *  separate trace view. The trace is available inline on every message, so
    *  nothing here depends on anybody listening. */
@@ -102,8 +95,9 @@ export default function AgentChat({
   const [error, setError] = useState<string | null>(null);
 
   /**
-   * The Handouts drawer, below `xl` only. At `xl` the panel is docked and this
-   * is meaningless, which is why the toggle is `xl:hidden` too.
+   * The Handouts dock, at every width. There is no longer a docked third column
+   * to make this meaningless at `xl` -- the dock IS the surface now, and it is
+   * the same one on a phone and on a 1920px monitor.
    *
    * **Nothing in this file ever sets it to `true`.** That is a constraint, not
    * an oversight, and it protects the rename input three hundred lines below:
@@ -111,12 +105,14 @@ export default function AgentChat({
    * discards a rename in progress. A user CLICKING the toggle is an ordinary
    * click-away and cancels the rename exactly like clicking a conversation
    * does -- deliberate, visible, and the behaviour they already expect. An
-   * effect opening the drawer on their behalf would be the same blur with
-   * nobody having asked for it, which is the silent discard worth avoiding. So
-   * when a turn produces a handout the badge increments and the drawer stays
-   * shut.
+   * effect opening the dock on their behalf would be the same blur with nobody
+   * having asked for it, which is the silent discard worth avoiding. So when a
+   * turn produces a handout the count increments and the dock stays shut.
    */
-  const [panelOpen, setPanelOpen] = useState(false);
+  const [dockOpen, setDockOpen] = useState(false);
+
+  /** Which of the two things the rail is showing. See `RailTab`. */
+  const [railTab, setRailTab] = useState<RailTab>(initialRailTab);
   const [handoutCount, setHandoutCount] = useState(0);
   /**
    * Handouts from the turn that just landed, handed to the panel so it can
@@ -127,15 +123,6 @@ export default function AgentChat({
    * effect on every keystroke in the composer.
    */
   const [turnHandouts, setTurnHandouts] = useState<Handout[]>([]);
-
-  const wide = useIsWideViewport();
-
-  // Crossing up into `xl` docks the panel, so a drawer left open would either
-  // sit invisibly behind it or spring back open on the way down again. Closed
-  // on the transition; never opened on one.
-  useEffect(() => {
-    if (wide) setPanelOpen(false);
-  }, [wide]);
 
   // Stable identity, because HandoutsPanel lists it as an effect dependency --
   // a fresh arrow function each render would call it on every render instead of
@@ -375,39 +362,117 @@ export default function AgentChat({
         is a flex item of the height context AgentDetail establishes, and a flex
         item's default `min-height: auto` refuses to shrink below its content.
       */}
-      <div className="flex min-h-0 min-w-0 flex-1 flex-col gap-4 md:grid md:grid-cols-[15rem_minmax(0,1fr)] md:grid-rows-[minmax(0,1fr)] xl:grid-cols-[15rem_minmax(0,1fr)_22rem]">
+      {/*
+        TWO tracks, and there is deliberately no `xl:` variant. Re-adding a third
+        column is a one-token edit, which is exactly why `scripts/ui_check.py`
+        asserts the track count rather than trusting a comment: the silhouette it
+        would restore is the thing this layout exists to remove.
+
+        `17rem` rather than the old `15rem` because the rail now holds filenames,
+        which are longer than conversation titles and were already truncating.
+      */}
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col gap-4 md:grid md:grid-cols-[17rem_minmax(0,1fr)] md:grid-rows-[minmax(0,1fr)]">
         <button
           type="button"
+          data-testid="rail-toggle"
           aria-expanded={historyOpen}
-          aria-controls="conversation-history"
+          aria-controls="agent-rail"
           onClick={() => setHistoryOpen((open) => !open)}
           className="min-h-11 shrink-0 rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-left text-sm font-medium text-slate-200 transition hover:border-slate-600 md:hidden"
         >
-          {historyOpen ? "Hide conversations" : `Conversations (${conversations.length})`}
+          {historyOpen
+            ? "Hide sources and threads"
+            : `Sources and threads (${conversations.length})`}
         </button>
 
         {/*
           `max-h-56` below `md`, and it is a pixel cap rather than a viewport
           fraction on purpose. Opened on a phone this is a disclosure sitting
           ABOVE the thread inside a fixed-height column, so without a cap a long
-          conversation list would consume the whole column and leave the thread
-          at zero. 224px is about five threads, and selecting one closes the
-          rail anyway. At `md` it is a grid column and the row height is the cap.
+          list would consume the whole column and leave the thread at zero.
+          224px is about five rows, and selecting a thread closes the rail
+          anyway. At `md` it is a grid column and the row height is the cap.
         */}
         <aside
-          id="conversation-history"
+          id="agent-rail"
           className={`${historyOpen ? "flex" : "hidden"} max-h-56 min-h-0 min-w-0 flex-col rounded-xl border border-slate-800 bg-slate-900/30 p-2 md:flex md:max-h-none`}
         >
-          <button
-            type="button"
-            data-testid="conversation-new"
-            onClick={startDraft}
-            className="mb-2 min-h-11 rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-200 transition hover:border-slate-600"
-          >
-            + New chat
-          </button>
+          {/*
+            The switch. `role="tablist"` rather than two plain buttons because
+            these two panels are alternatives sharing one region, which is what
+            the tab pattern describes -- and it is what tells a screen reader
+            that picking one replaces the other rather than adding to it.
+          */}
+          <div role="tablist" aria-label="Rail" className="mb-2 flex gap-1">
+            {(
+              [
+                { id: "sources" as const, label: "Sources", testId: "rail-tab-sources" },
+                { id: "threads" as const, label: "Threads", testId: "rail-tab-threads" },
+              ]
+            ).map((entry) => {
+              const active = railTab === entry.id;
+              return (
+                <button
+                  key={entry.id}
+                  type="button"
+                  role="tab"
+                  aria-selected={active}
+                  data-testid={entry.testId}
+                  onClick={() => setRailTab(entry.id)}
+                  className={`min-h-11 flex-1 rounded-md px-2 text-xs font-medium tracking-wide uppercase transition ${
+                    active
+                      ? "bg-slate-800 text-slate-100"
+                      : "text-slate-400 hover:bg-slate-900 hover:text-slate-200"
+                  }`}
+                >
+                  {entry.label}
+                </button>
+              );
+            })}
+          </div>
 
-          <ul className="min-h-0 flex-1 space-y-1 overflow-y-auto">
+          {/*
+            Sources stays MOUNTED behind the Threads tab, hidden rather than
+            unmounted, for the same reason the handout dock does -- and the same
+            mistake was available here.
+
+            `SourceRail` owns the poll that watches an ingest finish, and
+            finishing is what fires `onCorpusChanged` and moves the agent's
+            `document_count` and `status` in the bar above. Unmounting it on a
+            tab switch would stop the watch on a job that is still running, so a
+            user who uploads a file and flicks to Threads would come back to a
+            row still saying "processing" and a bar still saying "empty",
+            forever. The poll costs nothing once nothing is pending: it stops on
+            its own.
+
+            Threads is conditionally rendered, because it has no timer and
+            nothing to report -- the conversation list is state on this
+            component and survives the unmount.
+          */}
+          {/* `flex` / `hidden` rather than a `contents` toggle: both are display
+              utilities of equal specificity, so which one won would depend on
+              their order in the generated stylesheet rather than on this string.
+              The same swap the rail itself uses one element up. */}
+          <div
+            className={`${
+              railTab === "sources" ? "flex" : "hidden"
+            } min-h-0 min-w-0 flex-1 flex-col`}
+          >
+            <SourceRail agentId={agentId} onCorpusChanged={onCorpusChanged} />
+          </div>
+
+          {railTab === "threads" && (
+            <>
+              <button
+                type="button"
+                data-testid="conversation-new"
+                onClick={startDraft}
+                className="mb-2 min-h-11 rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-200 transition hover:border-slate-600"
+              >
+                + New chat
+              </button>
+
+              <ul className="min-h-0 flex-1 space-y-1 overflow-y-auto">
             {activeId === null && (
               <li className="rounded-md border border-emerald-800/60 bg-emerald-950/20 px-3 py-2 text-sm text-emerald-300">
                 New conversation
@@ -484,7 +549,9 @@ export default function AgentChat({
                 </li>
               );
             })}
-          </ul>
+              </ul>
+            </>
+          )}
         </aside>
 
         {/*
@@ -508,37 +575,23 @@ export default function AgentChat({
         */}
         <section
           aria-busy={showPending}
+          // Named so `scripts/ui_check.py` can scope "exactly one scrollable
+          // region" to this column and mean it. Scoped by tag instead, the
+          // assertion counted two `<textarea>` elements -- which carry
+          // `overflow-y: auto` intrinsically -- and one of them belonged to the
+          // settings sheet, which also renders `<section>`. It failed on a
+          // layout that was correct, which is the failure mode that teaches its
+          // reader to stop believing the suite.
+          data-testid="chat-column"
           className="flex min-h-0 min-w-0 max-w-full flex-1 flex-col rounded-xl border border-slate-800 bg-slate-900/30"
         >
           {/*
-            The drawer toggle, and it lives inside the thread column rather than
-            above the grid so that it stays directly over the thread at every
-            width -- at `md` the grid has exactly two items and a third would flow
-            into a second row.
-
-            `xl:hidden` on the WRAPPER, not just the button: at `xl` the panel is
-            docked and a toggle for it would be meaningless, so the row should
-            cost no vertical space either.
+            The toggle bar that used to sit here is gone with the column it
+            belonged to. A button with a count pill, in a thin strip above the
+            thread, opening a right-hand panel, was NotebookLM's mobile Studio
+            chrome -- and it cost a whole row of vertical space to say something
+            the dock beneath the composer now says in place.
           */}
-          <div className="flex shrink-0 items-center justify-end border-b border-slate-800 px-3 py-2 xl:hidden">
-            <button
-              type="button"
-              data-testid="handouts-toggle"
-              aria-expanded={panelOpen}
-              onClick={() => setPanelOpen((open) => !open)}
-              className="min-h-11 rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-300 transition hover:border-slate-600 hover:text-slate-100"
-            >
-              Handouts
-              {/* The count is the only signal a handout exists at all while the
-                  drawer is shut, which on a phone is most of the time. It is
-                  inside the label rather than beside it so the accessible name
-                  carries the number too. */}
-              <span className="ml-2 rounded-full border border-slate-700 bg-slate-950 px-2 py-0.5 font-mono text-xs text-slate-300">
-                {handoutCount}
-              </span>
-            </button>
-          </div>
-
           <div className="min-h-0 flex-1 overflow-y-auto p-4">
             <div className="mb-4">
               <ErrorBanner error={error} />
@@ -642,52 +695,32 @@ export default function AgentChat({
               )}
             </div>
           </form>
-        </section>
 
-        {/*
-          The docked third column. `hidden xl:flex` as well as the `wide` guard --
-          belt and braces against the one frame during a resize where the media
-          query listener has fired but React has not yet re-rendered, which would
-          otherwise flash a 22rem column into a two-column grid.
+          {/*
+            AFTER the composer, and that order is the guarantee rather than a
+            preference. The dock is `shrink-0`, so every pixel it takes when it
+            opens comes out of the thread above it and never out of the composer
+            below -- which is what keeps "the composer is fully inside the
+            viewport at 390x844 with the page at scrollTop 0" true whether the
+            dock is open or shut.
 
-          The scroll container is here rather than inside the panel: at `xl` this
-          aside provides it and below `xl` the Drawer does, which is what lets one
-          `HandoutsPanel` serve both. `p-3` is not only spacing -- the global focus
-          ring is `outline: 3px` at `outline-offset: 3px`, so a control flush
-          against the edge of an `overflow-y-auto` box loses six pixels of its
-          ring to the clip.
-        */}
-        {wide && (
-          <aside
-            data-testid="handouts-docked"
-            aria-label="Handouts"
-            className="hidden min-h-0 min-w-0 flex-col overflow-y-auto rounded-xl border border-slate-800 bg-slate-900/50 p-3 xl:flex"
+            One panel, one frame, at every width. The old arrangement needed a
+            media query in JavaScript to decide between a docked column and a
+            fixed drawer, because those are two different places in the DOM and
+            no breakpoint utility moves a node -- and rendering both would have
+            meant two live polls, two `onCountChange` callbacks fighting over one
+            badge, and each turn's handouts prepended twice. Collapsing to one
+            surface deletes that whole problem along with the column.
+          */}
+          <HandoutDock
+            count={handoutCount}
+            open={dockOpen}
+            onToggle={() => setDockOpen((open) => !open)}
           >
             {panel}
-          </aside>
-        )}
+          </HandoutDock>
+        </section>
       </div>
-
-      {/*
-        Below `xl`, the same panel as an overlay. Rendered outside the grid
-        because it is `position: fixed` -- inside, it would still escape the
-        layout, but a `fixed` child of a grid whose container establishes a
-        containing block is exactly the kind of thing that breaks silently later.
-
-        Not rendered at all at `xl`: an always-mounted drawer would leave an
-        `inert` dialog in the tree beside a docked copy of the same panel, and
-        two live panels is the thing `useIsWideViewport` exists to prevent.
-      */}
-      {!wide && (
-        <Drawer
-          open={panelOpen}
-          onClose={() => setPanelOpen(false)}
-          title="Handouts"
-          testId="handouts-drawer"
-        >
-          {panel}
-        </Drawer>
-      )}
     </>
   );
 }

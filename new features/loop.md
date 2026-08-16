@@ -132,10 +132,18 @@ different parts of the build:
 |---|---|---|---|
 | Agent loop | `detect_refusal` — did the turn decline? | The turn that answered *half* and gave up on the rest. Not a refusal, and precisely the turn that needed a search. | `detect_gap` — any admission of a gap, anywhere in the text |
 | Handout retry | `SandboxResult.ok` — did the code crash? | Code that computes the chart correctly and forgets `savefig`. Exit 0, no file. Among the *most* recoverable failures there is. | "the expected artefact is absent" |
+| **Layout** ([07](07-workspace-shell.md)) | console errors, failed requests, horizontal overflow — did the page break? | The agent header growing past the viewport, so `calc(100dvh - top)` went negative and the chat pane collapsed to **24px with 0px of thread**. Rendered perfectly. Threw nothing. | "is the thread taller than zero?" |
 
-In both cases the error-shaped test **passed while the thing we wanted had not happened**.
+In all three the error-shaped test **passed while the thing we wanted had not happened**.
 That is the failure mode to design against, and the question to ask is always *"did the goal
 occur?"* rather than *"did an error occur?"*.
+
+**And note where the third one came from.** Feature 07 is not a model-decided feature at all —
+no tool, no retry, no detector; every branch is code reading a viewport width. It was written
+against §6.1's gating question, which correctly said this pattern did not apply. T2 applied
+anyway, and it was the only thing that found the bug. **The rest of this file is about the
+model; T2 is about you.** Any check whose subject is "did an error occur" is a check that will
+one day pass over a working system with the product missing from it.
 
 ### T3 — Strictness follows the cost of being wrong, in each direction
 
@@ -280,6 +288,7 @@ means "wait sixty seconds" sends its reader to debug working code — the same c
 | Trace rows, handout rows, one commit | [`app/api/ask.py`](../backend/app/api/ask.py) |
 | The same trigger idea in a background job | [`app/handouts/jobs.py`](../backend/app/handouts/jobs.py) |
 | Scenarios S1–S12 | [`scripts/agentic_check.py`](../scripts/agentic_check.py) |
+| T2 applied to layout, and the harness for it | [07-workspace-shell.md](07-workspace-shell.md) · [`scripts/ui_check.py`](../scripts/ui_check.py) |
 
 ---
 

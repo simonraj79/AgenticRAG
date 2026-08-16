@@ -12,7 +12,14 @@ both.
 
 For the history: read [00-IMPLEMENTATION-PLAN.md](00-IMPLEMENTATION-PLAN.md) first. It holds
 the audit, the shared contracts every other document depends on, and the build sequence. The
-five feature documents assume it and do not repeat it.
+feature documents assume it and do not repeat it.
+
+**[07-workspace-shell.md](07-workspace-shell.md) supersedes the layout half of
+[05](05-ui-ux-overhaul.md)** — 05's five defects are fixed and are now regression assertions,
+but its three-column chat tab was the thing that read as NotebookLM, and its acceptance
+criteria were written in prose and never executed. 07 replaces the layout and adds the
+harness. Read 05 for the tap-target and overflow reasoning, which still stands; read 07 for
+the shape of the screen.
 
 | Document | What it covers |
 |---|---|
@@ -25,6 +32,7 @@ five feature documents assume it and do not repeat it.
 | [04-handouts-panel.md](04-handouts-panel.md) | The `handouts` table, four recipes, the job, the routes, the panel |
 | [05-ui-ux-overhaul.md](05-ui-ux-overhaul.md) | Five real layout and tap-target defects, with file:line |
 | [06-test-plan.md](06-test-plan.md) | Three test layers and the iteration protocol between them |
+| [07-workspace-shell.md](07-workspace-shell.md) | The workspace shell, the editable settings sheet, and the de-NotebookLM pass — plus `scripts/ui_check.py`, which finally executes 05's acceptance criteria |
 
 ---
 

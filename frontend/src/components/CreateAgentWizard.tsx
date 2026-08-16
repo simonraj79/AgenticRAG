@@ -38,8 +38,11 @@
  * cannot be aimed. Each slider covers the band worth tuning in and pairs with a
  * number input that accepts the API's full range -- the slider for the common
  * case, the number for the case the slider cannot express. `SLIDER_BAND` and
- * `API_BOUNDS` below are separate objects because they answer different
- * questions: what is worth dragging to, and what will the server accept.
+ * `API_BOUNDS` are separate objects because they answer different questions:
+ * what is worth dragging to, and what will the server accept. Both, and the two
+ * controls that read them, now live in `components/ui.tsx` -- this is no longer
+ * the only screen that edits these ten parameters, and the clamping rules on
+ * `ParamSlider` are the kind of reasoning a second copy silently loses.
  *
  * **The system prompt stays read-only, alone among the advanced settings.** It
  * is the control that does the refusing (`app/db/seed.py`), the parameter grid
@@ -50,42 +53,26 @@
  */
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { FormEvent, ReactNode, RefObject } from "react";
+import type { FormEvent, ReactNode } from "react";
 import { api } from "../lib/api.ts";
 import type { Agent, Template } from "../lib/types.ts";
 import {
+  API_BOUNDS,
   CategoryBadge,
   ErrorBanner,
   Fact,
+  ParamSlider,
   PersonaIcon,
   Reveal,
+  SLIDER_BAND,
+  Segmented,
   errorMessage,
 } from "../components/ui.tsx";
+import type { Tuning } from "../components/ui.tsx";
 
 // --------------------------------------------------------------------------
 // Shape of the tunables
 // --------------------------------------------------------------------------
-
-/** The ten parameters the wizard can set. Mirrors `AgentTunables` on the
- *  server, minus `system_prompt`, which this flow shows but does not send. */
-export type Tuning = {
-  chunk_size: number;
-  chunk_overlap: number;
-  splitter: string;
-  retrieve_k: number;
-  rerank_enabled: boolean;
-  rerank_top_n: number;
-  score_threshold: number;
-  max_rewrites: number;
-  /** Whether the agent may call tools mid-answer -- search the corpus a second
-   *  time, or write and run Python. The only parameter here that changes what
-   *  the agent DOES rather than what it retrieves, which is why it is the one
-   *  with a sentence about latency under it. */
-  tools_enabled: boolean;
-  /** Tool round-trips allowed in one turn before the loop is closed and an
-   *  answer is forced. A ceiling, not a target: most turns use none. */
-  max_tool_steps: number;
-};
 
 /**
  * Shown when no template is selectable at all -- the templates request failed,
@@ -110,35 +97,6 @@ const SERVER_DEFAULTS: Tuning = {
   tools_enabled: true,
   max_tool_steps: 3,
 };
-
-/** What the slider can reach: the band worth dragging in, not the API's range.
- *
- *  `max_tool_steps` is the exception that proves the rule -- its band IS the
- *  API's range, because 0-8 is already small enough to aim at and there is no
- *  useful value outside it. The number input beside it is then a readout rather
- *  than an escape hatch, which is the right relationship for a ceiling. */
-const SLIDER_BAND = {
-  chunk_size: { min: 128, max: 2048, step: 64 },
-  chunk_overlap: { min: 0, max: 512, step: 8 },
-  retrieve_k: { min: 1, max: 60, step: 1 },
-  rerank_top_n: { min: 1, max: 20, step: 1 },
-  score_threshold: { min: 0, max: 1, step: 0.01 },
-  max_rewrites: { min: 0, max: 5, step: 1 },
-  max_tool_steps: { min: 0, max: 8, step: 1 },
-} as const;
-
-/** What the server accepts (`AgentTunables`). The number input enforces these,
- *  so a value the slider cannot reach is still reachable, and a value the API
- *  would reject is caught here instead of as a 422 four steps later. */
-const API_BOUNDS = {
-  chunk_size: { min: 64, max: 8192 },
-  chunk_overlap: { min: 0, max: 4096 },
-  retrieve_k: { min: 1, max: 100 },
-  rerank_top_n: { min: 1, max: 100 },
-  score_threshold: { min: 0, max: 1 },
-  max_rewrites: { min: 0, max: 5 },
-  max_tool_steps: { min: 0, max: 8 },
-} as const;
 
 const MAX_NAME_LENGTH = 128; // `agents.name` is String(128).
 
@@ -295,185 +253,12 @@ function StepRail({
 const INPUT_CLASS =
   "min-h-11 w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 outline-none focus:border-slate-500";
 
-/**
- * One tunable: a slider for reaching a value, a number input for naming one.
- *
- * Both drive the same state, so they cannot disagree. The slider carries
- * `SLIDER_BAND`, the number carries `API_BOUNDS`, and the gap between them is
- * the point -- dragging cannot leave the useful band, typing can go anywhere
- * the server allows.
- *
- * **The lower bound is enforced on blur, the upper bound on every keystroke, and
- * that asymmetry is the whole trick.** A half-typed number is a legal
- * intermediate state, and clamping it up to the minimum as it is typed makes
- * most in-band values unreachable: with `chunk_size` (min 64), typing `400` goes
- * `4` -> clamped to `64` -> `640` -> `6400`. Every value whose leading digits
- * fall below the minimum is impossible to type -- `100`, `128`, `256`, `400`,
- * `500`, two of which are values the seeded personas actually use. So a value
- * below the minimum is allowed to exist while the field has focus and is raised
- * on blur, when the user has finished saying what they meant.
- *
- * The upper bound has no such problem and stays on every keystroke: digits are
- * typed left to right, so a prefix of a too-large number is smaller, not larger,
- * and clamping it down can never block a value on the way to a legal one.
- *
- * The empty string is ignored rather than parsed, so clearing the field to
- * retype it does not snap the slider to zero between two keystrokes.
- */
-function ParamSlider({
-  id,
-  label,
-  help,
-  value,
-  onChange,
-  band,
-  bounds,
-  decimals = 0,
-  disabled = false,
-  warning,
-  numberRef,
-}: {
-  id: string;
-  label: string;
-  help: ReactNode;
-  value: number;
-  onChange: (next: number) => void;
-  band: { min: number; max: number; step: number };
-  bounds: { min: number; max: number };
-  decimals?: number;
-  disabled?: boolean;
-  warning?: string | null;
-  /** So a blocked Next can send focus to the control that is blocking it. */
-  numberRef?: RefObject<HTMLInputElement | null>;
-}) {
-  function commit(raw: string) {
-    const parsed = Number(raw);
-    if (raw.trim() === "" || Number.isNaN(parsed)) return;
-    onChange(Math.min(bounds.max, parsed));
-  }
-
-  /** Raise a still-too-small value once the user has stopped typing it. */
-  function settle() {
-    if (value < bounds.min) onChange(bounds.min);
-  }
-
-  return (
-    <div data-testid={`param-${id}`} data-value={value}>
-      <div className="flex items-baseline justify-between gap-3">
-        <label className="text-xs font-medium text-slate-300" htmlFor={`${id}-range`}>
-          {label}
-        </label>
-        <input
-          id={`${id}-number`}
-          type="number"
-          ref={numberRef}
-          data-testid={`param-${id}-number`}
-          aria-label={`${label}, exact value`}
-          disabled={disabled}
-          value={value}
-          min={bounds.min}
-          max={bounds.max}
-          step={band.step}
-          onChange={(event) => commit(event.target.value)}
-          onBlur={settle}
-          className="min-h-11 w-24 shrink-0 rounded-md border border-slate-700 bg-slate-950 px-2 py-1 text-right font-mono text-sm text-slate-100 outline-none focus:border-slate-500 disabled:opacity-50"
-        />
-      </div>
-
-      <input
-        id={`${id}-range`}
-        type="range"
-        data-testid={`param-${id}-range`}
-        disabled={disabled}
-        value={value}
-        min={band.min}
-        max={band.max}
-        step={band.step}
-        onChange={(event) => onChange(Number(event.target.value))}
-        // The number input beside it is the accessible readout, and it is a real
-        // focusable control rather than an aria-valuetext, so the slider only
-        // needs to point at its own label. The warning joins the description
-        // when there is one rather than living in a live region: a value-driven
-        // message re-renders on every step of a drag, and an assertive region
-        // would interrupt continuously for the length of it. Described-by is
-        // announced on focus, which is when it is wanted.
-        aria-describedby={warning ? `${id}-help ${id}-warning` : `${id}-help`}
-        className="gw-range mt-1"
-      />
-
-      <p id={`${id}-help`} className="text-xs leading-relaxed text-slate-400">
-        {help}
-      </p>
-
-      {warning && (
-        <p
-          id={`${id}-warning`}
-          data-testid={`param-${id}-warning`}
-          className="mt-1.5 rounded-md border border-amber-800/60 bg-amber-950/30 px-2.5 py-1.5 text-xs text-amber-200"
-        >
-          {warning}
-        </p>
-      )}
-
-      {decimals > 0 && <span className="sr-only">{value.toFixed(decimals)}</span>}
-    </div>
-  );
-}
-
-/** A two-option segmented control. Two radios that look like one switch. */
-function Segmented({
-  legend,
-  help,
-  name,
-  value,
-  options,
-  onChange,
-  disabled = false,
-  testId,
-}: {
-  legend: string;
-  help: ReactNode;
-  name: string;
-  value: string;
-  options: { value: string; label: string }[];
-  onChange: (next: string) => void;
-  disabled?: boolean;
-  testId: string;
-}) {
-  return (
-    <fieldset data-testid={testId} data-value={value} disabled={disabled}>
-      <legend className="text-xs font-medium text-slate-300">{legend}</legend>
-      <div className="mt-2 inline-flex rounded-md border border-slate-700 bg-slate-950 p-1">
-        {options.map((option) => {
-          const active = option.value === value;
-          return (
-            <label
-              key={option.value}
-              data-testid={`${testId}-${option.value}`}
-              data-selected={active}
-              className={`min-h-11 cursor-pointer rounded px-3 py-2 text-sm transition focus-within:ring-2 focus-within:ring-emerald-500/60 ${
-                active
-                  ? "bg-emerald-500 font-medium text-emerald-950"
-                  : "text-slate-300 hover:text-slate-100"
-              } ${disabled ? "cursor-not-allowed opacity-50" : ""}`}
-            >
-              <input
-                type="radio"
-                name={name}
-                className="sr-only"
-                value={option.value}
-                checked={active}
-                onChange={() => onChange(option.value)}
-              />
-              {option.label}
-            </label>
-          );
-        })}
-      </div>
-      <p className="mt-2 text-xs leading-relaxed text-slate-400">{help}</p>
-    </fieldset>
-  );
-}
+// `ParamSlider` and `Segmented` were defined here and are now imported from
+// `components/ui.tsx`, unchanged. They moved because the agent-settings sheet
+// edits the same ten parameters and would otherwise have held a second copy --
+// and the thing that would drift is not the markup but the comment on
+// `ParamSlider` explaining why its lower bound clamps on blur and its upper
+// bound on every keystroke.
 
 // --------------------------------------------------------------------------
 // The wizard
