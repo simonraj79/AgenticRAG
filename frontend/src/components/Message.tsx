@@ -187,6 +187,34 @@ export default function Message({ message }: { message: ChatMessage }) {
             </button>
           )}
 
+          {message.stopped && (
+            /*
+              A stopped turn is TRUNCATED, and without this it renders exactly
+              like a finished one.
+
+              The flag was set on the message and read nowhere, which is the
+              worst version of this: the bubble folds into the transcript
+              mid-sentence carrying `refused: false` and `citations: []`, so the
+              Sources button is hidden too and there is nothing at all to
+              distinguish it from a complete, uncited answer. Worse, the agent
+              finishes server-side and commits the WHOLE answer under the same
+              `query_id` -- so a reload silently replaces this text with longer
+              text, and nothing ever told the reader why.
+
+              Amber rather than rose: this is not an error. The user pressed
+              Stop and got what had arrived, which is the behaviour they asked
+              for. It is a caveat about completeness, and the palette should say
+              so -- rose here would teach them that stopping broke something.
+            */
+            <span
+              data-testid="stopped-chip"
+              className="rounded-full border border-amber-800/60 bg-amber-950/30 px-2.5 py-1 text-xs font-medium text-amber-200"
+              title="You stopped reading this turn. The agent finished it on the server -- reload to see the whole answer."
+            >
+              stopped early · reload for the full answer
+            </span>
+          )}
+
           <span className="ml-auto text-xs text-slate-400">
             {formatTimestamp(message.created_at)}
             {message.latency_ms !== null ? ` · ${formatDuration(message.latency_ms)}` : ""}

@@ -37,6 +37,7 @@ import {
   useAgentDocuments,
 } from "../lib/useAgentDocuments.ts";
 import { ConfirmDeleteButton, ErrorBanner, Spinner, StatusPill } from "./ui.tsx";
+import DuplicatePrompt from "./DuplicatePrompt.tsx";
 import { formatBytes } from "../lib/format.ts";
 
 export default function SourceRail({
@@ -56,7 +57,32 @@ export default function SourceRail({
     // Cleared only on success, and only from the boolean the hook returns --
     // reading `corpus.error` here would read the value from the render that
     // built this handler, which is one render stale.
-    if (ok && fileRef.current) fileRef.current.value = "";
+    if (ok) clearPicker();
+  }
+
+  /** An `<input type="file">` fires no change event when the same file is picked
+   *  twice, so a selection left behind after the upload is resolved makes
+   *  re-picking that file look like a dead control. */
+  function clearPicker() {
+    if (fileRef.current) fileRef.current.value = "";
+  }
+
+  /**
+   * The two answers to the duplicate prompt.
+   *
+   * The decision -- which file, is it still live, is a retry in flight -- is the
+   * hook's, and is shared with the Documents view. What is local is this
+   * surface's file input, which is the one thing the hook cannot reach. Cancel
+   * clears it too: a "no" that leaves the file selected drops the user straight
+   * into the no-change-event trap above.
+   */
+  async function confirmDuplicate() {
+    if (await corpus.confirmDuplicate()) clearPicker();
+  }
+
+  function dismissDuplicate() {
+    corpus.dismissDuplicate();
+    clearPicker();
   }
 
   return (
@@ -85,6 +111,22 @@ export default function SourceRail({
       </label>
 
       <ErrorBanner error={corpus.error} />
+
+      {/* `shrink-0` because this sits above a flex-1 list that would otherwise
+          compress it -- and because the prompt going unread is the failure this
+          rail is most exposed to: it stays MOUNTED behind the Threads tab, so an
+          unanswered conflict survives off-screen until it expires. */}
+      {corpus.pendingDuplicate && (
+        <div className="min-w-0 shrink-0">
+          <DuplicatePrompt
+            testId="rail-duplicate"
+            message={corpus.pendingDuplicate.message}
+            busy={corpus.uploading}
+            onConfirm={() => void confirmDuplicate()}
+            onDismiss={dismissDuplicate}
+          />
+        </div>
+      )}
 
       {corpus.loading && <Spinner label="Loading corpus" />}
 

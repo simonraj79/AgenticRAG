@@ -299,6 +299,33 @@ def _static_refusal(code: str) -> tuple[str, str] | None:
         # Null bytes and a few other malformed-source cases raise ValueError
         # rather than SyntaxError.
         return (f"The code could not be parsed: {exc}. Nothing was run.", "syntax")
+    except (MemoryError, RecursionError) as exc:
+        # OBSERVED, not defensive. `scripts/agentic_check.py` S8 "recipe table"
+        # failed with `MemoryError: Parser stack overflowed - Python source too
+        # complex to parse`: the model emitted a deeply nested literal and
+        # CPython's parser gave up on it.
+        #
+        # This is the failure `new features/loop.md` section 4 exists to
+        # prevent, in the one function whose whole job is to prevent it. A
+        # static check that RAISES instead of refusing takes the handout job
+        # down with it -- the model never sees the problem, never gets the
+        # chance to emit simpler code, and the row lands `failed` with a
+        # traceback nobody can act on. Refusing hands it straight back as a
+        # message it can fix, which is the single most valuable behaviour the
+        # code interpreter has.
+        #
+        # `MemoryError` is caught NARROWLY, around `ast.parse` alone, and that
+        # placement is the whole safety argument: CPython raises it here for a
+        # parser stack overflow rather than for genuine exhaustion, so this
+        # swallows a parse failure and not an out-of-memory condition anywhere
+        # else in the process.
+        return (
+            "The code was too deeply nested for Python to parse "
+            f"({type(exc).__name__}). Nothing was run. Rewrite it with less "
+            "nesting -- build large tables from a loop or a literal list of "
+            "rows rather than one deeply nested expression.",
+            "syntax",
+        )
 
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):

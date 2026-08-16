@@ -56,11 +56,13 @@ export type ViewId = "workspace" | "sources" | "evaluate";
 const VIEWS: { id: ViewId; label: string; testId: string }[] = [
   { id: "workspace", label: "Workspace", testId: "tab-workspace" },
   { id: "sources", label: "Sources", testId: "tab-sources" },
-  // `tab-evaluate` is deliberately NOT reused here: `AgentEvaluate` already
-  // puts that id on its own panel root, so a locator for it currently matches
-  // two live elements whenever the tab is open. Naming this one `tab-eval`
-  // leaves that pre-existing collision alone rather than widening it.
-  { id: "evaluate", label: "Evaluate", testId: "tab-eval" },
+  // This entry read `tab-eval` until the collision it was dodging was fixed at
+  // source. `AgentEvaluate`'s panel root also carried `tab-evaluate`, so a
+  // locator matched two live elements whenever the tab was open -- a throw on
+  // any strict-mode query. The panel root is now `evaluate-panel` (the
+  // `handouts-panel` shape), which frees the real name for the button that
+  // actually is a tab, symmetric with the two entries above.
+  { id: "evaluate", label: "Evaluate", testId: "tab-evaluate" },
 ];
 
 export default function AgentBar({

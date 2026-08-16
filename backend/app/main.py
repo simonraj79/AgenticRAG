@@ -16,6 +16,7 @@ from app.api.conversations import router as conversations_router
 from app.api.documents import router as documents_router
 from app.api.eval import router as eval_router
 from app.api.handouts import router as handouts_router
+from app.api.stream import router as stream_router
 from app.auth.routes import router as auth_router
 from app.config import settings
 from app.db.session import engine
@@ -65,6 +66,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# DO NOT ADD GZipMiddleware HERE. `app/api/stream.py` serves SSE, and a
+# compressing middleware BUFFERS in order to compress - which turns a token
+# stream into one late blob. That failure renders perfectly, throws nothing, and
+# passes any check shaped like "did the connection open?", so it would be found
+# by a user reporting that streaming "feels the same" rather than by a test. The
+# stream sets `Cache-Control: no-transform` to say the same thing to
+# intermediaries it does not control; this comment is the half that is in reach.
+# If compression is ever wanted, exclude `text/event-stream` explicitly.
+
 
 # Auth first: everything below it depends on `current_user`, and mounting it
 # last would still work but reads as though the API were the primary surface.
@@ -76,6 +86,11 @@ app.include_router(agents_router)
 app.include_router(documents_router)
 app.include_router(ask_router)
 app.include_router(conversations_router)
+# After both, because it imports from both -- `run_turn` from `ask` and the
+# conversation ownership chain from `conversations`. The paths are distinct
+# segments (`/ask` vs `/ask/stream`), so registration order disambiguates
+# nothing; this is legibility.
+app.include_router(stream_router)
 app.include_router(eval_router)
 app.include_router(handouts_router)
 

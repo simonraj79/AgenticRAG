@@ -30,6 +30,7 @@ import {
   Spinner,
   StatusPill,
 } from "../components/ui.tsx";
+import DuplicatePrompt from "../components/DuplicatePrompt.tsx";
 
 export default function AgentDocuments({
   agentId,
@@ -45,6 +46,9 @@ export default function AgentDocuments({
     setError,
     refresh,
     upload,
+    pendingDuplicate,
+    confirmDuplicate,
+    dismissDuplicate,
     remove,
     uploading,
     deletingId,
@@ -71,11 +75,38 @@ export default function AgentDocuments({
       return;
     }
     if (!(await upload(file))) return;
+    resetPicker();
+  }
+
+  /**
+   * Put the picker back to empty -- both halves of it.
+   *
+   * The <input> keeps its own FileList independently of React state, so clearing
+   * state alone would leave the filename showing in the control. Clearing the
+   * input matters for more than tidiness: an `<input type="file">` fires no
+   * change event when the same file is picked twice, so a stale selection makes
+   * re-picking that file look like a dead control.
+   */
+  function resetPicker() {
     setFile(null);
-    // The <input> keeps its own FileList independently of React state, so
-    // clearing state alone would leave the filename showing in the control
-    // after a successful upload.
     if (fileInputRef.current) fileInputRef.current.value = "";
+  }
+
+  /**
+   * The two answers to the duplicate prompt. The decision lives in the hook;
+   * what is local here is the file input, which is a fact about this form.
+   *
+   * Both answers reset the picker, including Cancel: a "no" that leaves the file
+   * selected leaves the form armed to ask the same question again, and leaves
+   * the user in the no-change-event trap above if they try to re-pick it.
+   */
+  async function confirmDuplicateUpload() {
+    if (await confirmDuplicate()) resetPicker();
+  }
+
+  function dismissDuplicateUpload() {
+    dismissDuplicate();
+    resetPicker();
   }
 
   return (
@@ -141,6 +172,19 @@ export default function AgentDocuments({
       </div>
 
       <ErrorBanner error={error} />
+
+      {/* Beside the banner, never inside it: a duplicate is a question with an
+          answer, not a failure to report, and `error` stays null while it is
+          outstanding. */}
+      {pendingDuplicate && (
+        <DuplicatePrompt
+          testId="doc-duplicate"
+          message={pendingDuplicate.message}
+          busy={uploading}
+          onConfirm={() => void confirmDuplicateUpload()}
+          onDismiss={dismissDuplicateUpload}
+        />
+      )}
 
       <div>
         <div className="mb-3 flex flex-wrap items-center justify-between gap-3">

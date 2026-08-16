@@ -39,7 +39,7 @@
  */
 
 import { useCallback, useEffect, useState } from "react";
-import { api } from "./api.ts";
+import { ApiError, api } from "./api.ts";
 import { formatBytes } from "./format.ts";
 import type { DocumentRow } from "./types.ts";
 import { errorMessage } from "../components/ui.tsx";
@@ -63,6 +63,46 @@ export const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
  * uploaded last week.
  */
 const TERMINAL_DOCUMENT_STATUSES = new Set(["ready", "indexed", "failed"]);
+
+/**
+ * A duplicate upload the server refused, held until the user answers it.
+ *
+ * The backend dedups on a **SHA-256 of the bytes** (`app/api/documents.py`), so
+ * this is raised for the same content under a different name and is NOT raised
+ * for an edited file, nor for a re-upload after a `failed` ingest -- the
+ * predicate is agent + hash + status "ready", and a stuck row is deliberately
+ * not a bar to its own fix. That narrows who ever sees this prompt: someone who
+ * genuinely wants the same bytes indexed twice, which in this workshop is
+ * re-chunking after changing `chunk_size`.
+ *
+ * The `File` is kept rather than its bytes. A `File` is a handle onto the OS
+ * file, so the retry re-reads it at confirm time -- if the user moved or deleted
+ * it in between, the retry's fetch rejects and `api()` reports "Cannot reach the
+ * API", which names the wrong cause. That is a known limit, and the reason the
+ * prompt expires rather than waiting forever. Snapshotting the bytes instead
+ * would put a 50 MB ArrayBuffer in React state at the upload cap, and resident
+ * bytes are already the real ceiling on concurrent uploads (`app/rag/jobs.py`).
+ *
+ * `message` is the server's `detail` string, verbatim, because it names the file
+ * already in the corpus and **nothing on this client can derive that name**:
+ * `DocumentRow` carries no `content_hash` on purpose, and structuring the 409
+ * body instead would fall out of `readError`'s string branch and dump raw JSON
+ * on the screen.
+ */
+export type PendingDuplicate = { file: File; message: string };
+
+/**
+ * How long the duplicate prompt stays answerable.
+ *
+ * It expires for the same reason `ConfirmDeleteButton` disarms itself, and the
+ * rail is what makes that mandatory rather than tidy: `SourceRail` stays MOUNTED
+ * behind the Threads tab so its ingest poll survives a tab switch, so an
+ * unanswered prompt would otherwise sit off-screen indefinitely and come back
+ * armed for a user who has forgotten what it asked. Longer than that button's
+ * 5 s because this one is a sentence to read and a decision to make; short
+ * enough that the `File` handle above is unlikely to have moved underneath it.
+ */
+const DUPLICATE_PROMPT_MS = 60_000;
 
 const POLL_FIRST_MS = 1_200;
 const POLL_MAX_MS = 8_000;
@@ -91,10 +131,35 @@ export type AgentCorpus = {
    * created the handler, not the one this call just set.
    *
    * `force` maps to `?force=true`, which is how the backend's duplicate-content
-   * 409 is overridden. Nothing in the UI sets it yet -- see the note in the
-   * upload implementation.
+   * 409 is overridden. **`confirmDuplicate` is its only caller**, and no view
+   * calls `upload(file, true)` directly: forcing is the answer to a refusal the
+   * user has read, never a flag a form can set. See `pendingDuplicate`.
    */
   upload: (file: File, force?: boolean) => Promise<boolean>;
+  /**
+   * The upload the server refused as already-in-the-corpus, or null.
+   *
+   * Set instead of `error`, so a conflict never lands in the red banner: it is
+   * a question with an answer, not a failure to report. Both surfaces render it
+   * through the same `DuplicatePrompt`; neither owns it, for the same reason
+   * neither owns the poll -- the rail has no `File` in state at all (its `File`
+   * exists only inside the change handler's scope), so "keep the chosen file in
+   * the component" is a design only one of the two could implement.
+   */
+  pendingDuplicate: PendingDuplicate | null;
+  /**
+   * Re-send the refused file with `?force=true`. Resolves like `upload`.
+   *
+   * **Must stay an explicit user action.** Force disables BOTH dedup layers --
+   * the route's pre-check and ingest's own backstop -- so a second forced upload
+   * of the same bytes really does write a second document, a second chunk set
+   * and a second set of vectors into the namespace, at full embedding cost.
+   * Nothing behind it would catch a retry the user did not ask for.
+   */
+  confirmDuplicate: () => Promise<boolean>;
+  /** Drop the prompt unanswered. The caller also clears its own file input --
+   *  see the note at each call site. */
+  dismissDuplicate: () => void;
   remove: (documentId: string) => Promise<void>;
   uploading: boolean;
   /** The row whose delete is in flight, for a per-row busy state. */
@@ -123,6 +188,33 @@ export function useAgentDocuments(
 
   const [uploading, setUploading] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [pendingDuplicate, setPendingDuplicate] = useState<PendingDuplicate | null>(null);
+
+  /**
+   * The prompt expires. See `DUPLICATE_PROMPT_MS` for why that is mandatory
+   * rather than polite -- the rail outlives the tab it is on.
+   *
+   * Depends on the object identity, so a second conflict restarts the clock
+   * rather than inheriting what was left of the first one's.
+   */
+  useEffect(() => {
+    if (!pendingDuplicate) return;
+    const timer = window.setTimeout(() => setPendingDuplicate(null), DUPLICATE_PROMPT_MS);
+    return () => window.clearTimeout(timer);
+  }, [pendingDuplicate]);
+
+  /**
+   * A conflict belongs to the agent that raised it.
+   *
+   * `useAgentDocuments` keeps its state when `agentId` changes in place -- only
+   * `load` is memoised on it -- so without this a prompt raised against agent A
+   * could be confirmed against agent B, force-writing a file into a corpus that
+   * never objected to it. That is a wrong write, not a stale render, which is
+   * why it is cleared here rather than left to the next upload.
+   */
+  useEffect(() => {
+    setPendingDuplicate(null);
+  }, [agentId]);
 
   // Returns the rows as well as storing them, so the poll loop can decide
   // whether to schedule another tick without waiting a render for state.
@@ -210,6 +302,10 @@ export function useAgentDocuments(
 
   const upload = useCallback(
     async (file: File, force = false): Promise<boolean> => {
+      // Any new upload supersedes an unanswered conflict: the question was
+      // about a file the user has now stopped talking about. Cleared before the
+      // size check, because a rejection is also a new answer.
+      setPendingDuplicate(null);
       if (file.size > MAX_UPLOAD_BYTES) {
         setError(
           `${file.name} is ${formatBytes(file.size)}. The limit is ` +
@@ -228,8 +324,9 @@ export function useAgentDocuments(
         // raises when this exact CONTENT is already in the corpus -- it dedups
         // on a SHA-256 of the bytes, not on the filename, so renaming a file
         // does not get past it and re-uploading an edited file does not trip
-        // it. No caller passes true yet: the flag is here so the retry, when it
-        // is built, is a second argument rather than a second upload path.
+        // it. The flag was written before anything set it, so that the retry
+        // would be a second ARGUMENT rather than a second upload path; that
+        // retry is `confirmDuplicate` below, and it is still the only caller.
         const query = force ? "?force=true" : "";
         // No Content-Type header: the browser must set it itself so the multipart
         // boundary matches the body it generated. See lib/api.ts.
@@ -244,6 +341,35 @@ export function useAgentDocuments(
         onCorpusChanged?.();
         return true;
       } catch (cause) {
+        /*
+         * Branch on the STATUS, never on the text. `ApiError` carries it for
+         * exactly this, and the alternative -- matching "already in the corpus"
+         * -- is a marker list, which this repo has had wrong three times in a
+         * different module.
+         *
+         * Sound only because it is scoped to THIS call. 409 is not "duplicate"
+         * globally on this API: deleting a document mid-index answers 409, and
+         * so does a handout at quota. `POST /api/agents/{id}/documents` raises
+         * it at exactly one line and for exactly one reason, so the branch
+         * belongs here and never in a shared interceptor.
+         *
+         * Not the shape loop.md T2 forbids. The trigger is not "an error
+         * occurred", it is the server stating the outcome directly -- no
+         * corpus entry was created, because one with these bytes exists -- from
+         * a single unambiguous site, before it writes anything. Triggering on
+         * `error !== null` would fire on 413, 415, 422 and a dead backend, none
+         * of which force fixes. The complement of T2 applies to the retry as
+         * well: its success signal is the row appearing in `documents`, not the
+         * absence of a throw.
+         *
+         * `!force` closes the loop: a forced upload that still 409s has not
+         * been refused for duplicate content, and re-offering the same button
+         * would ask the user to retry the retry.
+         */
+        if (!force && cause instanceof ApiError && cause.status === 409) {
+          setPendingDuplicate({ file, message: cause.message });
+          return false;
+        }
         setError(errorMessage(cause));
         return false;
       } finally {
@@ -252,6 +378,24 @@ export function useAgentDocuments(
     },
     [agentId, load, onCorpusChanged],
   );
+
+  /**
+   * The retry, and the only thing that ever forces.
+   *
+   * Clears the prompt BEFORE awaiting rather than after. `uploading` already
+   * disables the button, but the two states are set in the same render pass and
+   * a forced double-submit is the one mistake here that damages the corpus --
+   * force disables the route's dedup AND ingest's, so there is no backstop
+   * behind it, unlike the unforced race that `ingest.py` catches.
+   */
+  const confirmDuplicate = useCallback(async (): Promise<boolean> => {
+    if (!pendingDuplicate) return false;
+    const { file } = pendingDuplicate;
+    setPendingDuplicate(null);
+    return upload(file, true);
+  }, [pendingDuplicate, upload]);
+
+  const dismissDuplicate = useCallback(() => setPendingDuplicate(null), []);
 
   const remove = useCallback(
     async (documentId: string) => {
@@ -292,6 +436,9 @@ export function useAgentDocuments(
     setError,
     refresh,
     upload,
+    pendingDuplicate,
+    confirmDuplicate,
+    dismissDuplicate,
     remove,
     uploading,
     deletingId,

@@ -56,6 +56,7 @@ from langchain_core.documents import Document
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import (
     AIMessage,
+    AIMessageChunk,
     BaseMessage,
     HumanMessage,
     SystemMessage,
@@ -64,6 +65,7 @@ from langchain_core.messages import (
 from langchain_core.tools import BaseTool
 
 from app.db.models import Agent
+from app.rag import events
 from app.rag.refusal import detect_gap
 from app.rag.retriever import (
     META_CHUNK_ID,
@@ -556,6 +558,134 @@ def _invalid_call_message(
     return invocation, ToolMessage(content=error, tool_call_id=call_id, status="error")
 
 
+async def _emit_tool_outcome(emit: events.Emit, invocation: ToolInvocation) -> None:
+    """One `tool_result` or one `tool_error`, from a finished `ToolInvocation`.
+
+    Two event names rather than one with an `ok` flag, mirroring the split
+    `TOOL_RESULT` / `TOOL_ERROR` already makes in the trace and for the same
+    reason: a failed tool call is not a failed turn, and a client that renders
+    the two identically hides the single most interesting thing the loop does.
+
+    **Neither frame is terminal.** A tool failure comes back to the model as a
+    `ToolMessage` and never as an exception (`_execute` never raises), so the loop
+    continues and the turn still ends in `done`. A client treating `tool_error` as
+    the end of the stream would stop reading a turn that was about to succeed.
+    """
+    await emit(
+        events.TOOL_RESULT if invocation.ok else events.TOOL_ERROR,
+        {
+            "step": invocation.step,
+            "tool": invocation.tool,
+            "ok": invocation.ok,
+            "duration_ms": invocation.duration_ms,
+            # Already one line and already safe to render -- for a failure
+            # `_execute` sets it to the error's first line, truncated. The frame
+            # deliberately does not carry `detail` or `args`: a 4 KB Python
+            # program belongs in the trace row, which is durable, not on a wire
+            # whose whole purpose is to arrive quickly.
+            "summary": invocation.summary,
+        },
+    )
+
+
+def _call_id(call: dict[str, Any], fallback: str) -> str:
+    """The id a tool call will be answered under.
+
+    Duplicated from `_execute` rather than returned by it, because the SSE
+    `tool_call` frame has to go out *before* the call runs -- a tool event that
+    only appears once the tool has finished is not progress, it is a receipt, and
+    the whole reason these frames exist is the 1.6 s of silence a search costs.
+    The two must agree: a frame carrying one id and a `ToolMessage` carrying
+    another would make a client unable to pair a result with its call.
+    """
+    return str(call.get("id") or fallback)
+
+
+async def _astream_message(
+    runnable,
+    messages: list[BaseMessage],
+    emit: events.Emit,
+    *,
+    stream_tokens: bool,
+) -> AIMessage:
+    """One streamed model call, accumulated back into a single message.
+
+    **The accumulated `AIMessageChunk` is what the rest of the loop then reads**
+    -- `.tool_calls`, `.text`, and the object itself appended into `messages` and
+    re-serialised into the next request. All three were verified against this
+    route before this function was written, because "chunk merging is documented
+    and probably fine" is exactly the reasoning CLAUDE.md records this project
+    losing to three times. Measured 2026-08-16, `google/gemma-4-31b-it` through
+    OpenRouter with `search_corpus` bound, `require_parameters` on and `top_k` in
+    `extra_body`:
+
+        forced tool call, streamed   5 chunks -> .tool_calls carried name, an
+                                     args dict and an id, .text == ""
+        that merged chunk fed back   18 chunks -> "The solar arrays deliver
+        into a second request        12.4 kW at end of life."
+        tool_choice="none"           18 chunks, text as normal
+
+    A separate finding from the same probe, worth recording because it looks like
+    a streaming bug and is not: `tool_choice="search_corpus"` is honoured only
+    intermittently on this route -- 1 of 3 under `ainvoke` and 1 of 3 under
+    `astream` on identical messages. That is provider variance in the same family
+    as `tool_choice="any"` being ignored outright (CLAUDE.md, T4), it predates
+    streaming, and the loop already handles it: the gap branch falls through and
+    accepts the answer when the forced call produces nothing to execute.
+
+    **A tool step emits no tokens, and the step's nature is settled on its first
+    meaningful chunk** rather than at the end. Waiting for the end would defeat
+    streaming; guessing would put a tool call's stray prose on screen as if it
+    were the answer. The first chunk that carries either `tool_call_chunks` or
+    non-empty text decides it, which costs nothing measurable -- in the probe the
+    decision landed on chunk 1 every time.
+
+    The residual case, stated rather than hidden: a model that emitted text and
+    *then* a tool call would have had that text streamed already. `done.result`
+    is authoritative and the client replaces its draft with it, so the turn
+    self-heals; Gemma produced `text == ""` on every tool-call response measured
+    above, so this has not been observed here.
+    """
+    accumulated: AIMessageChunk | None = None
+    # None -> undecided, "text" -> streaming, "tool" -> suppressed for this call.
+    mode: str | None = None
+
+    async for chunk in runnable.astream(messages):
+        accumulated = chunk if accumulated is None else accumulated + chunk
+
+        if not stream_tokens:
+            continue
+
+        if mode is None:
+            if getattr(chunk, "tool_call_chunks", None):
+                mode = "tool"
+                continue
+            piece = getattr(chunk, "text", "") or ""
+            if not piece:
+                # Role-only or metadata-only opening chunk. Decides nothing.
+                continue
+            mode = "text"
+            await emit(events.TOKEN, {"text": piece})
+            continue
+
+        if mode == "tool":
+            continue
+
+        piece = getattr(chunk, "text", "") or ""
+        if piece:
+            await emit(events.TOKEN, {"text": piece})
+
+    if accumulated is None:
+        # A stream that yielded nothing at all. An empty AIMessage keeps every
+        # caller's attribute access working -- `.tool_calls` is [], `.text` is ""
+        # -- so the loop takes its normal-exit branch and `_message_text` logs the
+        # empty answer, which is the same handling a non-streamed empty response
+        # already gets.
+        log.warning("Streamed model call yielded no chunks")
+        return AIMessage(content="")
+    return accumulated
+
+
 async def run_agent_loop(
     *,
     agent: Agent,
@@ -564,6 +694,7 @@ async def run_agent_loop(
     system_prompt: str,
     model: BaseChatModel,
     max_steps: int,
+    emit: events.Emit | None = None,
 ) -> LoopResult:
     """Generate an answer, letting the model call tools first.
 
@@ -589,6 +720,20 @@ async def run_agent_loop(
     An OpenRouter 404 on the bound call **propagates**. It is a configuration
     fault rather than a turn fault, and swallowing it would hide exactly the
     failure mode above.
+
+    `emit` is the SSE channel, and `None` is the whole of the off switch.
+    **Streaming adds no parameter to the request** -- `stream` is a transport
+    flag OpenRouter's routing filter does not consult (it appears in zero of the
+    19 endpoints' `supported_parameters` and streaming works anyway, verified on
+    this repo), so the 14-of-19 `tools` INTERSECT `top_k` headroom quoted above is
+    unchanged by it. `ChatOpenAI(stream_usage=True)` would break that, because it
+    injects an unadvertised `stream_options` key that has never been probed; it is
+    never set here.
+
+    With `emit is None` every model call below is the identical `.ainvoke(...)`
+    line it was before streaming existed rather than a similar one, which is what
+    keeps scenario S1 of `scripts/agentic_check.py` -- and every number already
+    recorded in EVAL.md -- true structurally instead of by care.
     """
     ctx = ToolContext(agent=agent, ledger=ledger)
     tools = build_tools(ctx)
@@ -608,10 +753,46 @@ async def run_agent_loop(
     gap_search_used = False
     stopped_reason: str | None = None
 
+    # The step whose generation produced the text currently on the client's
+    # screen. Read only by the gap branch, to decide whether a retraction has
+    # anything to retract.
+    streamed_text_step: int | None = None
+
     for step in range(1, max(max_steps, 0) + 1):
         t0 = time.perf_counter()
-        ai = await bound.ainvoke(messages)
-        generation_ms += int((time.perf_counter() - t0) * 1000)
+        if emit is None:
+            ai = await bound.ainvoke(messages)
+            generation_ms += int((time.perf_counter() - t0) * 1000)
+        else:
+            # **The per-step call is streamed, not only the two structurally
+            # final ones.** The common tool-enabled turn takes the normal exit on
+            # step 1 with no tool calls -- that is what `agentic_check.py` S2
+            # asserts -- so streaming only the classic path and the forced final
+            # call would ship a feature that emits zero tokens on the majority of
+            # turns while the connection opens and nothing throws. That is the
+            # error-shaped pass `new features/loop.md` T2 exists to forbid: the
+            # test "did the stream open?" stays green while the thing wanted did
+            # not happen. The price is `answer_reset` below, bounded to at most
+            # once per turn by `gap_search_used`.
+            await events.phase(
+                emit, events.PHASE_GENERATE, events.STARTED, step=step
+            )
+            ai = await _astream_message(bound, messages, emit, stream_tokens=True)
+            elapsed = int((time.perf_counter() - t0) * 1000)
+            generation_ms += elapsed
+            # `.text` directly rather than `_message_text`, which logs a warning
+            # on an empty answer -- and an empty `.text` is the NORMAL shape of a
+            # tool step (measured: every tool-call response on this route came
+            # back with `text == ""`), so routing it through the logger would
+            # print a warning on the loop's most ordinary path.
+            streamed_text_step = step if (getattr(ai, "text", "") or "") else None
+            await events.phase(
+                emit,
+                events.PHASE_GENERATE,
+                events.FINISHED,
+                duration_ms=elapsed,
+                step=step,
+            )
         messages.append(ai)
 
         calls = list(getattr(ai, "tool_calls", None) or [])
@@ -671,19 +852,75 @@ async def run_agent_loop(
                 )
                 t1 = time.perf_counter()
                 # A NAMED tool, not "any". "any" is silently ignored here.
-                forced = await model.bind_tools(
-                    tools, tool_choice=SEARCH_CORPUS
-                ).ainvoke(messages)
+                forced_runnable = model.bind_tools(tools, tool_choice=SEARCH_CORPUS)
+                if emit is None:
+                    forced = await forced_runnable.ainvoke(messages)
+                else:
+                    # Streamed for transport symmetry, with tokens suppressed:
+                    # this call exists to produce a tool call, and any prose it
+                    # emits alongside one is about to be discarded with the rest
+                    # of the step. `stream_tokens=False` keeps that text off the
+                    # screen instead of showing it and retracting it a moment
+                    # later, which is the failure mode `answer_reset` is already
+                    # the minimum acceptable amount of.
+                    forced = await _astream_message(
+                        forced_runnable, messages, emit, stream_tokens=False
+                    )
                 generation_ms += int((time.perf_counter() - t1) * 1000)
                 messages.append(forced)
                 forced_calls = list(getattr(forced, "tool_calls", None) or [])
+
+                # **The retraction goes out HERE: after the forced call is known
+                # to have produced something, and before that something runs.**
+                #
+                # Both halves of that are load-bearing and they pull in opposite
+                # directions. It cannot fire when the gap is merely detected,
+                # because `tool_choice=SEARCH_CORPUS` is honoured only
+                # intermittently on this route (measured 1 of 3 under both
+                # `ainvoke` and `astream`) -- and when the forced call comes back
+                # empty the loop falls through below and the answer the user is
+                # reading STANDS. Wiping the screen for a turn whose text was
+                # about to be kept is the worse error of the two.
+                #
+                # And it cannot wait until the `continue`, because the search sits
+                # in between: the reader would watch a complete-looking answer,
+                # then "Searched the corpus", and only then be told the answer had
+                # been withdrawn -- the events in the wrong causal order, which
+                # reads as the search having caused nothing.
+                #
+                # Suppressed when this step streamed no text. There is no draft to
+                # withdraw, and a client told to clear an empty buffer would render
+                # the explanatory copy for a wipe the user never saw.
+                if forced_calls and emit is not None and streamed_text_step == step:
+                    await emit(
+                        events.ANSWER_RESET,
+                        {"reason": "gap_detected", "marker": gap},
+                    )
+                    streamed_text_step = None
+
                 for position, call in enumerate(forced_calls):
+                    if emit is not None:
+                        await emit(
+                            events.TOOL_CALL,
+                            {
+                                "step": step,
+                                "tool": str(call.get("name") or "unknown"),
+                                "call_id": _call_id(call, f"gap_{step}_{position}"),
+                                # Set here and null on a model-chosen call, so a
+                                # reader does not credit the model with a decision
+                                # the code made. Same distinction the TOOL_CALL
+                                # trace payload draws, for the same reason.
+                                "trigger": "gap_detected",
+                            },
+                        )
                     invocation, message = await _execute(
                         call,
                         tools_by_name,
                         step=step,
                         fallback_id=f"gap_{step}_{position}",
                     )
+                    if emit is not None:
+                        await _emit_tool_outcome(emit, invocation)
                     # Marked so the trace can tell a search the model chose from
                     # one the loop insisted on. Without it, a reader would credit
                     # the model with a decision the code made.
@@ -725,12 +962,30 @@ async def run_agent_loop(
         # interpreters' worth of memory competing for one core. Sequential is
         # both the correct shape and the safe one.
         for position, call in enumerate(calls):
+            if emit is not None:
+                # Before `_execute`, deliberately. The durable TOOL_CALL row is
+                # still written after the turn by `ask.run_turn` -- the frame and
+                # the row are two renderings of one `ToolInvocation` and only the
+                # row is durable -- but a frame that waited for the row's timing
+                # would arrive after the 1.6 s of silence it exists to explain.
+                await emit(
+                    events.TOOL_CALL,
+                    {
+                        "step": step,
+                        "tool": str(call.get("name") or "unknown"),
+                        "call_id": _call_id(call, f"call_{step}_{position}"),
+                        # Null: the model chose this one.
+                        "trigger": None,
+                    },
+                )
             invocation, message = await _execute(
                 call,
                 tools_by_name,
                 step=step,
                 fallback_id=f"call_{step}_{position}",
             )
+            if emit is not None:
+                await _emit_tool_outcome(emit, invocation)
             tool_ms += invocation.duration_ms
             invocations.append(invocation)
             messages.append(message)
@@ -740,6 +995,21 @@ async def run_agent_loop(
             invocation, message = _invalid_call_message(
                 call, step=step, fallback_id=f"invalid_{step}_{position}"
             )
+            if emit is not None:
+                # A malformed call is still a call the model made, and it is
+                # answered with a `ToolMessage` like any other failure -- so it
+                # gets the same pair of frames rather than being silently absent
+                # from a timeline that then appears to skip a step.
+                await emit(
+                    events.TOOL_CALL,
+                    {
+                        "step": step,
+                        "tool": invocation.tool,
+                        "call_id": invocation.call_id,
+                        "trigger": None,
+                    },
+                )
+                await _emit_tool_outcome(emit, invocation)
             invocations.append(invocation)
             messages.append(message)
 
@@ -768,8 +1038,31 @@ async def run_agent_loop(
     # risk a different provider answering than the one that made the calls. One
     # parameter set for the whole turn is the property worth keeping.
     t0 = time.perf_counter()
-    final = await model.bind_tools(tools, tool_choice="none").ainvoke(messages)
-    generation_ms += int((time.perf_counter() - t0) * 1000)
+    final_runnable = model.bind_tools(tools, tool_choice="none")
+    if emit is None:
+        final = await final_runnable.ainvoke(messages)
+        generation_ms += int((time.perf_counter() - t0) * 1000)
+    else:
+        # `steps + 1`: this generation is not one of the tool steps, it is the
+        # one after the last of them, and numbering it `steps` would put two
+        # `generate` pairs on the wire under one step number for two different
+        # model calls.
+        final_step = steps + 1
+        await events.phase(
+            emit, events.PHASE_GENERATE, events.STARTED, step=final_step
+        )
+        final = await _astream_message(
+            final_runnable, messages, emit, stream_tokens=True
+        )
+        elapsed = int((time.perf_counter() - t0) * 1000)
+        generation_ms += elapsed
+        await events.phase(
+            emit,
+            events.PHASE_GENERATE,
+            events.FINISHED,
+            duration_ms=elapsed,
+            step=final_step,
+        )
 
     return LoopResult(
         text=_message_text(final),

@@ -55,6 +55,7 @@ from pydantic import BaseModel, Field
 
 from app.config import settings
 from app.db.models import Agent
+from app.rag import events
 from app.rag.agent_loop import ContextLedger, ToolInvocation, run_agent_loop
 from app.rag.llm import build_chat_model
 from app.rag.retriever import (
@@ -438,6 +439,7 @@ async def answer_question(
     *,
     rerank: bool | None = None,
     history: Sequence[ChatTurn] | None = None,
+    emit: events.Emit | None = None,
     **model_overrides,
 ) -> AnswerResult:
     """Run one question through the chain, and return the evidence with it.
@@ -450,19 +452,82 @@ async def answer_question(
     The result now carries the scored retrieval, so a caller that needs
     `query_chunks.similarity_score` no longer searches a second time for numbers
     this function already had.
+
+    **`emit` is a transport, not a decision, and this module still never touches
+    the database.** It writes onto an `asyncio.Queue` that `app/api/stream.py`
+    drains; it is deliberately not a `TraceRecorder`, so `new features/loop.md`
+    S3 stays intact -- the pipeline accumulates, `run_turn` records, and every
+    row of a turn still lands in one transaction. With `emit is None` every
+    branch below is the identical line it was before streaming existed.
+
+    The phase frames come from HERE rather than from `run_turn` for one reason
+    that decides it: `run_turn` computes all of its trace rows *after*
+    `answer_question` returns, so a phase emitted there would arrive once the
+    stage it describes was already over. A progress event that cannot be early is
+    not progress.
     """
     started = time.perf_counter()
 
     # 1. Contextualise, if there is anything to contextualise against.
+    #
+    # The `started` frame is gated on `history` rather than on the result,
+    # because that is exactly the condition `contextualize_question` returns None
+    # on -- and it has to be known BEFORE the call, since a `finished` with no
+    # `started` is the one shape the contract reserves for `rerank`.
     t0 = time.perf_counter()
+    if emit is not None and history:
+        await events.phase(emit, events.PHASE_REWRITE, events.STARTED)
     rewritten = await contextualize_question(question, history or ())
     contextualize_ms = int((time.perf_counter() - t0) * 1000)
+    if emit is not None and history:
+        await events.phase(
+            emit,
+            events.PHASE_REWRITE,
+            events.FINISHED,
+            duration_ms=contextualize_ms,
+            # Null and unchanged are different facts -- see
+            # `contextualize_question`. A client showing "searched for: ..." must
+            # be able to tell "the model read this and left it alone" from "the
+            # rewrite failed and the raw question was used".
+            rewritten_question=rewritten,
+        )
     search_query = rewritten or question
 
     # 2. Retrieve once, with the scores.
     t0 = time.perf_counter()
+    if emit is not None:
+        await events.phase(emit, events.PHASE_RETRIEVE, events.STARTED)
     retrieval = await aretrieve(agent, search_query, rerank=rerank)
     retrieval_ms = int((time.perf_counter() - t0) * 1000)
+    if emit is not None:
+        await events.phase(
+            emit,
+            events.PHASE_RETRIEVE,
+            events.FINISHED,
+            duration_ms=retrieval_ms,
+            chunk_count=len(retrieval.scored),
+            # Advisory only. `SCORE_CHECK` records why: on-topic questions
+            # measured 0.61-0.67 here and off-topic ones 0.49-0.58, so 0.5 sits
+            # INSIDE the overlap. It is on the wire because the Trace view shows
+            # it, never because a client should branch on it.
+            top_score=retrieval.top_score,
+        )
+        if retrieval.reranked:
+            # **`finished` with no `started`, and that asymmetry is deliberate.**
+            # Reranking happens inside `retriever.aretrieve`, which stays the
+            # single retriever construction seam and therefore takes no `emit`.
+            # Threading one in would punch through the seam that keeps the
+            # Stage 1 -> Stage 2 change a one-liner, to buy a frame announcing
+            # the start of an ~830 ms call that is already bracketed by the
+            # retrieve pair. `chunk_count` is what SURVIVED, against retrieve's
+            # count of what was returned -- the two numbers next to each other
+            # are the reranking demo.
+            await events.phase(
+                emit,
+                events.PHASE_RERANK,
+                events.FINISHED,
+                chunk_count=len(retrieval.documents),
+            )
 
     # 3. Generate.
     #
@@ -528,6 +593,11 @@ async def answer_question(
                 if agent.max_tool_steps is not None
                 else settings.agent_max_tool_steps
             ),
+            # The loop emits its own `generate` phases, one pair per step, plus
+            # the three tool events -- it has to, because a tool call's timing is
+            # only knowable from inside it, and `run_turn` writes the durable
+            # TOOL_* rows long after the user has stopped waiting.
+            emit=emit,
         )
         text = loop.text
         tool_calls, artifacts = loop.tool_calls, loop.artifacts
@@ -554,14 +624,41 @@ async def answer_question(
             | model
             | StrOutputParser()
         )
+        chain_input = {
+            "context": format_context(retrieval.documents),
+            "question": search_query,
+        }
         t0 = time.perf_counter()
-        text = await chain.ainvoke(
-            {
-                "context": format_context(retrieval.documents),
-                "question": search_query,
-            }
-        )
-        generation_ms = int((time.perf_counter() - t0) * 1000)
+        if emit is None:
+            # The identical line it has always been. `new features/loop.md` S4:
+            # with the feature off the output is byte-identical, not similar --
+            # every number in EVAL.md was measured through this call.
+            text = await chain.ainvoke(chain_input)
+            generation_ms = int((time.perf_counter() - t0) * 1000)
+        else:
+            await events.phase(emit, events.PHASE_GENERATE, events.STARTED)
+            # The chain ends in `StrOutputParser()`, so `astream` yields plain
+            # `str` and accumulation is a join -- no chunk merging, no message
+            # object, which is why the classic path carries none of the risk the
+            # tool path had to be probed for.
+            #
+            # Empty fragments are dropped rather than sent. They carry nothing,
+            # and every frame costs a `seq` a client is entitled to treat as
+            # meaningful.
+            parts: list[str] = []
+            async for piece in chain.astream(chain_input):
+                if not piece:
+                    continue
+                parts.append(piece)
+                await emit(events.TOKEN, {"text": piece})
+            text = "".join(parts)
+            generation_ms = int((time.perf_counter() - t0) * 1000)
+            await events.phase(
+                emit,
+                events.PHASE_GENERATE,
+                events.FINISHED,
+                duration_ms=generation_ms,
+            )
 
     return AnswerResult(
         question=question,

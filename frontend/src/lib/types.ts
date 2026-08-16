@@ -375,6 +375,24 @@ export type ChatMessage = {
    *  without calling one, which is the common case. The count is a chip on the
    *  turn -- the TOOL_CALL / TOOL_RESULT trace events hold the detail. */
   tool_steps: number;
+  /**
+   * **Client-only, and the only field here the server never sends.**
+   *
+   * True when the user pressed Stop part-way through a streamed answer and the
+   * text on screen is the prefix they had already read. Aborting the fetch stops
+   * the READER, never the agent: the turn keeps running server-side and is
+   * committed with its whole answer, so this same `query_id` re-read from the
+   * server comes back complete and without this flag. That divergence is why the
+   * marker exists -- a truncated answer that looks finished is the thing to
+   * avoid -- and it is also why it must never be persisted or sent anywhere.
+   *
+   * A stopped turn carries `refused: false` unconditionally and `citations: []`.
+   * Both are deliberate. Refusal is computed server-side from the COMPLETE text
+   * by a position-sensitive detector, so scoring a prefix would read a caveat
+   * that was about to be followed by content as a decline; and citations do not
+   * exist until generation finishes, so there is nothing for a chip to open.
+   */
+  stopped?: boolean;
 };
 
 /** `POST .../ask`. The same turn as `ChatMessage`, minus the question (the
@@ -402,6 +420,225 @@ export type AskResult = {
   handouts: Handout[];
   tool_steps: number;
 };
+
+// --------------------------------------------------------------------------
+// The answer stream -- `POST .../ask/stream`
+// --------------------------------------------------------------------------
+
+/**
+ * The frames `POST /api/agents/{id}/ask/stream` and
+ * `POST /api/conversations/{id}/ask/stream` emit, transcribed from the wire
+ * contract exactly as the rest of this file is transcribed from the Pydantic
+ * models. If a field here disagrees with the backend, the backend is right.
+ *
+ * Three properties of the wire are what these types are shaped around.
+ *
+ * **Every frame carries `type` and `seq`, and the SSE `event:` name always
+ * equals `type`.** So a frame is self-describing whether a parser dispatches on
+ * the header or on the body -- `api.ts` dispatches on the body, and the header
+ * is read by nothing.
+ *
+ * **`seq` starts at 0 and increments by exactly one.** It exists so a dropped or
+ * reordered frame is detectable. There is deliberately no SSE `id:` line: `id:`
+ * invites Last-Event-ID resumption, and a turn that writes database rows and
+ * bills tokens is not replayable.
+ *
+ * **`done` is the terminal success frame and it WRAPS the ordinary one-shot
+ * body** rather than being it. Every other frame has `type` and `seq`; making
+ * the terminal one structurally different would give the parser two shapes, and
+ * putting `type`/`seq` inside `AskResult` would change what the non-streaming
+ * route returns. The wrapper costs one property access and leaves `toMessage`
+ * untouched -- which is the load-bearing part, because it means the streamed
+ * turn and the non-streaming fallback fold through one function and cannot
+ * render differently.
+ */
+export type AskStreamStart = {
+  type: "start";
+  seq: number;
+  /**
+   * Real from the first frame: the `queries` row is flushed before the pipeline
+   * runs. That is what gives a STOPPED turn a genuine identity -- a stable React
+   * key and a working trace panel -- rather than a synthetic one.
+   */
+  query_id: string;
+  /**
+   * How a draft learns its id, at the START of the turn rather than at the end.
+   * A new thread that only learns its id 30 seconds later leaves the sidebar
+   * wrong for the whole of it.
+   */
+  conversation_id: string;
+};
+
+/**
+ * One fixed pipeline stage, at its start and again at its end.
+ *
+ * The names are the trace vocabulary lowercased (`REWRITE` -> `rewrite`),
+ * because the whole wire is snake_case and one SHOUTING enum value inside it
+ * would be a second convention for the same facts. Tool activity is NOT folded
+ * in here: it is emitted from a different module, per step, with a different
+ * payload, so it gets its own three frames instead of five optional fields
+ * every phase consumer would have to carry.
+ *
+ * **`rerank` arrives as `finished` only.** It happens inside the retriever,
+ * which stays the single construction seam and takes no emitter -- so a reader
+ * must never wait for a `started` before rendering a `finished`. `generate`
+ * repeats once per agent-loop step and carries `step`; `rewrite` is emitted only
+ * when contextualisation actually ran.
+ *
+ * Facts only. The client composes the sentence, because "a progress note that
+ * under-promises is worse than none" is a copy rule and belongs where the copy
+ * is. An unrecognised `name` must render as nothing, never throw.
+ */
+export type AskStreamPhase = {
+  type: "phase";
+  seq: number;
+  name: "rewrite" | "retrieve" | "rerank" | "generate";
+  status: "started" | "finished";
+  /** Null while `started`. */
+  duration_ms: number | null;
+  /** `generate` only, 1-based -- the agent loop's round trip. */
+  step?: number;
+  /** `rewrite` + `finished`. Null and unchanged are different facts. */
+  rewritten_question?: string | null;
+  /** `retrieve`: how many came back. `rerank`: how many were kept. */
+  chunk_count?: number;
+  /** `retrieve` + `finished`. **Advisory only.** `score_threshold` governs
+   *  rewriting rather than refusing and the measured bands overlap, so this may
+   *  be displayed and must never be branched on. */
+  top_score?: number | null;
+};
+
+/**
+ * A tool invocation, at the moment it is dispatched -- live, not at the end of
+ * the turn. The durable TOOL_CALL trace row is still written afterwards; the
+ * frame and the row are two renderings of one invocation and only the row is
+ * durable.
+ *
+ * `trigger` is the interesting field. `"gap_detected"` means the loop FORCED
+ * this call after the model returned an answer admitting a gap -- so a reader
+ * does not credit the model with a decision the code made. Gemma will not
+ * initiate a search on its own judgement, which is the whole reason the trigger
+ * exists.
+ *
+ * `tool` is loose on purpose ("search_corpus" | "run_python" | whatever is next):
+ * a third tool must not break this file.
+ */
+export type AskStreamToolCall = {
+  type: "tool_call";
+  seq: number;
+  step: number;
+  tool: string;
+  call_id: string;
+  trigger: null | "gap_detected";
+};
+
+/** A tool returned. One per successful `tool_call`. `summary` is short and
+ *  human-readable ("3 chunks, markers [2][4][5]"). */
+export type AskStreamToolResult = {
+  type: "tool_result";
+  seq: number;
+  step: number;
+  tool: string;
+  ok: true;
+  duration_ms: number;
+  summary: string;
+};
+
+/**
+ * A tool failed -- and this frame is **not terminal**. A tool failure comes back
+ * to the model as a ToolMessage and never as an exception, so the loop keeps
+ * going and the turn usually still ends in `done`. Anything that treats this as
+ * the end of the stream is wrong about the loop.
+ */
+export type AskStreamToolError = {
+  type: "tool_error";
+  seq: number;
+  step: number;
+  tool: string;
+  ok: false;
+  duration_ms: number;
+  summary: string;
+};
+
+/**
+ * ONE delta -- never the cumulative answer, which would be O(n^2) on the wire.
+ *
+ * `text` is passed through verbatim: it may span several model tokens, may
+ * contain newlines, and is neither trimmed nor re-encoded. The client
+ * concatenates it exactly as it arrives, and a step whose chunks carry tool
+ * calls is a tool step and emits none of these.
+ */
+export type AskStreamToken = {
+  type: "token";
+  seq: number;
+  text: string;
+};
+
+/**
+ * Everything streamed so far is being discarded.
+ *
+ * At most once per turn, and only in one situation: a loop step produced a
+ * complete answer, the gap detector fired on it, a step remained, and the forced
+ * search had not already run -- so the loop is about to search and answer again.
+ * It is a user-visible retraction of text somebody has already read, which is
+ * why it is a frame of its own rather than a silent wipe, and `marker` is the
+ * phrase that fired so the copy can say what happened.
+ */
+export type AskStreamAnswerReset = {
+  type: "answer_reset";
+  seq: number;
+  reason: "gap_detected";
+  marker: string;
+};
+
+/**
+ * Terminal success. `result` is the EXACT non-streaming body, built by the same
+ * helper and validated by the same model as `POST .../ask`, and emitted after
+ * the single commit.
+ *
+ * **`result.answer` is authoritative and replaces the concatenated deltas.**
+ * Citation markers are normalised only once the whole answer and the finished
+ * citation list exist -- filename markers are rewritten to `[n]`, brackets that
+ * resolve to nothing are deleted, multi-markers are deduped -- so the deltas and
+ * the stored string genuinely differ, and the live turn must not disagree with
+ * the same turn after a reload. Nothing may assert that the joined deltas equal
+ * `result.answer`; that assertion is expected to fail and writing it down would
+ * encode the divergence as the contract.
+ */
+export type AskStreamDone = {
+  type: "done";
+  seq: number;
+  result: AskResult;
+};
+
+/**
+ * Terminal failure, and it can only arrive AFTER the 200 and the headers are
+ * already on the wire -- an OpenRouter 404 mid-turn, say. There is no HTTP
+ * status left to carry it, so the status travels in the body and the parser
+ * turns this back into an `ApiError` with the same `status` and `detail` an
+ * ordinary failure would have had.
+ *
+ * Auth, ownership, validation and anything failing before the first byte stay
+ * ordinary HTTP statuses with FastAPI's usual JSON body and never appear here.
+ * Mutually exclusive with `done`.
+ */
+export type AskStreamError = {
+  type: "error";
+  seq: number;
+  status: number;
+  detail: string;
+};
+
+export type AskStreamEvent =
+  | AskStreamStart
+  | AskStreamPhase
+  | AskStreamToolCall
+  | AskStreamToolResult
+  | AskStreamToolError
+  | AskStreamToken
+  | AskStreamAnswerReset
+  | AskStreamDone
+  | AskStreamError;
 
 /**
  * One chat thread against one agent.
