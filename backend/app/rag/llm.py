@@ -85,7 +85,13 @@ _LEGACY_SLUGS = {
     "gemma-4-31b-it": "google/gemma-4-31b-it",
     "gemini-flash-latest": "google/gemini-3.7-flash",
     "gemini-3.7-flash": "google/gemini-3.7-flash",
-    "gemini-flash-lite-latest": "google/gemini-3.7-flash-lite",
+    # `gemini-flash-lite-latest` used to map to `google/gemini-3.7-flash-lite`,
+    # and that slug DOES NOT EXIST -- OpenRouter answers
+    # `"google/gemini-3.7-flash-lite is not a valid model ID"`. Verified
+    # 2026-08-16. A legacy-id guard whose whole purpose is to stop a bare id
+    # 404ing, and which mapped to a model that 400s, is worse than no entry: the
+    # unmapped path at least logs a warning naming its own guess. Removed rather
+    # than repointed, because there is no evidence any agent ever used it.
 }
 
 # Model families that must not be sent `top_k`.
@@ -121,6 +127,33 @@ _LEGACY_SLUGS = {
 # `supported_parameters` is a UNION across providers and will claim support the
 # endpoint you land on does not have.
 _NO_TOP_K_PREFIXES = ("google/gemini-", "deepseek/")
+
+# Model families that refuse to have reasoning turned OFF.
+#
+# `settings.generation_reasoning` is False, so every generation call carries
+# `reasoning: {"enabled": false}`. On Gemini 3.7 Flash that is not ignored and it
+# is not a routing miss -- it is a hard 400:
+#
+#     Reasoning is mandatory for this endpoint and cannot be disabled.
+#
+# `reasoning.mandatory` is true for that family (the same property
+# `ragas_judge_reasoning_effort` exists to work around, where thinking can only
+# be turned DOWN). Verified 2026-08-16: plain generation, a tool-bound call and
+# `with_structured_output` all three failed identically.
+#
+# **This became load-bearing the moment `generation_model` became editable.**
+# While it was a settings-only value, nobody was going to point generation at
+# Flash by accident. As a field in the settings sheet it is one click, and every
+# turn on that agent would 400 -- so the model picker would have shipped with a
+# poisoned option. The guard is here rather than in the picker because the column
+# is free text and the API is not the only way in: `agentic_check.py` writes it
+# directly, and CLAUDE.md describes an operator typing into it.
+#
+# Dropping the flag rather than raising is right: the caller's intent is "do not
+# spend tokens thinking", and on a model that cannot comply the honest outcome is
+# the model's default, not a failed turn. The cost is visible in the usage
+# numbers, not hidden.
+_REASONING_ALWAYS_ON_PREFIXES = ("google/gemini-",)
 
 
 def openrouter_slug(model: str) -> str:
@@ -194,7 +227,14 @@ def build_chat_model(
         extra_body["provider"] = {"require_parameters": True}
 
     if reasoning is not None:
-        extra_body["reasoning"] = {"enabled": reasoning}
+        if reasoning is False and slug.startswith(_REASONING_ALWAYS_ON_PREFIXES):
+            log.debug(
+                "Model %s cannot disable reasoning; leaving it at the provider "
+                "default rather than sending a flag it rejects.",
+                slug,
+            )
+        else:
+            extra_body["reasoning"] = {"enabled": reasoning}
 
     if top_k is not None:
         if slug.startswith(_NO_TOP_K_PREFIXES):

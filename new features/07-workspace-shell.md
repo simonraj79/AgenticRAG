@@ -272,9 +272,13 @@ The client type `AgentPatch` therefore lists only the patchable fields. That is 
 type-level enforcement — adding `icon` to the sheet would otherwise be a runtime 422 in the
 browser instead of a build error on the machine that wrote it.
 
-`generation_model` is a real column (`db/models.py:181`) that appears in neither `AgentOut`
-nor `AgentUpdate`, so it is invisible to the API and cannot be shown at all. Noted here so the
-next person does not go looking.
+~~`generation_model` is a real column (`db/models.py:181`) that appears in neither `AgentOut`
+nor `AgentUpdate`, so it is invisible to the API and cannot be shown at all.~~
+**Superseded 2026-08-16:** it is on both now, and the sheet renders a `<select>` for it in
+the "takes effect on the next answer" group — see
+[09-deepseek-agentic.md §8](09-deepseek-agentic.md). A `<select>` rather than the `Segmented`
+this document uses everywhere else, because `Segmented` does not wrap and three model slugs
+would fail the 320px overflow assertion this document's own harness added.
 
 ---
 

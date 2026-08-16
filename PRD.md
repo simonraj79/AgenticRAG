@@ -1195,17 +1195,38 @@ The `docs/` directory in §9.1 assumes they stay; adjust if not.
 
 Full record in [new features/09-deepseek-agentic.md](new%20features/09-deepseek-agentic.md).
 
-**26. `agents.generation_model` is unreachable from the API.** The column exists, is
-nullable free text, and is read by four code paths — but it is absent from `AgentTunables`
-and `AgentOut`, and `AgentUpdate` sets `extra="forbid"`, so a PATCH carrying it returns 422.
-It can only be set by direct SQL. `llm.py` calls it "a free-text column an operator can type
-into", which is true of the database and of no shipped interface.
+**26. ~~`agents.generation_model` is unreachable from the API.~~ RESOLVED 2026-08-16 —
+exposed.** It is now on `AgentTunables` (so create *and* update accept it) and on
+`AgentOut`, with a `<select>` in the agent settings sheet. Null still means "use
+`settings.generation_model`", and clearing the field is a supported operation rather than
+a 422.
 
-This mattered little while every agent used one model. It matters now: pointing an agent
-back at `google/gemma-4-31b-it` is a meaningful operation — it is the configuration whose
-gap trigger `agentic_check.py` S13 exists to protect — and there is no supported way to do
-it. Either expose it (and decide whether a workshop attendee should be able to change the
-model mid-session) or delete the column and read the setting.
+Three decisions inside it, recorded because each had a defensible opposite:
+
+- **Free text, not a `Literal`.** The `SplitterName` precedent argues for enumerating;
+  `llm.py`'s "a free-text column an operator can type into" argues against. Splitter won
+  its enum because a bad value *silently downgrades* to a splitter the user cannot see they
+  got. A bad model id cannot be invisible — it fails every subsequent turn loudly — and a
+  whitelist would mean a code change and a deploy each time OpenRouter adds a model, in a
+  workshop whose subject is trying models. The UI offers a measured shortlist; the API
+  stays open.
+- **A bare id is refused at save time.** `openrouter_slug()` guesses `google/<model>` and
+  logs a warning nobody reads, so a typo used to be stored and then 404 on every answer —
+  an error CLAUDE.md records as reading like an outage. `_reject_unroutable_model` turns
+  that into a 422 naming the fix, at the moment a human can act on it. Shape only; it does
+  not check the model exists, because that would put a third-party network call inside a
+  settings save.
+- **Not copied from templates.** `agent_templates` has no such column, and a persona is a
+  claim about *how* to answer rather than about which model answers — the same argument
+  that kept `tools_enabled` off templates.
+
+**One bug had to be fixed before the picker was safe to ship.** `generation_reasoning` is
+false, so every generation call carried `reasoning: {"enabled": false}` — which
+`google/gemini-3.7-flash` answers with a hard 400, *"Reasoning is mandatory for this
+endpoint and cannot be disabled."* Selecting Flash would have broken every turn on that
+agent. `build_chat_model` now withholds the flag for families that refuse it. While the
+value was settings-only nobody was going to point generation at Flash by accident; as a
+menu item it was one click.
 
 **27. `"does not contain"` sits in the hard refusal tier, against the stated rule.**
 CLAUDE.md's rule is that the hard tier is for phrases a model would *never* write while

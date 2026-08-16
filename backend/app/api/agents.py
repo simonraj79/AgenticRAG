@@ -158,6 +158,26 @@ AgentName = Annotated[
 # downgrade to a splitter the user did not choose and cannot see they got.
 SplitterName = Literal["markdown", "recursive"]
 
+# `agents.generation_model` is String(128) and nullable, where null means "use
+# `settings.generation_model`". Same shape as `AgentName`, same reason: an
+# over-long value should be a 422 here rather than a DataError from the driver.
+#
+# **Deliberately NOT a `Literal`, unlike `SplitterName` above.** The two look
+# like the same problem and are not. A bad splitter silently downgrades to a
+# splitter the user did not choose and cannot see they got, so enumerating it
+# converts an invisible wrong answer into a 422. A bad model id cannot be
+# invisible -- it fails every subsequent turn, loudly. And `app/rag/llm.py`
+# describes this column as "a free-text column an operator can type into", with
+# `openrouter_slug()` built to tolerate that; a whitelist here would contradict
+# a design decision made one layer down and would mean a code change and a
+# deploy every time OpenRouter adds a model, in a workshop whose subject is
+# trying models. The UI offers a verified shortlist; the API stays open.
+#
+# What IS enforced is the namespace rule, in `_reject_unroutable_model`.
+GenerationModel = Annotated[
+    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)
+]
+
 
 # --------------------------------------------------------------------------
 # Response and request models
@@ -244,6 +264,12 @@ class AgentOut(BaseModel):
     score_threshold: float
     max_rewrites: int
     system_prompt: str | None = None
+    # Null means "use `settings.generation_model`", which is what almost every
+    # agent does. A plain `str` on the way OUT while writes go through
+    # `GenerationModel`: a read type stays loose so an unrecognised value renders
+    # instead of crashing, matching how `splitter` reads as `str` and writes as
+    # `SplitterName`.
+    generation_model: str | None = None
     # Whether this agent's turn runs as a bounded tool loop, and how many tool
     # round-trips it may take. Both are NOT NULL columns, so neither carries a
     # default here: an agent that somehow reached this serialiser without them
@@ -312,6 +338,23 @@ class AgentTunables(BaseModel):
     # ceiling is here so no config can turn the loop into a spiral.
     max_rewrites: int | None = Field(default=None, ge=0, le=5)
     system_prompt: str | None = None
+
+    # Which model writes the answers. Null clears the override back to
+    # `settings.generation_model`, which is why this is one of the few fields
+    # where an explicit null is meaningful rather than a 422 -- `_NOT_NULL_FIELDS`
+    # derives that from the column being nullable, so it needs no special case.
+    #
+    # **Changing this changes agent BEHAVIOUR, not just its cost.** The models
+    # differ in whether they will initiate a corpus search unprompted: measured
+    # 2026-08-16, `deepseek/deepseek-v4-flash-0731` did so 6/6 and
+    # `google/gemma-4-31b-it` 0/6, which is the entire reason the gap trigger in
+    # `app/rag/agent_loop.py` exists. Both are supported and neither is wrong;
+    # `new features/09-deepseek-agentic.md` has the table.
+    #
+    # Not copied from templates: `agent_templates` has no such column, and a
+    # persona is a claim about HOW to answer rather than about which model
+    # answers -- the same argument that kept `tools_enabled` off templates.
+    generation_model: GenerationModel | None = None
 
     # --- The tool loop ------------------------------------------------------
     #
@@ -548,6 +591,53 @@ def _reject_overlapping_chunks(chunk_size: int, chunk_overlap: int) -> None:
         )
 
 
+def _reject_unroutable_model(model: str | None) -> None:
+    """422 unless the id is one OpenRouter can resolve. Create and update share it.
+
+    **This exists to move a failure from chat time to save time.** OpenRouter
+    resolves `author/model` and nothing else. `app/rag/llm.py` already knows
+    this: `openrouter_slug()` maps a handful of legacy bare ids, and for anything
+    else guesses `google/<model>` and emits a `log.warning` saying so. That
+    warning is correct, and nobody reads server logs -- so today a typo is
+    accepted by the API, stored on the row, and then fails **every subsequent
+    turn** with
+
+        404 No endpoints found that can handle the requested parameters
+
+    which CLAUDE.md records as reading like an outage rather than like a
+    namespace error. The user changed a setting and the agent stopped working,
+    with nothing connecting the two.
+
+    So the rule is checked where the human is: on the request that sets it, with
+    a message that names the fix. The check is deliberately the WEAKEST one that
+    catches this -- shape, not existence. Verifying the model exists would mean a
+    network call to OpenRouter inside a settings save, which makes saving any
+    setting fail when a third party is slow, and would still not prove the model
+    serves the parameters this app sends.
+
+    Null is allowed and is not a typo: it clears the override back to
+    `settings.generation_model`.
+    """
+    if model is None:
+        return
+    # The same authority `openrouter_slug` uses, imported rather than restated --
+    # a second copy of the legacy map is a second thing to get out of step.
+    from app.rag.llm import _LEGACY_SLUGS
+
+    if "/" in model or model in _LEGACY_SLUGS:
+        return
+    raise HTTPException(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        detail=(
+            f"'{model}' is not a full model id. OpenRouter resolves models as "
+            "'author/model' -- for example 'deepseek/deepseek-v4-flash-0731' or "
+            "'google/gemma-4-31b-it'. A bare id is a 404 on every answer this "
+            "agent gives, naming a model that plainly exists, so it is refused "
+            "here instead. Leave the field empty to use the server default."
+        ),
+    )
+
+
 async def _document_count(db: AsyncSession, agent_id: uuid.UUID) -> int:
     """How many documents this agent holds. One row, one aggregate."""
     total = await db.scalar(
@@ -744,6 +834,10 @@ async def create_agent(
         _pending_value(agent, "chunk_size"),
         _pending_value(agent, "chunk_overlap"),
     )
+    # Read straight off the instance rather than through `_pending_value`: this
+    # column has no default to fall back to, so an unset value is genuinely None
+    # and None is the legal "use the server default".
+    _reject_unroutable_model(agent.generation_model)
 
     db.add(agent)
     try:
@@ -898,6 +992,13 @@ async def update_agent(
         agent.chunk_size if sent_size is None else sent_size,
         agent.chunk_overlap if sent_overlap is None else sent_overlap,
     )
+    # Only what was SENT, unlike the chunk pair above. That check needs the merged
+    # configuration because a PATCH can break a pair whose other half is on the
+    # row; this one has no pair. Validating the row's existing value too would
+    # mean an agent already holding a bad id could not be edited at all -- the
+    # request that fixes it would be refused for the state it is fixing.
+    if "generation_model" in fields:
+        _reject_unroutable_model(fields["generation_model"])
 
     for key, value in fields.items():
         setattr(agent, key, value)

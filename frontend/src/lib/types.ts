@@ -78,6 +78,12 @@ export type Agent = {
   score_threshold: number;
   max_rewrites: number;
   system_prompt: string | null;
+  /** Which model writes this agent's answers. Null -- the common case -- means
+   *  the server default from `GET /api/config`. A plain `string` rather than a
+   *  union: read types stay loose so a model the UI has never heard of renders
+   *  instead of crashing. Not to be confused with `EvalRun.generation_model`,
+   *  which records what a PAST run used. */
+  generation_model: string | null;
   /** Copied from the template at creation, like every other parameter -- so an
    *  agent keeps the persona it was created with even if the template is later
    *  retuned. Null for agents created before these columns existed. */
@@ -167,6 +173,14 @@ export type AgentPatch = {
   /** Nullable, and the null is meaningful: it CLEARS the prompt back to the
    *  pipeline default rather than leaving it untouched. */
   system_prompt?: string | null;
+  /** The third field where null is meaningful rather than refused: it clears the
+   *  override back to `settings.generation_model`.
+   *
+   *  The server refuses a bare id (`"gemma-4-31b-it"`) with a 422 rather than
+   *  storing it, because OpenRouter resolves only `author/model` and a bare id
+   *  would 404 on every later answer -- an error that reads like an outage. Send
+   *  the full slug or null. */
+  generation_model?: string | null;
   tools_enabled?: boolean;
   max_tool_steps?: number;
 };

@@ -877,6 +877,48 @@ async def http_scenarios(agent_id: uuid.UUID, user_id: uuid.UUID) -> list[Outcom
                 f"statements={len(statements)} leaked={len(leaked)}",
             ))
 
+            # S17 -- the model is switchable through the API, and a typo is not.
+            #
+            # S13 proves that CHANGING the model changes behaviour, but it writes
+            # the column directly, which was the only way to set it until
+            # 2026-08-16. This asserts the route: the field round-trips, null
+            # clears it, and a bare id is refused HERE rather than 404ing on every
+            # answer the agent later gives.
+            #
+            # The refusal is the half worth having. Accepting `"gemma-4-31b-it"`
+            # is easy and stores a value that makes the agent fail with
+            # `404 No endpoints found...`, which CLAUDE.md records as reading like
+            # an outage -- so the user changed a setting and the agent broke, with
+            # nothing connecting the two.
+            agent_url = f"/api/agents/{agent_id}"
+            prior_model = (await client.get(agent_url)).json().get("generation_model")
+            try:
+                set_r = await client.patch(
+                    agent_url, json={"generation_model": "google/gemma-4-31b-it"}
+                )
+                bad_r = await client.patch(
+                    agent_url, json={"generation_model": "gemma-4-31b-it-typo"}
+                )
+                after_bad = (await client.get(agent_url)).json().get("generation_model")
+                clear_r = await client.patch(agent_url, json={"generation_model": None})
+                cleared = (await client.get(agent_url)).json().get("generation_model")
+                ok = (
+                    set_r.status_code == 200
+                    and set_r.json().get("generation_model") == "google/gemma-4-31b-it"
+                    and bad_r.status_code == 422
+                    # The rejected write must not have landed.
+                    and after_bad == "google/gemma-4-31b-it"
+                    and clear_r.status_code == 200
+                    and cleared is None
+                )
+                outcomes.append(Outcome(
+                    "S17 generation_model is switchable, typos are not", ok,
+                    f"set={set_r.status_code} bad={bad_r.status_code} "
+                    f"after_bad={after_bad!r} cleared={cleared!r}",
+                ))
+            finally:
+                await client.patch(agent_url, json={"generation_model": prior_model})
+
             # S12 -- quota refuses rather than evicting.
             async with SL() as db:
                 before = len((await db.scalars(
