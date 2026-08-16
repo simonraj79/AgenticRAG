@@ -41,6 +41,7 @@ async def run_ingest_job(
     filename: str,
     data: bytes,
     uploaded_by_user_id: uuid.UUID | None = None,
+    force: bool = False,
 ) -> None:
     """Ingest one already-staged document. Never raises.
 
@@ -156,6 +157,24 @@ async def run_ingest_job(
                 # that nothing was ever going to touch while a different row
                 # quietly went `ready`.
                 document_id=document_id,
+                # Carried all the way through, and it was missing.
+                #
+                # The route accepts `?force=true` and skips its OWN duplicate
+                # pre-check, but `ingest_bytes` runs the same check again -- so
+                # dropping the flag here meant a forced upload passed the route,
+                # answered 202, and was then re-deduplicated inside this job and
+                # written `failed` with the text "Re-upload with force to ingest
+                # it again". The user had just done that.
+                #
+                # It is the T2 shape from `new features/loop.md` in its purest
+                # form: every error-shaped check passed. The POST returned 202,
+                # no exception was raised, the UI cleared its prompt and started
+                # polling. The OUTCOME -- a second copy of the document being
+                # indexed -- silently did not happen, and the only symptom
+                # arrived a minute later on a row nobody was still watching.
+                # `ingest_in_background` defaults to True, so this was the
+                # default path, not an edge case.
+                force=force,
             )
             log.info(
                 "Ingest finished for document %s (%s): %s chunks, run %s",

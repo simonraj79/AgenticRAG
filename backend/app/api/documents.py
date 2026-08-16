@@ -460,6 +460,11 @@ async def upload_document(
             filename,
             data,
             user.id,
+            # Passed positionally like everything above it, and it has to be
+            # here: `ingest_bytes` repeats the duplicate check this route
+            # skipped, so a forced upload that loses the flag at this handoff is
+            # accepted with a 202 and then quietly written `failed`.
+            force,
         )
         return _document_out(document, 0)
 

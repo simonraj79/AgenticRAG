@@ -39,12 +39,20 @@ question asked outside any thread" (see `models.Conversation`), but nothing
 written from today on adds to that population -- a question with no thread is a
 question the chat view cannot show.
 
-**Not implemented here: SSE streaming.** PRD section 2.2 specifies token-by-token
-transport and this route returns plain JSON. Streaming and durable recording pull
-in opposite directions -- the row is only complete once the last token has
-arrived -- so the shape that works is to stream tokens and write the rows in the
-same handler after the stream closes. That is a change to this route's response
-type, not to anything below it. Deferred, not designed around.
+**SSE streaming lives in `app/api/stream.py`, and this route is unchanged by
+it.** PRD section 2.2 specifies token-by-token transport; the two `/ask/stream`
+routes over there provide it, and they run `run_turn` below rather than a second
+copy of it. The old note here said streaming and durable recording pull in
+opposite directions -- the row is only complete once the last token has arrived
+-- and that is still exactly right, which is why the resolution was a transport
+on the last model call and nothing else: `run_turn` gained one optional `emit`
+parameter, and with it unset every branch from here down is the line it already
+was. The recording half never learned that streaming exists.
+
+Two routes rather than a `?stream=` flag on this one, for the same reason there
+are already two ask endpoints over one engine: a flag would force
+`response_model=AskOut` off this handler, deleting the validation that makes the
+terminal `done` payload byte-identical to this route's body.
 """
 
 from __future__ import annotations
@@ -79,6 +87,7 @@ from app.db.models import (
     User,
 )
 from app.api.handouts import HandoutOut
+from app.rag import events
 from app.rag.pipeline import HISTORY_TURNS, ChatTurn, answer_question
 from app.rag.refusal import detect_refusal
 from app.rag.retriever import META_CHUNK_ID, RERANK_SCORE_KEY
@@ -487,6 +496,7 @@ async def run_turn(
     session: Session | None,
     conversation: Conversation,
     question: str,
+    emit: events.Emit | None = None,
 ) -> AskOut:
     """Answer one question inside one thread, and record everything about it.
 
@@ -500,6 +510,16 @@ async def run_turn(
     checking of its own precisely so that there is no second, weaker place for
     the rule to live. `agent.namespace` is what scopes retrieval, and PRD
     section 3.2 requires that scoping to be structural.
+
+    **`emit` streams progress; it changes nothing about what is recorded.** With
+    it set, this function emits exactly one frame of its own -- `start`, below,
+    the moment `query.id` exists -- and hands the rest to `answer_question`.
+    Every write, the single commit, and the order of both are untouched, because
+    the durable half of a turn is the half nobody watches in a browser and is
+    therefore the half that must not acquire a second code path. Scenario S1 of
+    `scripts/agentic_check.py` calls this function directly with no `emit` and
+    asserts the resulting trace rows; that assertion holds structurally, since
+    with `emit is None` every branch below and beneath is the line it already was.
     """
     started = time.perf_counter()
 
@@ -537,6 +557,19 @@ async def run_turn(
     db.add(query)
     await db.flush()
 
+    # The first frame, and the only one this function emits itself. It goes out
+    # here rather than at the end because `query.id` exists from this line and
+    # `conversation.id` was flushed by the caller -- so a streaming client learns
+    # the identity of the turn it is watching BEFORE the pipeline runs, instead
+    # of at `done` the way the JSON route forces. That is what lets a new thread
+    # be promoted in the sidebar immediately, and what gives a stopped turn a key
+    # to keep its partial text under.
+    if emit is not None:
+        await emit(
+            events.START,
+            {"query_id": str(query.id), "conversation_id": str(conversation.id)},
+        )
+
     trace = TraceRecorder(db, query.id)
 
     # ------------------------------------------------------------------
@@ -559,7 +592,7 @@ async def run_turn(
     # asyncio Pinecone client, so the event loop stays free -- which matters
     # because Render runs a single uvicorn worker and a blocked loop queues every
     # other in-flight request behind a 13-second generation.
-    result = await answer_question(agent, question, history=history)
+    result = await answer_question(agent, question, history=history, emit=emit)
 
     # ------------------------------------------------------------------
     # 2. REWRITE -- contextualisation, if it fired
@@ -908,6 +941,20 @@ async def run_turn(
             "stopped_reason": result.stopped_reason,
             "tool_ms": result.tool_ms,
             "handouts": len(handout_rows),
+            # **The only schema change streaming makes anywhere, and it is one
+            # optional key in a JSONB payload.** No migration (`event_type` is
+            # String(32), `payload` is JSONB) and no new `EVENT_TYPES` member --
+            # SSE frames are transport, not decisions, and a STREAM event type
+            # would put the wire protocol in the decision log permanently.
+            #
+            # It is worth recording all the same, because chunk accumulation is a
+            # genuinely different reconstruction path for the answer string: a
+            # future disagreement between a streamed answer and a non-streamed one
+            # is answerable from the row rather than by guessing which route wrote
+            # it. Absent rather than `false` on the non-streaming path, so a
+            # GENERATE payload written by the classic route is byte-identical to
+            # every one already in the database.
+            **({"streamed": True} if emit is not None else {}),
         },
         # Generation alone, now that the pipeline times its own phases. The
         # RETRIEVE and REWRITE events above carry the rest, so the three add up

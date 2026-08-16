@@ -272,14 +272,22 @@ export default function AgentEvaluate({
 
   return (
     /*
-      `tab-evaluate` sits on the view's root because this component does not own
-      the tab BUTTON -- AgentDetail does, and its TABS array is where a
-      `testId: "tab-evaluate"` entry belongs. Whichever of the two ends up
-      carrying it, only ONE should: two elements sharing a test id is a
-      getByTestId that throws on a strict-mode query. If the mount site adds it
-      to the button, delete it from this line.
+      `evaluate-panel`, NOT `tab-evaluate` -- do not rename it back, that
+      restores a bug. This root used to carry `tab-evaluate` while the tab
+      BUTTON carried it too (`AgentDetail`'s TABS array, before 4e5e6bd moved
+      the strip into `AgentBar`), so a `getByTestId("tab-evaluate")` matched two
+      live elements whenever this view was open and threw on any strict-mode
+      query. 4e5e6bd defused it by naming the button `tab-eval`; that left the
+      real name unused and the panel wearing a `tab-` prefix it does not earn.
+
+      The panel is what moved, because in this codebase `tab-*` means tab
+      BUTTON -- `tab-workspace` and `tab-sources` (`AgentBar.tsx`) and
+      `rail-tab-sources` (`AgentChat.tsx`) are all buttons, and this root was
+      the only non-button wearing the prefix. `<noun>-panel` matches the one
+      existing panel-root id, `handouts-panel` (`HandoutsPanel.tsx`). The
+      button now holds the full `tab-evaluate`, symmetric with its two siblings.
     */
-    <div data-testid="tab-evaluate" className="space-y-8">
+    <div data-testid="evaluate-panel" className="space-y-8">
       <section className="rounded-xl border border-slate-800 bg-slate-900/30 p-5">
         <h2 className="text-sm font-medium tracking-wide text-slate-400 uppercase">
           Run an evaluation
