@@ -1,7 +1,8 @@
 # new features
 
-Planning documents for two change sets: **agentic tools + Handouts** (`00`–`11`, flat, shipped)
-and **[12 — robust handouts](12-robust-handouts/PLAN.md)** (a folder, **planned, not yet built**).
+Planning documents for three change sets: **agentic tools + Handouts** (`00`–`11`, flat),
+**[12 — robust handouts](12-robust-handouts/PLAN.md)** and
+**[13 — object storage](13-object-storage/PLAN.md)**. All three have shipped.
 
 > **[09-deepseek-agentic.md](09-deepseek-agentic.md) is the one to read next after
 > [loop.md](loop.md).** It is the first change here that made loop.md *wrong* rather
@@ -33,8 +34,8 @@ and **[12 — robust handouts](12-robust-handouts/PLAN.md)** (a folder, **planne
 That distinction is the only thing letting a reader tell instruction from archive, so it is
 carried in the filename: **un-numbered means living.**
 
-**A numbered entry that has not shipped yet says so in the table, and nowhere else.** `00`–`11`
-have all shipped; `12-robust-handouts/` is a plan in flight. The convention used to read
+**A numbered entry that has not shipped yet says so in the table, and nowhere else.** `00`–`11`,
+`12-robust-handouts/` and `13-object-storage/` have all shipped. The convention used to read
 "numbered means shipped", which had no way to describe a change set between decompose and ship —
 [build.md §4](build.md) numbers the folder when it is created, not when it lands. The status
 column is the fix.
@@ -92,7 +93,7 @@ the shape of the screen.
 | **[09-deepseek-agentic.md](09-deepseek-agentic.md)** | shipped | The move to `deepseek/deepseek-v4-flash-0731` — **the change that inverted [loop.md](loop.md) T1**, why turning reasoning off is only safe because a Gemma-era paragraph survives, and the two new layer-1 harnesses |
 | **[11-orchestrator-and-self-check.md](11-orchestrator-and-self-check.md)** | shipped | The `adaptive-tutor` template, `@mentions`, and self-evaluation — **the first change here that applies [loop.md](loop.md) by NOT building three of the four mechanisms as tools.** Also the pattern audit: three of the five catalogue patterns already shipped, source routing is architecturally closed and building it would undo a security property, and the honest weighting that says this system's measured errors are generation-side rather than retrieval-side |
 | **[10-routing-and-embeddings.md](10-routing-and-embeddings.md)** | shipped | Embeddings move to OpenRouter with **no re-ingest** (same model, same space, cosine 1.000000) and the four kwargs that are each a different 400; the golden set moves to a third vendor for judge independence; the DeepSeek provider pin recorded as a **NO_GO with evidence**; and the rewriter losing its trigger — including the acronym bullet that **fabricated**, was fixed into a conditional that measured 5/5, and was **removed anyway**, with the grounded version deferred rather than guessed at |
-| **[12-robust-handouts/](12-robust-handouts/PLAN.md)** | **planned** | **The first change set to use [build.md](build.md) as a procedure rather than produce it.** Nothing between the model's `prs.save()` and a downloadable handout ever opens the bytes — measured, a zero-slide deck is 27,387 bytes and 28 bytes of `PK` junk is a `ready` handout, and both pass every assertion in the repository. The fix is a **third branch** on a retry trigger that is already [loop.md](loop.md) T2-correct, plus the three defects the audit turned up beside it: a deck written from **three chunks**, `stderr` on a successful run that nobody has ever seen, and truncation that retries at the same cap. Its audit deleted more than its plan adds, and **two of its acceptance criteria already existed in prose and had never been executed** |
+| **[12-robust-handouts/](12-robust-handouts/PLAN.md)** | shipped | **The first change set to use [build.md](build.md) as a procedure rather than produce it.** Nothing between the model's `prs.save()` and a downloadable handout ever opens the bytes — measured, a zero-slide deck is 27,387 bytes and 28 bytes of `PK` junk is a `ready` handout, and both pass every assertion in the repository. The fix is a **third branch** on a retry trigger that is already [loop.md](loop.md) T2-correct, plus the three defects the audit turned up beside it: a deck written from **three chunks**, `stderr` on a successful run that nobody has ever seen, and truncation that retries at the same cap. Its audit deleted more than its plan adds, and **two of its acceptance criteria already existed in prose and had never been executed** |
 
 ---
 
@@ -110,3 +111,20 @@ out:
 That last line is why this folder is not purely an archive. The numbered documents are a
 record of how one change was sequenced; `loop.md` is what that change taught, written for the
 next one. If a future build makes it wrong, edit it — do not add a second copy beside it.
+
+---
+
+**[13-object-storage/](13-object-storage/PLAN.md)** | shipped | Bytes leave Postgres for a
+private Cloudflare R2 bucket -- handout files, and original uploads for the first time -- with
+the download route answering 302 to a presigned URL so the bytes never enter the single uvicorn
+worker. Three things make it worth reading past the plumbing. Its audit found the constraint it
+was relaxing was **misattributed**: four code sites cite "PRD section 7" for *"original uploads
+are never stored"* and section 7 never contained it, while the one place that did discuss it
+over-claimed that `chunks.text` makes re-CHUNKING possible -- which it does not, because chunk
+boundaries are lossy. It deliberately does **not** drop `handouts.content`, because that column
+is simultaneously the rollback, the reason `agentic_check` S11 still has a subject, and the
+blue/green discipline `migrate_index.py` already applies to a Pinecone index. And its harness
+found a real defect before the code had a caller -- `delete_quietly`, documented as never
+raising, caught only `StorageError` while its callee wrapped only `ClientError` -- alongside
+**two false reds of its own**, both substring assertions standing in for semantic ones, one of
+which was tripped by the docstring of the guard it was testing.

@@ -164,5 +164,17 @@ async def config() -> dict:
             "cohere": bool(settings.cohere_api_key),
             "google_oauth": bool(settings.google_oauth_client_secret),
             "database": bool(settings.database_url),
+            # Object storage, and the reason it is reported here is the same one
+            # `embedding_route` is reported above: the interesting question is
+            # not "is a key set" but "is it set on the road actually selected".
+            #
+            # Under `storage_route="r2"` a blank credential cannot reach this
+            # endpoint at all -- the settings validator refuses to construct --
+            # so a `false` here means the route is "postgres" and nothing is
+            # broken. Under "postgres" it is purely informational. Either way it
+            # answers the question somebody debugging a 503 from the download
+            # route will ask first.
+            "r2": bool(settings.r2_access_key_id and settings.r2_bucket),
         },
+        "storage_route": settings.storage_route,
     }

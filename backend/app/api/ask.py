@@ -57,6 +57,7 @@ terminal `done` payload byte-identical to this route's body.
 
 from __future__ import annotations
 
+import asyncio
 import re
 import time
 import uuid
@@ -71,6 +72,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app import storage
 from app.api.deps import CurrentUser, DbSession, OwnedAgent
 from app.auth.deps import optional_session
 from app.config import settings
@@ -1073,16 +1075,51 @@ async def run_turn(
     # artefact attributed to an answer that was never stored is orphaned, and it
     # would be orphaned holding megabytes.
     #
-    # Bytes go in Postgres rather than object storage. No bucket is provisioned
-    # (PRD open item 10) and `handouts.content` is `deferred()`, so a list query
-    # never pulls them. The sandbox has already refused anything over 5 MB per
-    # file, so the ceiling is enforced before a row is ever built.
+    # **That guarantee was FREE and is now bought.** It held because bytes and
+    # row were one write: rolling back un-wrote both because there was only one
+    # thing to un-write. An R2 put is not in the transaction, so the pair is
+    # re-established by ordering instead -- object first, row second, and a
+    # best-effort delete on the way out if the turn never commits. The keys are
+    # collected in `staged_keys` for exactly that.
+    #
+    # The bytes are ALSO still written to `content`, keeping
+    # `storage_route=postgres` a real rollback until a later change set drops the
+    # column. The sandbox has already refused anything over 5 MB per file, so the
+    # ceiling is enforced before a row is ever built.
     handout_rows: list[Handout] = []
+    staged_keys: list[str] = []
     for produced in result.artifacts:
         artifact = produced.artifact
+        handout_id = uuid.uuid4()
+
+        # Generated here rather than left to the column default, because the key
+        # must exist before the object does and the object must exist before the
+        # row is added. Three things in a fixed order, from one id.
+        storage_key: str | None = None
+        if storage.enabled():
+            storage_key = storage.handout_key(agent.id, handout_id, artifact.mime_type)
+            try:
+                await asyncio.to_thread(
+                    storage.put_object, storage_key, artifact.content, artifact.mime_type
+                )
+                staged_keys.append(storage_key)
+            except storage.StorageError:
+                # The turn does NOT fail because a file could not be stored. The
+                # answer is written, the tool ran, and the user is owed both --
+                # losing a whole grounded answer to a bucket hiccup would be a
+                # far worse outcome than losing the attachment. The row is
+                # skipped rather than written keyless, so nothing claims to be a
+                # downloadable handout that is not one.
+                log.exception(
+                    "Could not store a tool artefact for conversation %s; "
+                    "the answer is kept and the file is dropped",
+                    conversation.id,
+                )
+                continue
+
         handout_rows.append(
             Handout(
-                id=uuid.uuid4(),
+                id=handout_id,
                 agent_id=agent.id,
                 conversation_id=conversation.id,
                 query_id=query.id,
@@ -1097,6 +1134,7 @@ async def run_turn(
                 mime_type=artifact.mime_type[:128],
                 byte_size=artifact.byte_size,
                 content=artifact.content,
+                storage_key=storage_key,
                 # Stored and shown. For a product whose whole purpose is making a
                 # pipeline inspectable, hiding the step that produced the output
                 # would be the one place it stopped doing that -- and it is the
@@ -1294,7 +1332,20 @@ async def run_turn(
 
     # The single commit. Query, chunks, trace, handouts and conversation land
     # together or not at all.
-    await db.commit()
+    #
+    # The `except` is the other half of section 6b's ordering, and it is the only
+    # thing standing between a failed commit and a permanently unreachable
+    # object. The key was derived from a `handout_id` that exists nowhere except
+    # in a transaction about to be discarded, so nothing -- no row, no listing,
+    # no future request -- could ever name that object again. `delete_quietly`
+    # cannot raise, so the original error is what propagates, which is the one
+    # the caller needs to see.
+    try:
+        await db.commit()
+    except Exception:
+        for key in staged_keys:
+            storage.delete_quietly(key)
+        raise
 
     # `handouts.created_at` is a server_default, and `expire_on_commit=False`
     # does not conjure a value that was never sent -- reading it during Pydantic

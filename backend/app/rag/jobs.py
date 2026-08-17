@@ -117,11 +117,22 @@ async def run_ingest_job(
             # ever marks the row, and `processing` is the worst of the available
             # states precisely because it renders as progress.
             #
-            # Such a row can never be RESUMED. The original bytes were never
-            # stored (PRD section 7) and existed only as this task's `data`
-            # argument, which died with the process. Recovery is therefore always
-            # "delete it and upload again", never "retry it", and two properties
-            # already hold that make that work:
+            # Such a row is still not RESUMED, and the reason has changed in a
+            # way worth stating precisely, because the old one is now false.
+            #
+            # It used to be that the original bytes were never stored and existed
+            # only as this task's `data` argument, which died with the process --
+            # so resuming was impossible rather than merely unbuilt. As of the
+            # object-storage change set the original IS kept
+            # (`documents.storage_key`), so the bytes a resume would need are
+            # sitting in a bucket. What is missing is the RESUME, not the data:
+            # nothing reads that key back, and no route re-enters ingest for an
+            # existing row.
+            #
+            # So recovery remains "delete it and upload again", and the two
+            # properties below are still what make that work. The difference is
+            # that a resume is now a feature somebody could build rather than one
+            # the architecture forbids.
             #
             #   1. `ingest_bytes`'s dedup matches `status == "ready"` only, so a
             #      stuck row does NOT block re-uploading the same file. This is

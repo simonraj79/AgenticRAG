@@ -23,6 +23,7 @@ either cap is raised.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from dataclasses import dataclass
@@ -30,6 +31,7 @@ from dataclasses import dataclass
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from sqlalchemy import select
 
+from app import storage
 from app.config import settings
 from app.db.models import Agent, Handout
 from app.db.session import SessionLocal
@@ -836,7 +838,32 @@ async def run_handout_job(
                     brief,
                 )
 
+            # OBJECT FIRST, ROW SECOND. The key is derivable before the row is
+            # written because it is built from `agent_id` and this row's own id,
+            # both of which already exist -- which is the whole reason the
+            # ordering can be this way round. If the put fails it raises here,
+            # the `except` below marks the row `failed`, and no key was ever
+            # recorded; if the put succeeds and the commit does not, the
+            # `except` deletes what was written.
+            #
+            # `to_thread` because boto3 is synchronous, exactly like the Pinecone
+            # and Cohere clients this module already wraps. Render runs one
+            # uvicorn worker, so a blocking call here stalls every other request.
+            storage_key: str | None = None
+            if storage.enabled():
+                storage_key = storage.handout_key(agent.id, handout.id, recipe.mime_type)
+                await asyncio.to_thread(
+                    storage.put_object, storage_key, content, recipe.mime_type
+                )
+
+            # `content` is still written on the R2 road, and that is deliberate
+            # rather than leftover. The change set keeps `storage_route=postgres`
+            # a working rollback, and a rollback whose bytes were never written
+            # is not one. The column is dropped in a later change set, once R2
+            # has been trusted in production for a while -- the same blue/green
+            # discipline `migrate_index.py` applies to a Pinecone index.
             handout.content = content
+            handout.storage_key = storage_key
             handout.byte_size = len(content)
             handout.filename = filename
             handout.mime_type = recipe.mime_type
@@ -875,6 +902,23 @@ async def run_handout_job(
         # swallows it. Either way the row stays `pending` forever, which reads
         # as progress and never gets investigated.
         log.exception("Handout job failed for handout %s (%s)", handout_id, recipe_key)
+
+        # The fourth step of the write ordering. `storage_key` is only bound
+        # once a put has SUCCEEDED, so reaching here with it set means the
+        # bytes landed and something after that did not -- most likely the
+        # commit. That object is unreferenced by anything and its key is
+        # derived from a row that may be about to be marked `failed`, so
+        # nothing would ever find it again.
+        #
+        # `delete_quietly` cannot raise, which matters more here than anywhere
+        # else in the codebase: this is an `except` block whose entire job is to
+        # leave the row in a terminal state, and an exception thrown while
+        # cleaning up would skip `_settle` and strand the row at `pending`
+        # forever -- trading a leaked object for the exact failure this
+        # try/except exists to prevent.
+        if locals().get("storage_key"):
+            storage.delete_quietly(locals()["storage_key"])
+
         failure = str(exc) or exc.__class__.__name__
         if isinstance(exc, HandoutFailure):
             # Everything else that lands here -- an empty corpus, a removed

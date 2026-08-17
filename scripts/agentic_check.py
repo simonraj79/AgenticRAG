@@ -63,6 +63,7 @@ sys.path.insert(0, str(ROOT / "backend"))
 
 from sqlalchemy import delete, func, select  # noqa: E402
 
+from app import storage as storage_mod  # noqa: E402
 from app.config import settings  # noqa: E402
 from app.db.models import (  # noqa: E402
     Agent,
@@ -506,6 +507,21 @@ async def cleanup(db) -> int:
             print(f"  deleted namespace {agent.namespace}")
         except Exception as exc:  # namespace may never have been written
             print(f"  namespace {agent.namespace}: {type(exc).__name__} (already absent?)")
+
+        # The object prefix, for exactly the reason the namespace above goes
+        # first -- and this helper is a SECOND leak site beyond the one the API
+        # route handles, because it bypasses the route entirely. The Core DELETE
+        # below removes every handout row without any Python seeing it, so
+        # without this the suite quietly fills a bucket with the artefacts of
+        # every run that was ever cleaned up. `--cleanup` looks like it left
+        # nothing behind, which is what makes it worth doing here rather than
+        # trusting the route.
+        try:
+            removed = storage_mod.delete_prefix(storage_mod.agent_prefix(agent.id))
+            if removed:
+                print(f"  deleted {removed} stored file(s) for {agent.id}")
+        except Exception as exc:  # noqa: BLE001
+            print(f"  stored files for {agent.id}: {type(exc).__name__} (leaked)")
 
         await db.execute(delete(Handout).where(Handout.agent_id == agent.id))
         docs = (await db.scalars(select(Document).where(Document.agent_id == agent.id))).all()
@@ -2323,10 +2339,74 @@ async def s11_list_does_not_load_bytea(http: Http) -> list[Outcome]:
             "S11 list does not load bytea",
             "the SQL log captured 0 statements, so nothing was inspected",
         )]
-    return [Outcome(
+
+    outcomes = [Outcome(
         "S11 list does not load bytea", not leaked,
         f"statements={len(statements)} leaked={len(leaked)}",
     )]
+
+    # S11b. THE SAME QUESTION ASKED SO THAT DELETION CANNOT ANSWER IT.
+    #
+    # S11 above greps SQL for `handouts.content`. That is correct today and it is
+    # unfalsifiable the moment the column is dropped: the string stops being
+    # emittable, `leaked` is empty forever, and the row prints green while
+    # measuring nothing. It would be the seventh entry in build.md section 7's
+    # table and a NEW mechanism -- not an assertion that was too weak, but one
+    # whose subject was deleted underneath it.
+    #
+    # It also has a nearer failure. Once the download route presigns, the
+    # obvious-looking optimisation is to presign every row in the LIST response
+    # so the panel need not call again. That emits no `handouts.content` SQL
+    # whatsoever, so S11 passes -- on a change that hands a client up to 200 live
+    # bearer capabilities in one body. S11 would go green on the defect it exists
+    # to catch, inside this change set rather than a later one.
+    #
+    # So this asserts the positive property instead: listing performs no
+    # object-storage work at all. Zero is itself a suspicious number, so the
+    # control below proves the counter can move.
+    calls: list[str] = []
+    real_presign = storage_mod.presigned_get_url
+
+    def _counting(*args, **kwargs):
+        calls.append(args[0] if args else kwargs.get("key", "?"))
+        return real_presign(*args, **kwargs)
+
+    storage_mod.presigned_get_url = _counting
+    try:
+        await http.client.get(http.base, params={"limit": 200})
+        during_list = len(calls)
+
+        # The control. Signing is a local HMAC with no round trip, so this needs
+        # no `ready` handout and no network -- which is what lets the control be
+        # mandatory rather than conditional.
+        try:
+            _counting("agents/x/handouts/y.pptx", filename="y.pptx", mime_type=None)
+            control_works = len(calls) == during_list + 1
+        except Exception:  # noqa: BLE001
+            control_works = False
+    finally:
+        storage_mod.presigned_get_url = real_presign
+
+    if not storage_mod.enabled():
+        outcomes.append(unmeasured(
+            "S11b listing performs no object-storage work",
+            "storage_route is not 'r2', so there is no object storage to call",
+        ))
+    elif not control_works:
+        outcomes.append(unmeasured(
+            "S11b listing performs no object-storage work",
+            "the call counter did not register the control, so a zero here "
+            "would mean nothing",
+        ))
+    else:
+        outcomes.append(Outcome(
+            "S11b listing performs no object-storage work",
+            during_list == 0,
+            f"presign calls during list={during_list} (control proved the "
+            f"counter moves)",
+        ))
+
+    return outcomes
 
 
 async def s17_generation_model_switchable(http: Http) -> list[Outcome]:
@@ -2783,9 +2863,28 @@ async def http_scenarios(db, agent: Agent, user: User, only: str | None) -> list
 
     rule("Handout routes")
     try:
+        # TWO changes, and neither works without the other.
+        #
+        # `follow_redirects=True`, because the download route answers 302 to a
+        # presigned URL on the R2 road. Nine assertions in this file read
+        # `.content` off that route -- S8 x4, S8b, S8c, S28, S29 -- and without
+        # this every one of them goes red simultaneously, reading as "the
+        # migration broke downloads" rather than "the client does not follow
+        # redirects".
+        #
+        # `mounts`, because a client's explicit `transport=` serves EVERY url,
+        # not only those under `base_url`. Follow the redirect with the ASGI
+        # transport still in charge and the R2 url is re-issued against the
+        # FastAPI app, which has no such route -- so the nine assertions go from
+        # reading an empty redirect body to reading a 404 body. Same red, and the
+        # second cause reads as an application routing bug.
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(
-            transport=transport, base_url="http://test", timeout=900
+            transport=transport,
+            mounts={"https://": httpx.AsyncHTTPTransport()},
+            follow_redirects=True,
+            base_url="http://test",
+            timeout=900,
         ) as client:
             http = Http(
                 client=client,

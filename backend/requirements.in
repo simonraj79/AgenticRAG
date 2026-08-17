@@ -59,7 +59,9 @@ langchain-openai
 langchain-classic
 
 # Document loading. Only pypdf is needed on top of the stdlib: markdown and
-# text are read directly, and we deliberately do not store original uploads.
+# text are read directly. Originals ARE now kept, in object storage rather than
+# on disk -- but they are kept as bytes and never re-parsed from a path, so this
+# stays the whole document-loading surface.
 pypdf
 
 # MCP tools as LangChain tools. Nothing imports this yet -- it is here so the
@@ -112,3 +114,15 @@ numpy
 # ragas does not help; the pin has to go here. 0.3.x does not drag langchain-core
 # back below 1.x, so the rest of the stack is unaffected.
 langchain-community<0.4
+
+# Object storage. **An S3-PROTOCOL client pointed at Cloudflare R2 -- nothing
+# here calls AWS**, there is no AWS account, and no AWS_* environment variable is
+# read: `app/storage.py` passes the R2_* credentials explicitly, and they are
+# named that way precisely so botocore's ambient credential chain cannot pick up
+# something else from `~/.aws/config` by accident.
+#
+# Exactly the relationship `langchain-openai` above has with OpenRouter, where
+# the same note has now survived two model migrations. R2 serves no API of its
+# own for objects -- the S3 protocol IS Cloudflare's interface -- so this is the
+# client, not a choice of vendor.
+boto3

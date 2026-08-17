@@ -16,10 +16,13 @@ module through which a delete could be aimed at another agent's namespace.
 
 from __future__ import annotations
 
+import asyncio
+
 from pinecone.exceptions import NotFoundException
 from sqlalchemy import delete as sa_delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app import storage
 from app.db.models import Agent, Chunk, Document
 from app.rag.retriever import get_vector_store
 
@@ -106,6 +109,43 @@ async def delete_agent_namespace(agent: Agent) -> None:
         # Raising would make deleting an empty agent fail for precisely the
         # reason that guarantees it is safe.
         return
+
+
+async def delete_agent_objects(agent: Agent) -> int:
+    """Delete every stored file under one agent's prefix. Returns the count.
+
+    **The exact counterpart of `delete_agent_namespace` above, and it exists for
+    a reason that is easy to miss when reading `api/agents.py`.** That route
+    deletes the agent with a Core `DELETE` so Postgres performs the whole
+    cascade in one statement -- and there is no `relationship()` on `Handout`
+    anywhere in the model layer, so no Python code ever sees the handout rows go.
+    There is nothing to iterate and nowhere to hang a per-row cleanup. Without a
+    prefix delete, every file an agent ever produced survives its agent
+    permanently, with no row left naming the key.
+
+    Which is why the key scheme puts `agent_id` in the first path segment: this
+    function is the whole justification for it.
+
+    Runs BEFORE the row cascade, the same ordering `delete_document` argues at
+    length -- orphaned rows are visible and re-deletable, orphaned objects are
+    not. An empty prefix deletes nothing and reports 0, so an agent that never
+    made a handout is not a special case.
+    """
+    if not storage.enabled():
+        return 0
+    return await asyncio.to_thread(storage.delete_prefix, storage.agent_prefix(agent.id))
+
+
+async def delete_document_object(document: Document) -> None:
+    """Delete one document's stored original, if it has one.
+
+    Tolerates a missing key rather than treating it as an error: every document
+    ingested before object storage existed has `storage_key = None`, and so does
+    every upload made while `storage_route` is "postgres". Both are normal.
+    """
+    if not storage.enabled() or not document.storage_key:
+        return
+    await asyncio.to_thread(storage.delete_object, document.storage_key)
 
 
 async def namespace_vector_count(agent: Agent) -> int:

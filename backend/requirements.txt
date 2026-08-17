@@ -10,6 +10,8 @@ appdirs==1.4.4
 asyncpg==0.31.0
 attrs==26.1.0
 Authlib==1.7.2
+boto3==1.43.72
+botocore==1.43.72
 certifi==2026.7.22
 cffi==2.1.1
 charset-normalizer==3.5.0
@@ -51,6 +53,7 @@ instructor==1.15.4
 itsdangerous==2.2.0
 Jinja2==3.1.6
 jiter==0.14.0
+jmespath==1.1.0
 joserfc==1.7.4
 jsonpatch==1.33
 jsonpointer==3.1.1
@@ -121,6 +124,7 @@ requests==2.34.2
 requests-toolbelt==1.0.0
 rich==14.3.4
 rpds-py==2026.6.3
+s3transfer==0.19.2
 scikit-network==0.33.5
 scipy==1.18.0
 shellingham==1.5.4
