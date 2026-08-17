@@ -139,6 +139,33 @@ quota, so it is deliberately manual:
 python scripts/agentic_check.py --setup   # then --run, then --cleanup
 ```
 
+## Working on this codebase
+
+**Query the LangChain MCP servers before writing or changing LangChain code — first, every
+time, not as a fallback once an import fails.** LangChain 1.x relocated symbols with no
+deprecation shims, so tutorials, blog posts and model training data all confidently describe
+imports that no longer resolve. The failure arrives as `ModuleNotFoundError`, which reads as a
+missing dependency rather than a moved class and sends you to check your install instead of
+the docs. This repo hit it twice in one afternoon — `langchain.text_splitter` and
+`ContextualCompressionRetriever` — and each was one query. Treat these as outranking both
+memory and any example found elsewhere.
+
+| Server | Use it for |
+|---|---|
+| `docs-langchain` | Concepts, guides, how-tos — the *why* and the recommended pattern |
+| `reference-langchain` | Exact signatures, parameters and module paths — the *where* |
+
+```bash
+claude mcp add --transport http docs-langchain --scope user https://docs.langchain.com/mcp
+claude mcp add --transport http reference-langchain --scope user https://reference.langchain.com/mcp
+```
+
+Adding a feature rather than fixing one? [new features/build.md](new%20features/build.md) is
+the procedure — audit first, shared contracts in one plan file, acceptance criteria that name
+a harness case. [new features/loop.md](new%20features/loop.md) is the pattern for anything the
+**model** decides, which is a harder problem than it looks: binding a tool is twenty lines
+that work first time, and then the model declines to call it.
+
 ## Deploying
 
 **Pushing to `main` is the deploy.** `autoDeploy` is on for both Render services, so a merge
@@ -180,9 +207,12 @@ scripts/            Provisioning and end-to-end checks
 |---|---|
 | [PRD.md](PRD.md) | The specification: architecture, schema, deployment |
 | [EVAL.md](EVAL.md) | How to run an evaluation and read a scorecard |
-| [HANDOFF.md](HANDOFF.md) | Current state and what to do next |
-| [new features/](new%20features/) | Design notes for each major change |
+| [new features/](new%20features/) | Design notes for each major change. **Un-numbered files are living references; numbered ones record a change that shipped** |
+| [new features/build.md](new%20features/build.md) | **Start here for a new feature bigger than one prompt** — audit, plan, one file per feature, harness-first, verify, ship |
 | [new features/loop.md](new%20features/loop.md) | The design pattern for anything the **model** decides — read before adding a tool, a retry or a detector |
+
+Each of those two has a `-prompt.md` companion holding the session structure.
+[PRD.md §10](PRD.md) is the authoritative tracker for what is still open.
 
 ---
 

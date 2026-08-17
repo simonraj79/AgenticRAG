@@ -124,6 +124,11 @@ warrant asking what shape the phrase belonged to.
 The template front-loads questions about model judgement. If the model is not making a
 decision, the questions have no answers and asking them produces confident noise.
 
+- **Anything bigger than one feature** — a change set, a new table, a new API surface. That is
+  [build.md](build.md) and [build-prompt.md](build-prompt.md), the outer loop: audit, one
+  plan file holding the shared contracts, then one file per feature. It hands each
+  model-decided feature back to *this* template, so you will end up here anyway — one
+  feature at a time, which is the point.
 - **Fixing a bug in an existing tool** — the pattern is already chosen; go straight to
   `loop.md §7` for where the code lives.
 - **A pure UI change**, even to the Handouts panel. Use

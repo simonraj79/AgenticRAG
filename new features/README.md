@@ -28,13 +28,33 @@ Planning documents for one change set: **agentic tools + Handouts**.
 > **A feature can pass its own harness and still be the wrong thing to ship** — §5.2
 > is that record, and §6.1 keeps the version worth building instead.
 
-**[loop.md](loop.md) and [loop-prompt.md](loop-prompt.md) are the living documents here.**
-Everything else records a change that has shipped. `loop.md` is the design pattern extracted
-from it — read before adding a tool, a retry, or any feature where the model decides
-something rather than the code deciding it. `loop-prompt.md` is the prompt structure for
-starting that work, and the two are a pair: the pattern says what to get right, the prompt
-gets those questions asked before the code exists rather than after. CLAUDE.md points at
-both.
+**Four documents here are living; every numbered one records a change that has shipped.**
+That distinction is the only thing letting a reader tell instruction from archive, so it is
+carried in the filename: **un-numbered means living.**
+
+They are two pairs, one nested inside the other. Each pair is a pattern plus the prompt that
+opens a session following it — the pattern says what to get right, the prompt gets those
+questions asked before the code exists rather than after.
+
+```
+build.md / build-prompt.md    the OUTER loop -- a change set, any kind
+   audit -> plan -> decompose into a folder -> build -> verify -> ship -> fold out
+        |
+        +-- loop.md / loop-prompt.md    the INNER loop -- one feature the MODEL decides
+```
+
+Start at [build.md](build.md) for anything bigger than one prompt; it hands each
+model-decided feature to [loop-prompt.md](loop-prompt.md), so the pairs compose rather than
+compete. Go straight to [loop-prompt.md](loop-prompt.md) when the change is one feature and
+the hard part is getting a model to act. If a *number* decides it, [loop.md §1](loop.md) says
+write the `if` and skip both. CLAUDE.md points at all four.
+
+**`build.md` was extracted after the fact**, from the change set numbered `00`–`11` below —
+which is why `00-IMPLEMENTATION-PLAN.md` is the worked example of its §3 and the twelve files
+beside it are the worked example of its §4. The procedure existed as an artifact long before
+it existed as a procedure, and its two sharpest rules are corrections to how that went:
+acceptance criteria must name a harness case (05's were prose and went unexecuted until 07),
+and a green suite is not evidence (five modules, five times).
 
 For the history: read [00-IMPLEMENTATION-PLAN.md](00-IMPLEMENTATION-PLAN.md) first. It holds
 the audit, the shared contracts every other document depends on, and the build sequence. The
@@ -49,6 +69,8 @@ the shape of the screen.
 
 | Document | What it covers |
 |---|---|
+| **[build.md](build.md)** | **The outer loop — living reference, START HERE for any new feature bigger than one prompt.** Audit before planning, shared contracts in one plan file, one feature file per feature with criteria that name a harness case, harness-first, verify low to high, then read one answer by eye |
+| **[build-prompt.md](build-prompt.md)** | **How to open each of its six sessions** — one prompt per phase, a worked example on PRD open item 18, and when not to use it |
 | **[loop.md](loop.md)** | **The agent loop as a reusable pattern — living reference, read before adding a tool** |
 | **[loop-prompt.md](loop-prompt.md)** | **How to open a session that follows it — prompt structure, worked example, and when not to use it** |
 | [00-IMPLEMENTATION-PLAN.md](00-IMPLEMENTATION-PLAN.md) | Audit, contracts, sequencing, risks, definition of done |
@@ -74,7 +96,8 @@ out:
 - gotchas discovered while building -> `CLAUDE.md`
 - open items resolved or superseded (7) and opened (21-25) -> `PRD.md` §10
 - anything that changes how an evaluation is run or read -> `EVAL.md`
-- **the reusable shape of the change itself -> [loop.md](loop.md)**, which stays here
+- **the reusable shape of a model-decided feature -> [loop.md](loop.md)**, which stays here
+- **the reusable shape of the process that produced it -> [build.md](build.md)**, likewise
 
 That last line is why this folder is not purely an archive. The numbered documents are a
 record of how one change was sequenced; `loop.md` is what that change taught, written for the
