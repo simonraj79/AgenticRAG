@@ -9,7 +9,9 @@ The short version of the design:
     static_check      reject in milliseconds, with a message the model can act on
     _minimal_env      the child inherits NO secrets -- the strongest control here
     subprocess.run    real process isolation, a kill that works, a wall clock
-    _harvest          only known-safe file types, capped, all-or-nothing
+    _harvest          only known-safe file types, capped, all-or-nothing --
+                      and run BEFORE the exit code is read, so a crash that came
+                      after a good save still returns the file
 
 `run()` never raises. Every failure -- refusal, syntax error, timeout, crash,
 oversized output -- comes back as a `SandboxResult` with `ok=False` and an
@@ -204,6 +206,24 @@ class SandboxArtifact:
 
 @dataclass(frozen=True)
 class SandboxResult:
+    """What one run produced. `ok` and `artifacts` are INDEPENDENT.
+
+    `artifacts` may be non-empty while `ok` is False: a program that saved a deck
+    and then raised gets its deck back, because "how far did it get" is the most
+    useful thing to tell a model that is about to retry. Two consequences for
+    callers:
+
+    - **`ok=False` never means "no files were written".** Read `ok` for whether
+      the run succeeded and `artifacts` for what exists. Code that treats a
+      non-empty list as a success signal is wrong.
+    - **Except after a timeout**, which returns `artifacts=[]` on purpose -- see
+      the comment on that branch in `_run_blocking`.
+
+    Nothing here decides whether an artefact is *persisted*; that is the caller's
+    call, and both callers deliberately keep a crashed run's files out of the
+    handout tables.
+    """
+
     ok: bool
     exit_code: int
     stdout: str
@@ -567,6 +587,19 @@ def _run_blocking(code: str, timeout_s: float) -> SandboxResult:
             # subprocess has already killed the child. On Windows that is
             # TerminateProcess, which does not reap grandchildren -- but
             # `subprocess` is not on the import allowlist, so there are none.
+            #
+            # THIS PATH KEEPS `artifacts=[]`, AND THE ASYMMETRY WITH THE
+            # NON-ZERO-EXIT PATH BELOW IS DELIBERATE. Do not "tidy" the two into
+            # agreement. A crashed program stopped at a statement boundary and
+            # whatever it had already saved is a whole file; a killed one was
+            # stopped at an arbitrary instruction, so a `.pptx` on disk here may
+            # be a zip whose central directory was never written -- bytes that
+            # pass every suffix and size check and raise `BadZipFile` on the
+            # user's machine. Harvesting that would hand the model a "you got as
+            # far as this" signal that is a lie.
+            #
+            # `scripts/sandbox_check.py` case 19 asserts it, precisely because
+            # this looks like an oversight next to case 18.
             partial_out = exc.stdout if isinstance(exc.stdout, str) else ""
             partial_err = exc.stderr if isinstance(exc.stderr, str) else ""
             return SandboxResult(
@@ -598,20 +631,45 @@ def _run_blocking(code: str, timeout_s: float) -> SandboxResult:
         stdout = _truncate(proc.stdout or "", limit)
         stderr = _truncate(proc.stderr or "", limit)
 
+        # HARVEST BEFORE READING THE EXIT CODE. The process exiting non-zero says
+        # nothing about the files it wrote before it fell over, and this used to
+        # return `artifacts=[]` on any crash.
+        #
+        # The failure that shape produces is not a lost file -- the workdir is
+        # deleted either way -- it is a lost *diagnosis*. A deck program that
+        # saved three good slides and then raised on its own `print()` came back
+        # as "the code raised an error" with nothing attached, so
+        # `jobs._problem` fired its branch 1 and the repair turn told a model
+        # whose `prs.save()` had worked perfectly that its code did not run. It
+        # then rewrote the part that was already right.
+        #
+        # This weakens nothing. `_harvest` applies the same per-file and per-run
+        # caps on both paths, and it signals a cap breach by returning `[]` --
+        # so the all-or-nothing rule (a deck missing half its slides is worse
+        # than a deck that failed) holds here by construction rather than by a
+        # special case. The only new information is "you got as far as this".
+        artifacts, harvest_error = _harvest(workdir)
+
         if proc.returncode != 0:
             detail = _last_line(stderr) or f"the process exited with code {proc.returncode}"
+            message = f"The code raised an error: {detail}"
+            if harvest_error is not None:
+                # The run crashed AND blew a size cap. The crash is the cause, so
+                # `error_kind` stays "runtime" -- but the cap message is the only
+                # explanation of where the file went, and computing it and then
+                # dropping it is the exact defect this block was written to fix.
+                message = f"{message} The files were also dropped: {harvest_error}"
             return SandboxResult(
                 ok=False,
                 exit_code=proc.returncode,
                 stdout=stdout,
                 stderr=stderr,
-                artifacts=[],
+                artifacts=artifacts,
                 duration_ms=_elapsed_ms(started),
-                error=f"The code raised an error: {detail}",
+                error=message,
                 error_kind="runtime",
             )
 
-        artifacts, harvest_error = _harvest(workdir)
         if harvest_error is not None:
             return SandboxResult(
                 ok=False,

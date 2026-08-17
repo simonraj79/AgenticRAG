@@ -46,10 +46,16 @@ import logging
 import re
 import uuid
 from datetime import datetime
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Response, status
-from pydantic import BaseModel, ConfigDict, StringConstraints
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    ModelWrapValidatorHandler,
+    StringConstraints,
+    model_validator,
+)
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import undefer
@@ -124,6 +130,13 @@ class HandoutOut(BaseModel):
     reason: a study sheet's markdown and a python-pptx script are each a few
     kilobytes, times 200 rows. They live on `HandoutDetail`, fetched when a user
     opens one.
+
+    **`meta` is absent too, and that is a third guard rather than an oversight.**
+    It is a free-form JSONB blob holding the brief, the chunk ids and the recipe
+    key; putting it on the wire would hand a client the vocabulary that
+    `extra="forbid"` on `HandoutRequest` exists to withhold. The two facts a
+    panel actually needs are lifted out of it as flat, typed, nullable fields --
+    see `_lift_from_meta`.
     """
 
     model_config = ConfigDict(from_attributes=True)
@@ -137,9 +150,77 @@ class HandoutOut(BaseModel):
     status: str
     origin: str
     error: str | None = None
+    # WHAT KIND of failure that was, from `meta`: "import" | "syntax" |
+    # "timeout" | "runtime" | "output" | "invalid". The first five are the
+    # sandbox's own classification of the PROCESS; "invalid" is about the
+    # ARTEFACT -- a file was produced and it does not open.
+    #
+    # A `str` and not an enum, matching `status`/`kind`/`origin` above and the
+    # `String(16)` columns behind them: the set has already grown once, and a
+    # closed type here would make this the file that breaks when it grows
+    # again. It stays under 16 characters so it remains promotable to a column
+    # if it is ever worth one.
+    error_kind: str | None = None
+    # 1, or 2 when the retry rescued the run. Recorded because "it worked first
+    # time" and "it worked after reading its own traceback" are different facts
+    # about the model, and `source_code` -- which holds both attempts joined --
+    # makes them look the same to anything that is not a human reading it.
+    attempts: int | None = None
     conversation_id: uuid.UUID | None = None
     query_id: uuid.UUID | None = None
     created_at: datetime
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def _lift_from_meta(
+        cls, data: Any, handler: ModelWrapValidatorHandler["HandoutOut"]
+    ) -> "HandoutOut":
+        """Carry two values across from `meta`, and leave `meta` behind.
+
+        A `wrap` validator rather than a `before` one, because the ordinary
+        `from_attributes` path already does all the work: this runs after it and
+        moves two values across, instead of re-listing every field in order to
+        rebuild the input as a dict. It is inherited, so `HandoutDetail` gets it
+        for free and the two shapes cannot disagree.
+
+        **This reads `meta`, which is an ordinary column loaded by every
+        `select(Handout)` in this module.** Unlike `content` it is not
+        `deferred()`, so nothing here triggers the implicit IO that raises
+        `MissingGreenlet` from inside Pydantic serialisation -- the same trap
+        the `db.refresh` in `create_handout` guards against. A `load_only()`
+        added later that dropped `meta` would break that, which is the one
+        change to watch for.
+
+        `getattr` with a default, so validating a plain dict still works and
+        keeps whatever that dict supplied: the ORM row is the only input that
+        has a `meta` to lift from.
+
+        Both keys are missing from most rows and none of that is an error. A job
+        that failed before the sandbox ran has no `error_kind` to record, a job
+        that failed at all writes no `meta` today, and every row written before
+        this change has neither. `None` is the honest answer in all three cases,
+        which is why both fields carry a default -- an old row and an old client
+        read the same thing.
+        """
+        model = handler(data)
+
+        meta = getattr(data, "meta", None)
+        if isinstance(meta, dict):
+            kind = meta.get("error_kind")
+            model.error_kind = kind if isinstance(kind, str) else None
+
+            attempts = meta.get("attempts")
+            # `isinstance(True, int)` is True, so bools are excluded by hand.
+            # Nothing validates JSONB on the way in, and this reads back
+            # whatever a job wrote -- including, one day, something that is not
+            # a count.
+            model.attempts = (
+                attempts
+                if isinstance(attempts, int) and not isinstance(attempts, bool)
+                else None
+            )
+
+        return model
 
 
 class HandoutDetail(HandoutOut):

@@ -13,7 +13,8 @@
  * | `pending` | spinner, elapsed seconds, and NO download link -- the bytes   |
  * |           | do not exist yet and the route answers 409                    |
  * | `ready`   | thumbnail (charts only), size, download, the code, delete     |
- * | `failed`  | rose border, the error text verbatim, and "Try again"         |
+ * | `failed`  | rose border, a chip naming the failure class, the error text |
+ * |           | verbatim, and "Try again"                                    |
  *
  * Anything else renders as itself. `status`, `kind` and `origin` are `String(16)`
  * columns rather than enums precisely so a fifth recipe costs a seed row instead
@@ -49,6 +50,58 @@ const KIND_LABELS: Record<string, string> = {
 const ORIGIN_LABELS: Record<string, string> = {
   tool: "from a turn",
   recipe: "from a recipe",
+};
+
+/**
+ * What the disclosure on a card is called, per kind.
+ *
+ * It has to name what is actually inside it, and what is inside it changed: a
+ * deck and a table now carry a `preview_text` outline -- slide titles, or the
+ * header row and a row count -- above the generating Python. A study sheet has
+ * no code at all, so its disclosure holds the sheet itself.
+ *
+ * A chart keeps "Code", and that is the honest label: its preview is the
+ * thumbnail already rendered above, so the only thing the disclosure adds is the
+ * matplotlib that drew it.
+ *
+ * Read through `??` like the two maps above, so an unrecognised kind degrades to
+ * a sensible word rather than to `undefined`.
+ */
+const REVEAL_SUMMARY: Record<string, string> = {
+  chart: "Code",
+  deck: "Outline and code",
+  table: "Outline and code",
+  sheet: "Preview",
+};
+
+/**
+ * What class of failure a `failed` row hit, as words rather than as a slug.
+ *
+ * The five the sandbox already computes plus `"invalid"`, which is about the
+ * ARTEFACT rather than the process: the file was produced, and it does not
+ * open. The prose in `handout.error` says what happened; this says what to do
+ * about it -- "timed out" means ask for less, "blocked import" means the model
+ * reached for something the sandbox does not carry, "unusable file" means the
+ * run looked clean and the deck is empty.
+ *
+ * **This map is a GATE, not a `??` fallback, and that is the one place this
+ * file departs from `KIND_LABELS` above.** An unrecognised `kind` is still
+ * worth rendering raw, because it is what the row IS and the user is looking
+ * for it. An unrecognised failure class is a token with no meaning to a
+ * workshop attendee, sitting beside prose that already explains the failure --
+ * so it renders nothing, and the row stays exactly as it was before this
+ * feature. The backend side of that contract (`error_kind` is one of these
+ * six, and stays under 16 characters so it remains promotable to a column) is
+ * asserted in `scripts/deck_check.py`; papering over a stray value here is how
+ * that assertion would stop meaning anything.
+ */
+export const ERROR_KIND_LABELS: Record<string, string> = {
+  import: "blocked import",
+  syntax: "syntax error",
+  timeout: "timed out",
+  runtime: "crashed",
+  output: "output rejected",
+  invalid: "unusable file",
 };
 
 export default function HandoutCard({
@@ -96,6 +149,12 @@ export default function HandoutCard({
   const terminal = handout.status === "ready" || handout.status === "failed";
   const kindLabel = KIND_LABELS[handout.kind] ?? handout.kind;
   const originLabel = ORIGIN_LABELS[handout.origin] ?? handout.origin;
+  // Deliberately no `??`, unlike the two above. `undefined` here means "render
+  // nothing", which covers both a row that recorded no class and a class this
+  // build does not know -- see `ERROR_KIND_LABELS`.
+  const errorKindLabel = handout.error_kind
+    ? ERROR_KIND_LABELS[handout.error_kind]
+    : undefined;
 
   async function loadDetail() {
     requested.current = true;
@@ -205,6 +264,32 @@ export default function HandoutCard({
         </div>
       )}
 
+      {handout.status === "failed" && errorKindLabel && (
+        /*
+          The class, above the prose, as a SIBLING of it rather than a wrapper
+          around it.
+
+          A wrapper would put the two on one line and would also change this
+          card's spacing for every row that carries no class -- which is every
+          row written before `error_kind` existed, and plenty written since. An
+          element that is simply absent changes nothing at all, which is what
+          "identical to today" has to mean if it is going to be assertable.
+
+          A `<span>`, and no `min-h-11`: that convention is about tap targets,
+          and this is not a control -- nothing here is clickable. `StatusPill`
+          in `ui.tsx` is the shape being followed.
+        */
+        <span
+          data-testid="handout-error-kind"
+          // The raw value alongside the label, so a browser-level check can
+          // assert on the class without depending on the copy.
+          data-error-kind={handout.error_kind}
+          className="mt-2 inline-block rounded-full border border-rose-800/70 bg-rose-950/40 px-2 py-0.5 text-xs font-medium text-rose-200"
+        >
+          {errorKindLabel}
+        </span>
+      )}
+
       {handout.status === "failed" && (
         <p
           data-testid="handout-error"
@@ -273,7 +358,27 @@ export default function HandoutCard({
         </div>
       </div>
 
-      {handout.status === "ready" && (
+      {/*
+        A FAILED handout shows its code too, and that is the whole point of
+        storing it.
+
+        This used to be `status === "ready"`, from a time when a failed row
+        stored nothing: `_run_sandbox_recipe` raised before the caller ever
+        assigned `source_code`, so `len(source_code) == 0` was measured on real
+        failed rows and there was genuinely nothing to reveal. The backend now
+        carries both attempts through the raise (`HandoutFailure.source_code`),
+        so the code exists exactly when somebody needs to read it -- and the
+        card was still hiding it.
+
+        Leaving the gate would have shipped that fix invisible: stored, returned
+        by `HandoutDetail`, never rendered. That is the "green over a product
+        that is not there" shape this whole change set exists to correct, so it
+        is worth the two extra words here.
+
+        `pending` stays excluded, because for a row still running there is
+        nothing to fetch and the spinner above already says so.
+      */}
+      {terminal && (
         <div className="mt-2" onClick={onRevealClick}>
           {/*
             The generation step, shown rather than hidden. NotebookLM does not
@@ -287,8 +392,22 @@ export default function HandoutCard({
             sheet itself instead. Same request, same fetch-on-first-open, two
             different things worth reading.
           */}
+          {/*
+            The label names EVERYTHING behind it, not just the code.
+
+            Found by opening the page, 2026-08-17, and by nothing else: feature
+            05 writes a slide-title outline into `preview_text` so a user can see
+            a deck is empty without downloading it and opening PowerPoint -- and
+            it then sat behind a disclosure called "Code", which is the last
+            place anyone looks for slide titles. The outline was written,
+            fetched, rendered and reachable; every assertion passed; the feature
+            was unusable for the thing it exists for.
+
+            A deck and a table now say "Outline and code", so the word a user is
+            looking for is on the control they have to click.
+          */}
           <Reveal
-            summary={handout.kind === "sheet" ? "Preview" : "Code"}
+            summary={REVEAL_SUMMARY[handout.kind] ?? "Code"}
             testId="handout-reveal"
           >
             <ErrorBanner error={detailError} />

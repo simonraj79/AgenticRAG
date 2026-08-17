@@ -123,6 +123,22 @@ log = logging.getLogger("uvicorn.error")
 # the model reads last, and the earlier draft's final line ("say so plainly when
 # the context does not cover something") was reinforcing precisely the behaviour
 # that made the tool unreachable.
+#
+# **The deck paragraph was added 2026-08-17, BEFORE that final paragraph and
+# never inside it.** `agentic_check.py` S16 asserts the last paragraph is
+# load-bearing -- either it or `GENERATION_REASONING` alone holds tool use at
+# 6/6, removing both drops it to 2/6 -- so it reads like dead weight from a
+# superseded model and is not. It is untouched, unmoved, and still last.
+#
+# The addition itself is `12-robust-handouts/06-tool-path-parity.md`: a deck
+# asked for in the chat shared no prompt with one made from the panel button,
+# which gets ~50 lines of `DECK_PROMPT`. These are the four sentences of it that
+# are about the LIBRARY -- each one a crash rather than a downgrade if it is
+# ignored -- and the closing sentence subordinates them to grounding explicitly.
+# That sentence is not politeness: every persona prompt opens with "GROUNDING
+# COMES FIRST. It outranks every instruction below", and this file's own comment
+# above is the record of what happens when a second instruction is written with
+# enough force to compete with it.
 TOOL_GUIDANCE = """
 
 You have tools. Use them only when they earn their cost.
@@ -134,6 +150,16 @@ not the whole question again.
 - run_python: write and run Python when the user wants a chart, a slide deck, a \
 table or a file. Put the numbers in the code as literals -- you have no \
 filesystem and no network.
+
+When that file is a slide deck, python-pptx has to be driven a particular way or \
+it raises rather than degrading: set 16:9 through `prs.slide_width` and \
+`prs.slide_height`, use `prs.slide_layouts[0]` for the title slide and \
+`prs.slide_layouts[1]` for every content slide and no other index, give each \
+content slide a title and three to five bullets, and add no images, icons, \
+charts, custom fonts or template files. Those are rules about the library, not \
+about what a deck may say: what goes on the slides is still only what the \
+context supports, and three honest slides are a better answer than eight padded \
+ones.
 
 Rules that do not change: answer only from the context, cite with [n] markers, \
 and never claim to have made a file unless run_python returned one. A tool \

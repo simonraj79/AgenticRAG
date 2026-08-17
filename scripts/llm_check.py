@@ -304,6 +304,52 @@ for num, name, slug in (
         str(prov),
     )
 
+# ---------------------------------------------------------------------------
+# 30. The TOOL-BOUND request, which is the one every generation turn actually
+#     sends -- `agent_loop` binds tools on all three of its model invocations.
+#     Every case above inspects a bare `build_chat_model`; this one inspects what
+#     `bind_tools` produced on top of it, with the real registry rather than a
+#     stand-in.
+#
+#     It is here because `12-robust-handouts/06-tool-path-parity.md` (A6) put
+#     deck rules into `TOOL_DESCRIPTION` and `TOOL_GUIDANCE`. PROMPT TEXT IS FREE
+#     AT ROUTING and a parameter is not, and the margin is smaller than it looks.
+#     Measured 2026-08-17 against `deepseek/deepseek-v4-flash-0731`, 28 endpoints
+#     serving it:
+#
+#         tools + top_k          -- today's shape        19 / 28
+#         + response_format + structured_outputs         15 / 28
+#         + parallel_tool_calls                           1 / 28
+#
+#     So `disabled_params={"parallel_tool_calls": None}` (case 8) is far more
+#     load-bearing on DeepSeek than on the Gemma 404 it was written for: it is
+#     the difference between a pool and a single endpoint. The other two arrive
+#     through `with_structured_output`, which nothing on the generation path
+#     calls today -- this case is the tripwire for the day something does.
+#
+#     `loop.md` T5: check endpoints BEFORE adding to a tool-bound request, not
+#     after a 404. And note the same structural blind spot as 26-29 -- this reads
+#     what the repo put in the request, never what OpenRouter did with it.
+# ---------------------------------------------------------------------------
+print("\n-- the tool-bound request: prompt text is free, a parameter is not --")
+from app.tools.registry import ToolContext, build_tools  # noqa: E402
+
+# Neither field is touched by the factories; `build_tools` only closes over them.
+_tools = build_tools(ToolContext(agent=None, ledger=None))  # type: ignore[arg-type]
+_bound = get_chat_model(None).bind_tools(_tools)
+_kwargs = dict(getattr(_bound, "kwargs", None) or {})
+_extra = dict(getattr(getattr(_bound, "bound", None), "extra_body", None) or {})
+BANNED = ("parallel_tool_calls", "response_format", "structured_outputs")
+_present = [key for key in BANNED if key in _kwargs or key in _extra]
+check(
+    "30. binding the real tools adds `tools` and NOTHING that narrows routing",
+    not _present
+    and sorted(_kwargs) == ["tools"]
+    and sorted(t["function"]["name"] for t in _kwargs["tools"])
+    == ["run_python", "search_corpus"],
+    f"banned_present={_present} kwargs={sorted(_kwargs)} extra_body={sorted(_extra)}",
+)
+
 print("\n" + "=" * 74)
 if failures:
     print(f"{len(failures)} FAILED:")
