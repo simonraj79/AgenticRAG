@@ -42,6 +42,7 @@ slide deck to make room for a chart is worse than one that says no.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import uuid
@@ -49,6 +50,7 @@ from datetime import datetime
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Response, status
+from fastapi.responses import RedirectResponse
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -60,6 +62,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import undefer
 
+from app import storage
 from app.api.deps import CurrentUser, DbSession, OwnedAgent
 from app.config import settings
 from app.db.models import Agent, Conversation, Handout
@@ -609,10 +612,39 @@ async def download_handout(
     disagree today -- but this is the one place a `None` would reach
     `Response(content=...)`, which serialises it as the four bytes `None`,
     producing a downloaded `.png` that is not a PNG.
-    """
-    handout = await _load_owned(db, agent, handout_id, with_content=True)
 
-    if handout.status != "ready" or handout.content is None:
+    **On the R2 route this answers 302 and the bytes never enter this process.**
+    That is the point of the move rather than a side effect: Render's starter
+    plan runs a single uvicorn worker, and the previous shape read up to
+    `sandbox_max_artifact_bytes` into the heap of the only worker there is, on
+    every download. Authorisation still happens HERE -- `_load_owned` has already
+    proved the row belongs to this agent, and the presigned URL is minted only
+    after it has. The bucket is private; an unsigned GET returns 400.
+
+    Three things are deliberately preserved across the two roads, because each
+    has a consumer that would break silently:
+
+    - **The 409 on a row that is not ready.** `HandoutCard` gates the chart
+      thumbnail on `status === "ready"` precisely because this route answers 409
+      otherwise, and `types.ts` encodes it.
+    - **`Content-Disposition` with a sanitised filename.** On the R2 road it is
+      emitted by Cloudflare, from the `response-content-disposition` parameter
+      `app/storage.presigned_get_url` signs into the URL. `_safe` is applied here
+      as before AND again inside the seam, so the guard has to be missed twice.
+    - **The mime type**, which comes from the column either way and never from
+      whatever R2 has stored on the object.
+
+    What is NOT preserved is `Cache-Control: private, no-store`. A presigned URL
+    IS the capability, so the only control left is how long it lives
+    (`r2_presign_ttl_s`, five minutes). Recorded as an accepted loss rather than
+    solved -- see the change set's risk register.
+    """
+    # `with_content` is False on the R2 road: the bytes are not needed to build a
+    # redirect, and undeferring them would reintroduce exactly the cost this
+    # route exists to remove.
+    handout = await _load_owned(db, agent, handout_id, with_content=not storage.enabled())
+
+    if handout.status != "ready":
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=(
@@ -620,6 +652,39 @@ async def download_handout(
                 if handout.status != "failed"
                 else f"This handout failed: {handout.error or 'no reason recorded'}"
             ),
+        )
+
+    if storage.enabled() and handout.storage_key:
+        try:
+            url = storage.presigned_get_url(
+                handout.storage_key,
+                filename=_safe(handout.filename),
+                mime_type=handout.mime_type,
+            )
+        except storage.StorageError as exc:
+            # 503, not 500, and it names the store. This is the shape an expired
+            # API token takes -- every download failing at once while the
+            # application is provably unchanged and every offline harness stays
+            # green. A generic 500 would send the reader into the wrong module.
+            log.error("Could not sign a download URL for %s: %s", handout.id, exc)
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Object storage is unavailable, so this file cannot be served.",
+            ) from exc
+
+        # 302, not 307. A permanent or method-preserving redirect would be wrong
+        # for a URL that expires in five minutes, and 302 is what browsers,
+        # `<img>` and httpx all follow for a GET without argument.
+        return RedirectResponse(url, status_code=status.HTTP_302_FOUND)
+
+    # The Postgres road, unchanged -- and reachable two ways: `storage_route` is
+    # "postgres", or the route is R2 and this row predates the backfill. The
+    # second is why this is a fallthrough rather than an error: during the
+    # blue/green window both kinds of row exist and both must download.
+    if handout.content is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This handout has no stored file.",
         )
 
     return Response(
@@ -646,22 +711,45 @@ async def download_handout(
 async def remove_handout(
     agent: OwnedAgent, db: DbSession, handout_id: uuid.UUID
 ) -> dict:
-    """Delete one handout. Row only -- there is nothing else to clean up.
+    """Delete one handout, and its object if it has one.
+
+    **This docstring used to say "Row only -- there is nothing else to clean
+    up", and that sentence is why it is being rewritten rather than extended.**
+    It was true and load-bearing: a handout's bytes lived in its own row, so
+    deleting the row deleted them, atomically and for free. With bytes in R2 it
+    is false, and a comment asserting that no external store exists is worse
+    than no comment at all -- it actively tells the next reader not to look.
+
+    **Object first, row second**, which is the ordering `app/rag/delete.py`
+    already argues for Pinecone and adopts here for the same asymmetry: a row
+    with no object is visible in the panel and can be deleted again, while an
+    object with no row is unreachable forever, because the key is derived from
+    an id that no longer exists anywhere. Given a choice of which orphan to
+    risk, take the one a human can still see.
+
+    A failed object delete does NOT block the row delete. The user asked for the
+    handout to be gone; refusing because a bucket was briefly unreachable would
+    leave them staring at a file they have already deleted twice. The leak is
+    logged and reconcilable by prefix; the alternative is not recoverable by the
+    user at all.
 
     Worth contrasting with `documents.py`, which refuses to delete a document
     that is mid-ingest: there, the row is the only record of which vectors exist
     in Pinecone, so deleting under a running job strands them permanently. Here
-    there is no external store. A handout's bytes live in its own row and
-    nowhere else, so deleting one while its job is still running is clean: the
-    job's commit finds no row, its own handler catches it, and `_settle` finds
-    nothing to mark. Nothing is left behind anywhere.
-
-    So a `pending` handout is deletable, on purpose. That also makes it the
-    escape hatch for a row abandoned by a restart or a deploy mid-job -- the
-    recovery `app/rag/jobs.py` describes for a stuck document, available here
-    without the wait.
+    a `pending` handout stays deletable on purpose -- the job's commit finds no
+    row, its own handler catches it, and `_settle` finds nothing to mark. That
+    remains the escape hatch for a row abandoned by a restart mid-job.
     """
     handout = await _load_owned(db, agent, handout_id)
+
+    if handout.storage_key:
+        try:
+            await asyncio.to_thread(storage.delete_object, handout.storage_key)
+        except storage.StorageError as exc:
+            log.warning(
+                "Handout %s deleted but its object was not: %s", handout.id, exc
+            )
+
     await db.delete(handout)
     await db.commit()
     return {"ok": True}

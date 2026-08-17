@@ -589,8 +589,17 @@ already built and evaluated.
 | `pinecone_id` | The vector ID in Pinecone; links the two stores |
 
 Storing chunk text here as well as in Pinecone metadata is deliberate — Pinecone
-metadata has a per-record size limit, and having the text locally means you can re-chunk
-or re-embed without re-parsing the original files.
+metadata has a per-record size limit, and having the text locally means you can **re-embed**
+without re-parsing the original files.
+
+**Corrected 2026-08-17: this sentence used to say "re-chunk or re-embed", and the first half
+was never true.** Re-embedding from `chunks.text` is genuinely cheap and is what makes a
+model or dimension change bounded. Re-chunking is not possible from it, because chunk
+boundaries are lossy: re-splitting already-split text at a larger `chunk_size` cannot recover
+what a smaller split separated with overlap, and at a smaller size it produces different
+boundaries than splitting the original would. Re-chunking needs the **original file**, which
+§7 records as newly available in object storage — the capability now exists, and no route
+uses it yet (open item 38).
 
 **`ingestion_runs`** — one row per ingest job
 | Column | Notes |
@@ -886,6 +895,21 @@ entirely.
 ## 7. Hard constraints
 
 These are the decisions that are expensive, impossible to reverse, or fail silently.
+
+~~**Original uploads are never stored.** An HTTP upload is bytes in memory; text is
+extracted and `chunks.text` becomes the source of truth. Render's filesystem is ephemeral,
+so there is nowhere to put a file.~~ **Superseded 2026-08-17 by the object-storage change
+set** (`new features/13-object-storage/`). Originals are now written to a private Cloudflare
+R2 bucket before the `documents` row is staged, and `documents.storage_key` names them.
+
+**This bullet is added and struck in the same edit, which needs explaining rather than
+hiding.** Four code sites — `rag/ingest.py`, `rag/jobs.py`, `api/documents.py` and
+`requirements.in` — cited "PRD section 7" as the authority for that rule, and **section 7
+never contained it**. The constraint was real and correctly implemented; only its stated
+home was wrong. Deleting the citations would have left no record that the rule ever existed;
+writing the bullet and striking it puts the four references somewhere that resolves, with
+the date they stopped being true. The nearest thing that did exist was a sentence in §4.3,
+and that one additionally over-claimed what the stored chunk text buys — corrected there.
 
 **The embedding model is part of the index, not part of the query code.** Indexing with
 one model and querying with another produces confident garbage rather than an error,
@@ -1187,7 +1211,7 @@ Infrastructure is complete. Stages 1 and 3 are built; Stage 2 is half-built.
 | ~~7~~ | ~~**Stage 2 loop** + trace writing~~ | ✅ **done, and deliberately not as specified.** The score-triggered rewrite loop was **superseded** by the agent loop (§3.5a). A threshold could not have worked: on-topic questions measured 0.61–0.67 and off-topic 0.49–0.58, so 0.5 sits *inside* the overlap and fires late on bad retrievals and early on good ones. The loop now triggers on the model's own admission that something is missing, read off the answer text with the same marker list `queries.refused` uses |
 | 8 | 10-question golden set + Ragas wiring | ✅ done, with authoring and editing (§3.6.1) |
 | 9 | React views | ✅ done — Login · Dashboard · Chat · Documents · Evaluate; source-first empty workspace and modal creation flow audited 2026-08-16 |
-| 10 | Object storage for slide images (R2/S3) | Open — only gates citation images |
+| ~~10~~ | ~~Object storage (R2/S3)~~ | ✅ **done 2026-08-17, and the scope line was wrong.** It read "only gates citation images"; object storage also gated handout bytes (item 25) and — unrecorded anywhere — the ability to re-chunk a document at all, because the file a new split would need was discarded. A private R2 bucket (`groundwork-media`, APAC) now holds handout files and original uploads, reached by presigned URL. **`chunks.asset_uri` is still unwritten**: the slide-image half remains gated on item 12, which a private bucket does not resolve |
 | 11 | Does `gemma-4-31b-it` support structured output? | ✅ **yes**, via `function_calling`; `DECISION_MODEL` collapsed onto it |
 | 12 | Workshop PDFs in a public repo | Open — see below |
 | **13** | **SSE streaming** (§2.2) | Open — **much less urgent since the move to OpenRouter**: a persona turn measured 6.3 s and a full ten-question run 90 s, against 30–60 s per turn before. Still the right shape, no longer the top UX problem |
@@ -1202,7 +1226,7 @@ Infrastructure is complete. Stages 1 and 3 are built; Stage 2 is half-built.
 | **22** | **`tool_choice="any"` is silently ignored on OpenRouter** | Open — only a *named* tool forces a call. Same family as the `max_completion_tokens` 404: a parameter accepted and not honoured. Worse than an error, because a dropped "required" is indistinguishable from a model that declined |
 | **23** | **Tool use is unmeasured** | Open. Ragas scores whether an answer is faithful to its context; it has no opinion on whether the right tool was called, and inventing a faithfulness-shaped score for tool choice would be a new instrument of unknown validity — the exact failure items 15 and 16 record. Trajectory evaluation is Stage 4 |
 | **24** | **The sandbox is not a container** | Open, and deliberately so. Hardened subprocess: empty environment, import allowlist plus attribute denylist, no sockets, POSIX rlimits, hard timeout. It defends against a confused or prompt-injected model, not an adversary with arbitrary input. `pathlib` can still read outside the scratch directory. Full contract in `new features/02-code-interpreter.md` §5 |
-| **25** | **Handout bytes live in Postgres** | Open — capped at 5 MB per file and 200 per agent. Correct answer is object storage, which is item 10; doing both at once is why they are one item apart |
+| ~~25~~ | ~~**Handout bytes live in Postgres**~~ | ✅ **done 2026-08-17.** Bytes are in R2 and the download route answers 302 to a presigned URL, so they no longer pass through the single uvicorn worker. **`handouts.content` was deliberately NOT dropped** — it is what keeps `STORAGE_ROUTE=postgres` a working rollback, the same blue/green discipline `migrate_index.py` applies to a Pinecone index. Dropping it is a separate change set (open item 39) |
 
 Items 13–20 were all discovered by building and measuring, not by planning. Items 15, 16 and
 20 are the direct output of Stage 3 and are the strongest argument for having built it — and
@@ -1359,6 +1383,51 @@ the geometry. Knowing where text actually overflows a placeholder means renderin
 needs LibreOffice or a font stack the sandbox deliberately lacks — and `fit_text`, the obvious
 shortcut, raises `OSError` on Linux. So the threshold must be re-read whenever the retrieval
 budget moves, because that is what moves bullet length.
+
+### Opened 2026-08-17 by the object-storage change set
+
+Full record in
+[new features/13-object-storage/PLAN.md](new%20features/13-object-storage/PLAN.md).
+
+**38. Re-chunking is now possible and is not built.** `documents.storage_key` holds the
+original, so the bytes a new split would need exist for the first time. Nothing reads that key
+back: `chunk_size` is still read once at ingest (`rag/ingest.py`), there is still no re-ingest
+route, and `AgentSettingsSheet`'s "Takes effect on the next upload" is still true. Two things
+want deciding before a button exists. It inherits **open item 18 in full** — replacing a
+document's chunks destroys the `query_chunks` rows of every earlier answer, so re-chunking
+would silently invalidate eval history exactly as deletion does. And **`ingestion_runs` records
+no `splitter`** (item 40), so two runs differing only in splitter are indistinguishable on the
+columns that matter.
+
+**39. `handouts.content` is still written on the R2 road.** Every handout's bytes go to both
+stores, which is what makes the rollback real and is pure waste once R2 is trusted. Dropping
+the column is a separate change set, and it must not be done casually: `agentic_check.py` S11
+asserts the string `handouts.content` appears in no SQL from the list route, and that assertion
+becomes **unfalsifiable** the moment the column is gone — passing forever while measuring
+nothing. `S11b` was added alongside it to assert the positive property (the list route makes
+zero object-storage calls), and `storage_check.py` case 76 goes red if the column disappears
+while S11 still greps for it. Drop the column, then delete S11 and case 76 together.
+
+**40. `ingestion_runs` records `chunk_size` and `chunk_overlap` but not `splitter`.** So a
+chunk-size experiment is already not fully reproducible from the row that exists to record it —
+a pre-existing gap, surfaced by the re-chunk audit rather than caused by it. One nullable
+column.
+
+**41. The R2 API token expires 2027-08-17.** Every download will 403 simultaneously while the
+application is provably unchanged and every offline harness stays green — a failure that cannot
+report itself, the same shape as `EMBEDDING_ROUTE`. Mitigated only by legibility: the download
+route answers **503 naming object storage** rather than 500, and `create_r2_bucket.py` prints
+the expiry on every run. There is no renewal reminder.
+
+**42. `Cache-Control: private, no-store` cannot be reproduced on the R2 road.** The old route
+sent it with every download; a presigned URL **is** the capability, so the only remaining
+control is its five-minute lifetime (`r2_presign_ttl_s`). The URL lands in browser history.
+Recorded as an accepted loss rather than solved.
+
+**43. The R2 token is account-wide, and the account is shared.** It can reach
+`mindfulspeak-uploads`, which belongs to an unrelated project. Nothing in this codebase names
+another bucket — `settings.r2_bucket` is the only one any call site uses — so this is blast
+radius rather than a live path. A bucket-scoped token is the fix.
 
 ---
 

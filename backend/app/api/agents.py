@@ -33,6 +33,7 @@ are unreachable and permanent.
 
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import datetime
 from typing import Annotated, Any, Literal, NoReturn
@@ -46,9 +47,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import CurrentUser, DbSession, OwnedAgent
 from app.db.models import Agent, AgentTemplate, AuditLog, Document, User
 from app.db.seed import TEMPLATE_SLUGS
-from app.rag.delete import delete_agent_namespace
+from app.rag.delete import delete_agent_namespace, delete_agent_objects
 
 router = APIRouter(prefix="/api", tags=["agents"])
+
+log = logging.getLogger("uvicorn.error")
 
 
 # The parameters a template supplies to a new agent. Spelled out as one tuple
@@ -1169,6 +1172,23 @@ async def delete_agent(
     }
 
     await delete_agent_namespace(agent)
+
+    # The second external store, and it must be cleared here for the same reason
+    # the namespace is: the Core DELETE below cascades inside Postgres, so no
+    # Python ever sees the `handouts` or `documents` rows go and there is no
+    # per-row hook to attach cleanup to. A prefix delete needs no rows.
+    #
+    # Failure does NOT abort the delete. The user asked for the agent to be gone
+    # and the vectors are already dropped, so refusing here would leave a
+    # half-deleted agent that cannot be deleted again by any route -- strictly
+    # worse than a leaked prefix, which is re-runnable by hand and costs storage
+    # rather than correctness.
+    try:
+        objects_deleted = await delete_agent_objects(agent)
+        audit_payload["objects_deleted"] = objects_deleted
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Agent %s deleted but its stored files were not: %s", agent_id, exc)
+        audit_payload["objects_deleted"] = None
 
     _audit(db, user, "agent.delete", agent_id, audit_payload)
 

@@ -147,9 +147,9 @@ export default function AgentDocuments({
         />
 
         <p className="mt-2 text-xs text-slate-400">
-          Markdown, plain text or PDF, up to {MAX_UPLOAD_BYTES / (1024 * 1024)} MB. Original
-          files are not stored — text is chunked into Postgres and embedded into this
-          agent&rsquo;s namespace.
+          Markdown, plain text or PDF, up to {MAX_UPLOAD_BYTES / (1024 * 1024)} MB. Text is
+          chunked into Postgres and embedded into this agent&rsquo;s namespace; the original
+          file is kept in private object storage.
         </p>
 
         <div className="mt-4 flex items-center gap-3">

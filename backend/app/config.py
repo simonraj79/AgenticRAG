@@ -22,6 +22,20 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 # in a model body, and annotating it would make it a settable field.
 EMBEDDING_ROUTES = ("openrouter", "google")
 
+# The only two roads `app/storage.py` implements, and the same shape as
+# EMBEDDING_ROUTES above for the same reason -- a route that falls through to a
+# rollback on a typo is the failure this subsystem cannot report.
+STORAGE_ROUTES = ("r2", "postgres")
+
+# The four values `storage_route == "r2"` cannot work without. Named here so the
+# validator and `scripts/create_r2_bucket.py` check one list rather than two.
+R2_REQUIRED_FIELDS = (
+    "r2_account_id",
+    "r2_access_key_id",
+    "r2_secret_access_key",
+    "r2_bucket",
+)
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -583,13 +597,123 @@ class Settings(BaseSettings):
     # pretending otherwise. 768 MB is matplotlib plus a figure with headroom.
     sandbox_memory_mb: int = 768
 
+    # --- Object storage (Cloudflare R2) ---
+    #
+    # Which store holds BYTES. Structured data is always Postgres; this setting
+    # only ever decides where a handout file or an original upload lives.
+    #
+    # "postgres" is the rollback and it still works, because this change set
+    # deliberately did NOT drop `handouts.content` -- the blue/green rule the
+    # repo already applies to a Pinecone index migration, where the old index
+    # stays queryable until a human has confirmed the new one. A route that
+    # cannot be reversed is a deletion with extra steps.
+    #
+    # R2 rather than S3 for one measured reason: egress is $0. Every handout
+    # download is egress, and for a workshop where attendees download decks that
+    # dominates the storage cost either way. Reached over the S3 PROTOCOL -- see
+    # `app/storage.py`; nothing here calls AWS and no AWS_* variable is read.
+    storage_route: str = "r2"
+
+    r2_account_id: str = ""
+    r2_access_key_id: str = ""
+    r2_secret_access_key: str = ""
+
+    # Namespaced because the account is SHARED -- it already holds
+    # `mindfulspeak-uploads` from an unrelated project, and the API token is
+    # account-wide. A generic name like "media" would be a collision waiting for
+    # the second project that wants one.
+    r2_bucket: str = "groundwork-media"
+
+    # Blank means "derive it from the account id", which is the documented form
+    # `https://<account>.r2.cloudflarestorage.com`. Explicit wins, so a
+    # jurisdiction-specific endpoint (eu, fedramp) needs no code change.
+    r2_endpoint: str = ""
+
+    # Presigned URL lifetime. Five minutes, and both bounds are real: long
+    # enough that a slow mobile connection still STARTS the download, short
+    # enough that the URL sitting in browser history is dead before anyone reads
+    # it back. This is the only control that survives the move -- the route used
+    # to send `Cache-Control: private, no-store` and a presigned URL cannot
+    # reproduce it, because the capability IS the URL. Measured 2026-08-17: an
+    # expired URL returns 403, so expiry is enforced by R2 rather than advisory.
+    r2_presign_ttl_s: int = 300
+
+    @field_validator("storage_route")
+    @classmethod
+    def _validate_storage_route(cls, value: str) -> str:
+        """Reject a route this code does not implement, at load.
+
+        Same shape as `_validate_embedding_route` above, and adopted for the
+        same reason rather than by analogy: `app/storage.py` branches on
+        `== "r2"`, so every misspelling selects the Postgres rollback silently,
+        and the tell would be bytes quietly continuing to accumulate in a column
+        this change set exists to stop using. Nothing would error.
+        """
+        if value not in STORAGE_ROUTES:
+            raise ValueError(
+                "storage_route must be exactly "
+                f"{' or '.join(repr(route) for route in STORAGE_ROUTES)}, "
+                f"got {value!r}. Anything else silently selects the Postgres "
+                "rollback in app/storage.py."
+            )
+        return value
+
+    @field_validator("r2_bucket")
+    @classmethod
+    def _require_r2_config(cls, value: str, info) -> str:
+        """Fail at LOAD when the route is R2 and a credential is missing.
+
+        **This is the one required-secret gate in the file, and it is here
+        because there was no pattern for one.** Every other secret is declared
+        `str = ""` with no runtime check, which is right for them: an absent
+        `OPENROUTER_API_KEY` fails the very next model call, loudly, naming
+        itself. Storage does not behave that way. A blank credential under
+        `storage_route="r2"` would let the app boot, let a handout job run, let
+        the bytes be generated -- and fail at the PUT, inside a background job,
+        surfacing as a handout stuck at `failed` with a message about
+        credentials that nobody reading the panel can act on.
+
+        `r2_bucket` carries the validator rather than one of the secrets because
+        it is declared last of the four and pydantic validates in declaration
+        order, so `info.data` holds the other three by the time this runs. That
+        is an ordering dependency, and it is why the fields are not sorted
+        alphabetically. Moving `r2_bucket` above them silently disarms this.
+        """
+        route = info.data.get("storage_route")
+        if route != "r2":
+            return value
+
+        merged = dict(info.data)
+        merged["r2_bucket"] = value
+        missing = [name for name in R2_REQUIRED_FIELDS if not merged.get(name)]
+        if missing:
+            raise ValueError(
+                f"storage_route='r2' needs {', '.join(m.upper() for m in missing)} "
+                "set. Set them, or set STORAGE_ROUTE=postgres to keep bytes in "
+                "the database."
+            )
+        return value
+
+    @property
+    def r2_endpoint_url(self) -> str:
+        """The S3 endpoint, explicit or derived. Empty when unconfigured."""
+        if self.r2_endpoint:
+            return self.r2_endpoint.rstrip("/")
+        if not self.r2_account_id:
+            return ""
+        return f"https://{self.r2_account_id}.r2.cloudflarestorage.com"
+
     # --- Handouts ---
     #
-    # Bytes live in Postgres (no object storage is provisioned -- PRD open item
-    # 10), so this quota is a storage bound, not a policy. Reaching it REFUSES
-    # the new handout; nothing is ever evicted. A panel that silently deletes the
-    # deck you downloaded last week to make room for a chart is worse than one
-    # that says no.
+    # A quota, and as of the object-storage change set it is a POLICY rather
+    # than a storage bound -- which is a change of meaning, not of value. It
+    # used to read "bytes live in Postgres, so this is a storage bound"; with
+    # bytes in R2 that reason is dead, and a comment giving a dead reason is
+    # worse than none. The number stays at 200 because the argument that
+    # survives is the one about eviction: reaching the cap REFUSES the new
+    # handout and nothing is ever deleted, because a panel that silently drops
+    # the deck you downloaded last week to make room for a chart is worse than
+    # one that says no.
     handout_max_per_agent: int = 200
 
     # The output cap for a code-writing generation call, deliberately above

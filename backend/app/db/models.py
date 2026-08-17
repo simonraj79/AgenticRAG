@@ -313,6 +313,24 @@ class Document(Base):
     byte_size: Mapped[int | None] = mapped_column(BigInteger)
     content_hash: Mapped[str | None] = mapped_column(String(64))
     status: Mapped[str] = mapped_column(String(32), default="pending", nullable=False)
+    # Where the ORIGINAL upload lives in Cloudflare R2. Before the object-storage
+    # change set there was no such thing: `rag/ingest._load_text` took bytes,
+    # returned a `str`, and the original was unreachable the moment
+    # `run_ingest_job` returned -- which is why a row stranded at `processing`
+    # has always been unresumable rather than merely unretried.
+    #
+    # NULL means the original was not kept: every document ingested before this
+    # column existed, and any upload made while `storage_route` is "postgres".
+    #
+    # Keeping the original does NOT make chunking retroactive. `chunk_size` is
+    # still read once, at ingest (`rag/ingest.py`), and there is still no
+    # re-ingest route -- so `AgentSettingsSheet`'s "Takes effect on the next
+    # upload" remains true. What this column changes is that a re-chunk feature
+    # is now POSSIBLE, because the bytes a new split would need are no longer
+    # gone. `chunks.text` cannot serve that purpose: chunk boundaries are lossy,
+    # so re-splitting already-split text is not the same operation as splitting
+    # the original.
+    storage_key: Mapped[str | None] = mapped_column(Text)
 
     agent: Mapped[Agent] = relationship(back_populates="documents")
     chunks: Mapped[list["Chunk"]] = relationship(back_populates="document")
@@ -806,6 +824,26 @@ class Handout(Base):
     # `HandoutOut` has no `content` field either, so there are two independent
     # guards, because this is a mistake that only shows up under real data.
     content: Mapped[bytes | None] = deferred(mapped_column(LargeBinary))
+    # Where the bytes live in Cloudflare R2, when they live there. Derived from
+    # `agent_id` and this row's own `id` by `app/storage.handout_key` -- never
+    # supplied by a caller, which is the same structural control that makes
+    # `Agent.namespace` a derived property rather than a parameter.
+    #
+    # NULL means "not in object storage", which covers a `pending` row, a
+    # `failed` row that never produced bytes, and any row predating the R2
+    # change set. `content` and this column are BOTH nullable and neither
+    # excludes the other: during the blue/green window a backfilled row has both,
+    # which is what makes `storage_route=postgres` a working rollback rather
+    # than a comment.
+    #
+    # NOT deferred, and the contrast with `content` above is the point. That
+    # column is deferred because a `SELECT *` over 200 rows would drag tens of
+    # megabytes of bytea; a key is a short string, and the list route needs to
+    # know whether a row HAS one. But note what that costs: every `select(Handout)`
+    # loads this by default, so it must never carry a presigned URL. A URL is a
+    # bearer capability with a TTL, and one in a 200-row list body is 200 leaked
+    # capabilities. `HandoutOut` has no field for either.
+    storage_key: Mapped[str | None] = mapped_column(Text)
     # The markdown body for a study sheet, a caption for everything else. Held
     # beside `content` rather than decoded from it so the panel can render a
     # preview inline without a second request and without guessing an encoding.

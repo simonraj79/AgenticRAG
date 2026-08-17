@@ -45,6 +45,7 @@ than what was attempted).
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import uuid
@@ -57,11 +58,17 @@ from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app import storage
 from app.api.deps import CurrentUser, DbSession, OwnedAgent
 from app.config import settings
 from app.db.models import AuditLog, Chunk, Document, User
-from app.rag.delete import delete_document
-from app.rag.ingest import INGEST_FAILURE_ACTION, SUPPORTED_SUFFIXES, ingest_bytes
+from app.rag.delete import delete_document, delete_document_object
+from app.rag.ingest import (
+    INGEST_FAILURE_ACTION,
+    MIME_TYPES,
+    SUPPORTED_SUFFIXES,
+    ingest_bytes,
+)
 from app.rag.jobs import run_ingest_job
 
 log = logging.getLogger("uvicorn.error")
@@ -402,13 +409,47 @@ async def upload_document(
     # `mime_type` is left to ingest, which derives it from the extension rather
     # than from the browser's Content-Type header; duplicating that rule here
     # would be a second place for it to drift.
+    # **The original is kept now, and it never used to be.** Until this change
+    # set `_load_text` pulled text out of these bytes in memory and the file was
+    # unreachable the moment the job returned -- which is why a row stranded at
+    # `processing` has always been unresumable rather than merely unretried, and
+    # why the recovery advice everywhere in this codebase is "delete it and
+    # upload again". Render's ephemeral disk was the reason; object storage
+    # removes it.
+    #
+    # Written BEFORE the row, on the ordering argument in `app/rag/delete.py`:
+    # an object with no row is unreachable forever because the key is derived
+    # from an id that would no longer exist, while a row with no object is
+    # visible in the source list and deletable. The id is generated here rather
+    # than by the column default so the key can exist first.
+    #
+    # A storage failure does NOT fail the upload. Text extraction does not need
+    # the stored copy -- `data` is already in hand and the ingest job is handed
+    # the same bytes -- so refusing the upload would trade a working corpus entry
+    # for a durability nicety. The row simply carries no key, which is what every
+    # document ingested before today also looks like.
+    document_id = uuid.uuid4()
+    storage_key: str | None = None
+    if storage.enabled():
+        candidate = storage.document_key(agent.id, document_id, MIME_TYPES.get(suffix))
+        try:
+            await asyncio.to_thread(
+                storage.put_object, candidate, data, MIME_TYPES.get(suffix)
+            )
+            storage_key = candidate
+        except storage.StorageError:
+            log.exception(
+                "Could not store the original of %r; ingesting without it", filename
+            )
+
     document = Document(
-        id=uuid.uuid4(),
+        id=document_id,
         agent_id=agent.id,
         uploaded_by_user_id=user.id,
         filename=filename,
         byte_size=len(data),
         content_hash=content_hash,
+        storage_key=storage_key,
         # `pending`, and NOT `processing`: nothing is running yet. `jobs.py`
         # writes `processing` when the work actually begins, and the two states
         # are kept apart because "queued" and "running" are different answers to
@@ -692,6 +733,22 @@ async def remove_document(
     # the row directly would look complete and leave the vectors in Pinecone
     # still matching every query in this namespace, with the only list of what
     # to clean up destroyed along with the `chunks` rows.
+    # The stored original, before the rows -- the same ordering `delete_document`
+    # applies to vectors, and for the same asymmetry. A row still naming a key
+    # whose object is gone is harmless and re-deletable; an object whose row is
+    # gone can never be named again.
+    #
+    # Note this runs even when the document produced no chunks. `delete_document`
+    # guards its Pinecone call on `if pinecone_ids:` because a failed ingest has
+    # no vectors -- but it does have an original, uploaded before anything was
+    # parsed, so that guard must not be extended to cover this.
+    try:
+        await delete_document_object(document)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "Document %s deleted but its stored original was not: %s", document.id, exc
+        )
+
     vectors_deleted = await delete_document(db, agent, document)
 
     _audit(

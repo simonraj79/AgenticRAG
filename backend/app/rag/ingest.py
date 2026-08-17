@@ -115,10 +115,20 @@ def _suffix_of(filename: str) -> str:
 def _load_text(filename: str, data: bytes) -> str:
     """Extract plain text from an upload's raw bytes.
 
-    Bytes, not a path. Original uploads are never stored (PRD section 7) and
-    Render's disk is ephemeral, so there is no file to read -- and pypdf accepts
-    any file-like object, which removes the only reason a temporary file was ever
-    needed to reach it. The filename is here purely to select the parser.
+    Bytes, not a path, and the conclusion outlives the reason it was written for.
+    The original justification was that uploads were never stored anywhere and
+    Render's disk is ephemeral, so there was no file to read. Uploads ARE stored
+    now -- `api/documents.py` puts the original in object storage before staging
+    the row -- and this function still takes bytes, because pypdf accepts any
+    file-like object and fetching a copy back out of a bucket to parse bytes the
+    caller is already holding would be a network round trip for nothing.
+
+    The filename is here purely to select the parser.
+
+    (The old text cited "PRD section 7" for the no-storage rule. That section
+    never contained it -- the nearest statement was in section 4.3, and it
+    additionally claimed the stored chunk text made re-CHUNKING possible, which
+    it does not: chunk boundaries are lossy. Both are corrected in PRD.md.)
     """
     if _suffix_of(filename) == ".pdf":
         from pypdf import PdfReader

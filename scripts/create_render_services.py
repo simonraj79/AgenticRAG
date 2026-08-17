@@ -51,6 +51,16 @@ FRONTEND_NAME = "agentic-rag-web"
 # `.env.example`, and here -- and only the first two are exercised by running the
 # app locally.
 BACKEND_SECRET_KEYS = [
+    # R2 first, because it is the only group whose absence stops the service
+    # BOOTING rather than failing a later call: `storage_route` defaults to "r2"
+    # and its validator refuses to construct Settings without these three. They
+    # must be set BEFORE the deploy that first ships app/storage.py, not after.
+    #
+    # R2_API_TOKEN is deliberately absent. It creates and deletes buckets, the
+    # service never needs it, and the rule is RENDER_API_KEY's.
+    "R2_ACCOUNT_ID",
+    "R2_ACCESS_KEY_ID",
+    "R2_SECRET_ACCESS_KEY",
     "OPENROUTER_API_KEY",
     "GEMINI_API_KEY",
     "PINECONE_API_KEY",
@@ -82,6 +92,12 @@ BACKEND_SECRET_KEYS = [
 # environment-variable edit away from the bypass being reachable rather than two.
 BACKEND_LITERAL_ENV = {
     "ENVIRONMENT": "production",
+    # Not a secret -- a bucket name is not a credential -- so it is sent as a
+    # literal rather than copied from `.env`, the same treatment ENVIRONMENT
+    # gets. It is here rather than omitted because `config.py`'s default and
+    # this line disagreeing would be a silent split-brain: the service would
+    # read and write a different bucket from every local script.
+    "R2_BUCKET": "groundwork-media",
 }
 
 

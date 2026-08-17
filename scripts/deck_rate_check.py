@@ -293,9 +293,17 @@ async def main_async(n: int, arms: str = "both") -> int:
 
     runs = [Run(index=i + 1, arm=arm, position=i + 1) for i, arm in enumerate(sequence)]
     try:
+        # See the equivalent block in `agentic_check.py`: the download route
+        # redirects to object storage, and an ASGI transport passed as
+        # `transport=` would serve the redirected https url too. `analyse()`
+        # below reads `.content` off that route, so both lines are load-bearing.
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(
-            transport=transport, base_url="http://test", timeout=60.0
+            transport=transport,
+            mounts={"https://": httpx.AsyncHTTPTransport()},
+            follow_redirects=True,
+            base_url="http://test",
+            timeout=60.0,
         ) as client:
             async with SessionLocal() as db:
                 for run in runs:
