@@ -592,6 +592,116 @@ class Settings(BaseSettings):
     # that says no.
     handout_max_per_agent: int = 200
 
+    # The output cap for a code-writing generation call, deliberately above
+    # `generation_max_tokens` (2,048). That default sizes an ANSWER -- a few
+    # paragraphs with citations. A python-pptx script for an eight-slide deck is
+    # a long, repetitive program.
+    #
+    # A SETTING RATHER THAN THE MODULE CONSTANT IT WAS (`handouts/jobs.py`'s
+    # `CODE_MAX_TOKENS`), because the truncation retry has to be able to raise
+    # it: a program cut off at 4,096 tokens fails as a syntax error, is retried
+    # at the SAME 4,096, produces the same length and fails identically. That is
+    # `PLAN.md` R7, and it FIRED LIVE, twice, while the layer-2 scenarios were
+    # being written -- with the slide floor forced to 40 the model inflated the
+    # deck until it ran out of room and came back "Python syntax error on line
+    # 322: unterminated string literal". A retry at the same budget is a retry
+    # that cannot succeed.
+    #
+    # WHY 4,096 IS THE FIRST ATTEMPT'S VALUE. Measured on real decks: a correct
+    # six-slide program is ~2,000-3,000 characters, i.e. roughly 600-900 tokens
+    # of Python. 4,096 is already four to six times the honest program, so a run
+    # that exhausts it is INFLATING rather than merely long -- which is what the
+    # retry multiplier in `handouts/jobs.py` is sized against, and why it is a
+    # multiplier of 2 rather than 4. The reasoning for that number lives beside
+    # it, with the note that the provider ceiling is NOT the binding constraint
+    # (checked 2026-08-17: `max_completion_tokens` is 393,216 on
+    # `deepseek/deepseek-v4-flash-0731` and 262,144 on `google/gemma-4-31b-it`).
+    handout_code_max_tokens: int = 4_096
+
+    # Open the produced file before calling the handout `ready`.
+    #
+    # Measured 2026-08-17 against this venv's python-pptx 1.0.2: a
+    # `Presentation()` with ZERO slides saves as 27,387 bytes starting `PK`, and
+    # `b"PK\x03\x04 this is not a real pptx"` is 28 bytes that also start `PK`.
+    # Both cleared every assertion in the repository -- `agentic_check.py`'s
+    # `status == "ready" and byte_size > 0`, and `sandbox_check.py` case 3's
+    # `PK` + `>= 10_000` bytes -- and both became downloadable handouts. Nothing
+    # between the model's `prs.save()` and the user's Downloads folder had ever
+    # opened the bytes.
+    #
+    # This flag is NOT a product option. It exists so that the regression
+    # assertion can be executed: with it off, `_problem` must return values
+    # identical to today's for the same `(SandboxResult, SandboxArtifact)` pair,
+    # which is `scripts/deck_check.py` case 25 and PLAN.md 3.6 R-a. Handout
+    # bytes cannot be compared between runs -- generation is at temperature 1.0
+    # and a .pptx is a zip carrying timestamps -- so the pure function is the
+    # only place "byte-identical with the feature off" can actually be asserted.
+    handout_validate_artifacts: bool = True
+
+    # The slide floor below which a deck is sent back to the model.
+    #
+    # THREE, NOT FIVE, and the difference is the whole risk of this feature.
+    # `DECK_PROMPT` asks for five to eight slides but carries an honest-shrink
+    # rule telling the model to use only what the material supports, so a thin
+    # corpus SHOULD produce a short deck. A floor of 5 would fail exactly that
+    # correct behaviour -- the `refusal_pass = 0/2` defect, where a measurement
+    # punished the thing the prompt exists to produce and the scorecard then
+    # advised deleting it. A floor of 3 still fails the empty and single-slide
+    # decks that motivated the feature.
+    #
+    # The asymmetry that sets it (`loop.md` T3): this number feeds a RETRY, not
+    # a refusal. A false positive costs one extra generation call and one extra
+    # subprocess; a false negative ships a deck that does not open. Strictness
+    # follows that, so it leans permissive.
+    #
+    # MEASURED 2026-08-17, `scripts/deck_rate_check.py`, n=16 decks over two
+    # retrieval budgets. Slide counts were [5,5,6,6,6,6,7,7,8,9] at the hostile
+    # fixture budget (rerank_top_n=2) and [6,6,7,7,7,7] at the shipped one
+    # (rerank_top_n=10). **The minimum honest deck is 5**, so a floor of 3 sits
+    # two slides below the worst real case at the most starved configuration in
+    # the repo, and cannot fire on an honest shrink.
+    #
+    # Deliberately NOT raised to 4 or 5 despite the headroom. This is a floor on
+    # "somebody made a deck", not a score of "the deck is good", and the audit
+    # that produced it found the opposite mistake far more expensive: a metric
+    # tuned to punish the behaviour a prompt exists to produce, which then
+    # recommends deleting the pedagogy (`refusal_pass = 0/2`, PRD open item 16).
+    handout_deck_min_slides: int = 3
+
+    # The longest a single paragraph on a slide may be before the deck is sent
+    # back. A character count, and deliberately a crude one.
+    #
+    # python-pptx's only text-fitting API is `fit_text`, and `pptx/text/fonts.py`
+    # returns font directories for darwin and win32 and otherwise raises
+    # `OSError("unsupported operating system")`. It works on this Windows box and
+    # would kill every deck on Render, with a message that says nothing about
+    # fonts -- green locally, dead in production. Character count is not a good
+    # proxy; it is the only honest one available. `deck_check.py` case 14 asserts
+    # the symbol appears nowhere under `app/handouts`.
+    #
+    # MEASURED 2026-08-17, `scripts/deck_rate_check.py`, and the measurement
+    # moved this number -- it was 240 by instinct and 240 was nearly wrong.
+    #
+    #   rerank_top_n=2  (n=296 bullets)   p50  69   p99 109   max 114
+    #   rerank_top_n=10 (n=181 bullets)   p50  72   p95 127   max 235
+    #
+    # Widening the deck's retrieval budget (feature 03) made bullets LONGER, and
+    # one real bullet landed within 2% of the old threshold. At any scale that
+    # fires on a legitimate deck -- twice, and then fails the handout outright.
+    # An interaction between two features of this change set that neither
+    # feature's own plan anticipated, and it was only visible because the two
+    # budgets were measured separately.
+    #
+    # 400 clears the observed maximum by 1.7x while still catching the shape this
+    # exists for: a wall of prose pasted onto one slide. THE TRUE OVERFLOW POINT
+    # IS UNMEASURED and cannot be measured here -- knowing it means rendering the
+    # deck, which needs LibreOffice or a font stack the sandbox deliberately does
+    # not have (`fit_text` is the trap above; PLAN.md section 7 keeps rendering
+    # out of scope). So this is a bound on the model's observed behaviour, not on
+    # the geometry, and it should be re-read whenever the retrieval budget moves
+    # again -- as it just did.
+    handout_deck_max_bullet_chars: int = 400
+
     @property
     def async_database_url(self) -> str:
         """SQLAlchemy async URL.

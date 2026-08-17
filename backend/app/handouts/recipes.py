@@ -66,7 +66,50 @@ from app.rag.retriever import META_CHUNK_ID, aretrieve
 # module" cannot quietly become a request that costs more than it can spend, and
 # they are characters rather than tokens because the material is already bounded
 # by `agent.retrieve_k` upstream; this is a backstop, not a budget.
-MAX_CONTEXT_CHARS = 12_000
+#
+# ------------------------------------------------------------------
+# 12,000 -> 36,000 ON 2026-08-17, AND THE OLD VALUE WAS ABOUT TO TURN THIS FIX
+# INTO A FIX THAT SHIPPED AS NOTHING.
+#
+# The sentence above -- "a backstop, not a budget" -- is the whole test, and
+# 12,000 stopped passing it the moment the deck's `rerank_top_n` went to 10.
+# Measured 2026-08-17, this repo's own markdown through
+# `app.rag.ingest._prepare_chunks` at the production default `chunk_size=800`:
+#
+#     PRD.md   37 chunks   p50 2,380   p90 3,201   max 3,316 characters
+#     EVAL.md  17 chunks   p50 2,428   p90 3,099   max 3,113 characters
+#
+# `chunk_size` is TOKENS, not characters -- the splitter is
+# `RecursiveCharacterTextSplitter.from_tiktoken_encoder` -- and reading it as
+# characters is how 12,000 ever looked roomy. A retrieved chunk is ~2,400
+# characters. Ten of them are 22,000-33,000, so the old cap deleted the back
+# SIX with no error, no warning and no log line: the k=40 Pinecone query would
+# have been paid for, the ten-document rerank paid for, the prompt assembled,
+# and `_truncate` would then have thrown most of it away. A widening that
+# widens nothing, wearing a green harness -- the exact defect
+# `new features/12-robust-handouts/PLAN.md` exists to correct, reproduced
+# inside its own fix.
+#
+# 36,000 clears ten MAX-size chunks (10 x 3,316 plus filename tags and
+# separators is ~33,500) with margin, which is what makes it a backstop again
+# rather than the budget. `scripts/deck_check.py` case 32 pins the arithmetic
+# and re-runs it against whatever `RECIPES["deck"].rerank_top_n` says, so
+# raising the budget without raising the cap goes red instead of going quiet.
+#
+# TWO HONEST CONSEQUENCES BEYOND THE DECK, because this constant is shared:
+#
+#   1. `chart`, `table` and `sheet` are UNAFFECTED IN PRACTICE, and that is
+#      measured rather than hoped: at the agent default `rerank_top_n = 3` the
+#      worst case is 3 x 3,316 = ~10,000 characters, which never reached 12,000
+#      either. Raising a cap nothing was hitting changes nothing.
+#   2. An agent with `rerank_enabled = False` is a real change. It gets
+#      `retrieve_k` documents unreranked -- 20 by default, ~48,000 characters --
+#      so it WAS being truncated at 12,000 and is now truncated at 36,000. That
+#      is three times the material in every handout for the Stage 1 teaching
+#      configuration. It is the same direction as this fix and it is still a
+#      change; it is written down here rather than discovered later.
+# ------------------------------------------------------------------
+MAX_CONTEXT_CHARS = 36_000
 MAX_CONVERSATION_CHARS = 6_000
 # Per answer, before the whole-conversation cap. A persona answer runs to 1,800
 # characters (CLAUDE.md measures exactly that), so six of them would be the
@@ -105,6 +148,28 @@ class Recipe:
     mime_type: str
     uses_sandbox: bool
     prompt: str
+
+    # ------------------------------------------------------------------
+    # HOW MUCH CORPUS THIS RECIPE IS ALLOWED. `None` means "the agent's own
+    # value", which is today's behaviour exactly, so the recipes that leave
+    # both unset are untouched BY CONSTRUCTION rather than by care.
+    #
+    # These are PER-CALL OVERRIDES on `aretrieve(agent, question, *, k, top_n)`
+    # and are never written onto the `Agent` row. The prohibition is the
+    # load-bearing half and `retriever.aretrieve` gives the whole argument:
+    # setting `agent.retrieve_k = 40` for the duration of a job is the obvious
+    # implementation and is a data-loss bug, because the `Agent` is a live ORM
+    # object inside a session that gets committed -- so a value chosen for one
+    # handout would be flushed into the operator's saved configuration and
+    # silently become the agent's permanent setting.
+    #
+    # THIS IS A BUDGET, NOT A SECOND RETRIEVER. The retriever is still
+    # constructed in exactly one place (`app/rag/retriever.py`), which is what
+    # keeps a handout and an answer agreeing about what the corpus says. A
+    # handout retrieving DIFFERENTLY would break that; retrieving MORE does
+    # not.
+    retrieve_k: int | None = None
+    rerank_top_n: int | None = None
 
     @property
     def output_filename(self) -> str:
@@ -311,6 +376,36 @@ MATERIAL (retrieved from this agent's corpus):
 {{conversation}}"""
 
 
+# WHY ONLY THE DECK CARRIES A RETRIEVAL BUDGET.
+#
+# `03-deck-material-budget.md` proposes widening `table` too -- "likely also
+# benefits; a table of three rows is the same defect" -- and that was not built,
+# because the two are not the same defect and reading the prompts side by side
+# is what separates them.
+#
+# The deck's defect is a CONTRADICTION BETWEEN TWO NUMBERS: `DECK_PROMPT` says
+# "five to eight slides" and the pipeline supplied three chunks. That is
+# measurable, it is stated in the prompt, and it is what makes the starvation
+# invisible -- the honest-shrink rule resolves the contradiction in the
+# direction that looks correct.
+#
+# `TABLE_PROMPT` names no size at all. It says the opposite: "Rows come from the
+# MATERIAL, so the table is as long as the MATERIAL is." There is no
+# contradiction to fix, so widening it would be a number set from instinct, and
+# this repo's standing rule is that a default carries the measurement that chose
+# it. It would also not be free: every extra chunk is more marginal material
+# under a prompt whose central instruction is EVERY CELL MUST BE TRACEABLE, and
+# a row is a claim. Widen it when `deck_rate_check.py`-style evidence exists for
+# tables, not before.
+#
+# `sheet` is the same argument and is the one the feature file did not raise,
+# which is itself the tell: if three chunks were too thin for a table they would
+# be too thin for the study sheet, which is the most-pressed button in the
+# panel. Nobody has measured either.
+#
+# So the asymmetry is deliberate and it is asserted rather than assumed --
+# `scripts/deck_check.py` case 30 fails if any of the three quietly acquires a
+# budget, and fails if the deck quietly loses one.
 RECIPES: dict[str, Recipe] = {
     "chart": Recipe(
         key="chart",
@@ -333,6 +428,38 @@ RECIPES: dict[str, Recipe] = {
         ),
         uses_sandbox=True,
         prompt=DECK_PROMPT,
+        # THE ONLY RECIPE WHOSE PROMPT NAMES A SIZE, AND THEREFORE THE ONLY ONE
+        # WITH A MEASURABLE CONTRADICTION TO FIX. `DECK_PROMPT` asks for "five
+        # to eight slides, one idea per slide" while the pipeline handed the
+        # model the agent's default 20 -> 3. Eight slides at one idea each need
+        # roughly eight distinct pieces of material; three chunks cannot carry
+        # eight ideas, and the prompt's own honest-shrink rule then converts the
+        # starvation into a four-slide deck that LOOKS CORRECT. That is a
+        # retrieval defect wearing a prompt defect's clothes, and no validator
+        # can see it -- from the artefact alone a thin deck IS an honest shrink.
+        #
+        # PROVISIONAL, AND SAYING SO IS NOT A HEDGE.
+        # `new features/12-robust-handouts/03-deck-material-budget.md` proposes
+        # both numbers and says to set them from measurement rather than
+        # instinct. `scripts/deck_rate_check.py` is the script that settles
+        # them -- it already produces the deck slide-count distribution -- and
+        # that feature file's criterion A6 is to run it as TWO ARMS: top_n=3
+        # against this value, n >= 6 each, arm order ALTERNATED, because this
+        # repo has one recorded case of a measurement reporting confidently
+        # about its own loop order rather than about its subject. The second arm
+        # does not exist yet, so until it does these two numbers are an
+        # argument, not a finding.
+        #
+        # The argument, for whoever re-tunes them: this is the widest per-call
+        # budget in the codebase and it is deliberately next to the second
+        # widest, `quiz-generator`'s 40 -> 8 (`app/db/specialists.py:163-166`),
+        # which carries the same stated reason -- "items must spread across the
+        # corpus rather than cluster on one passage". A deck is that shape
+        # exactly: eight slides are eight places in the corpus, not one passage
+        # read closely. It costs Pinecone time at k=40 and prompt tokens at
+        # top_n=10; reranking is ~830 ms and `top_n` does not change it.
+        retrieve_k=40,
+        rerank_top_n=10,
     ),
     "table": Recipe(
         key="table",
@@ -523,18 +650,29 @@ async def gather_material(
     agent: Agent,
     brief: str,
     conversation_id: uuid.UUID | None,
+    *,
+    recipe: Recipe,
 ) -> Material:
     """Everything a handout is grounded in: the corpus, and the thread.
 
     **Both halves are needed, and each covers a case the other cannot.**
 
-    The corpus half is `aretrieve(agent, brief)` -- the same seam every answer
-    goes through, with the agent's own `retrieve_k` and its own reranker
-    setting, because a handout retrieving differently from an answer would make
-    the two disagree about what the corpus says. It is what makes "make me a
-    deck about the power budget" work from a freshly opened panel with no
-    conversation at all, which is the common case: the panel is a place you go
-    to make something, not a place you go after a chat.
+    The corpus half is `aretrieve` -- the same seam every answer goes through,
+    because a handout retrieving differently from an answer would make the two
+    disagree about what the corpus says. It is what makes "make me a deck about
+    the power budget" work from a freshly opened panel with no conversation at
+    all, which is the common case: the panel is a place you go to make
+    something, not a place you go after a chat.
+
+    **`recipe` is required and keyword-only, and both of those are the point.**
+    It supplies `retrieve_k`/`rerank_top_n`, which are `None` for three of the
+    four recipes and therefore mean "the agent's own value" -- today's behaviour
+    exactly. A default of `recipe=None` would have read as harmless and would
+    have silently reproduced the starvation this parameter exists to fix for
+    every caller added after it; keyword-only stops the fifth argument being
+    quietly bound to something else. It is more material through the SAME
+    retriever, not a second retrieval path: nothing here calls
+    `similarity_search()` and nothing writes a value back onto the `Agent` row.
 
     The conversation half is what the panel exists for. "Chart what we just
     discussed" has no useful retrieval query in it -- the brief is four words of
@@ -547,9 +685,18 @@ async def gather_material(
 
     `chunk_ids` is recorded whether or not the corpus half turns out to be the
     useful one, because provenance is about what the handout was ALLOWED to see,
-    not about what it happened to use.
+    not about what it happened to use. **A wider budget makes that distinction
+    matter more, not less**: the gap between what was retrieved and what the
+    model actually put on a slide is now large enough to mislead somebody
+    reading `meta["chunk_ids"]` as a list of sources. It is not. It is the list
+    of chunks the model could have used.
     """
-    retrieval = await aretrieve(agent, brief)
+    # OVERRIDES, NEVER WRITES -- `pipeline.py` passes the routed specialist's
+    # width through the same two arguments for the same reason. `None` on both
+    # is the identity case and is what the other three recipes send.
+    retrieval = await aretrieve(
+        agent, brief, k=recipe.retrieve_k, top_n=recipe.rerank_top_n
+    )
 
     chunk_ids = [
         str(chunk_id)

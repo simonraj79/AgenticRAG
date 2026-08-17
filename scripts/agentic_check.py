@@ -9,6 +9,14 @@ Pinecone, no browser.
     python scripts/agentic_check.py --run       # the scenarios
     python scripts/agentic_check.py --cleanup   # namespace, rows, handouts
 
+`--only` is a substring match on a scenario's FUNCTION NAME and, since
+2026-08-17, it reaches the handout-route scenarios too. It used to not: the
+whole HTTP block was gated on `if not only:`, so every assertion about a real
+handout job was all-or-nothing with the twenty-minute suite, and the five
+criteria owed by `new features/12-robust-handouts/` could not be executed
+without re-asking twenty questions of a live model. A check that is expensive
+to run is a check that does not get run.
+
 **The fixture corpus is two files on purpose.** CLAUDE.md records that context
 precision and recall both scoring exactly 1.0 on the existing single-file corpus
 does not mean retrieval is excellent -- it means retrieval cannot fail, because
@@ -43,6 +51,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import re
 import sys
 import time
 import uuid
@@ -119,6 +128,170 @@ class Outcome:
     detail: str = ""
     notes: list[str] = field(default_factory=list)
     rate_limited: bool = False
+    #: Neither green nor red: the assertion did not run, because its input never
+    #: arrived. Ported from `ui_check.py`'s `Results.unmeasured` on 2026-08-17,
+    #: after an audit found five checks in this file that report green when their
+    #: precondition is absent -- S8b vanishing inside `if ready:`, S11's
+    #: `not leaked` over zero captured statements, S5's disjunction collapsing
+    #: when no tool was called, S10 comparing two empty lists, S23's `all([])`.
+    #:
+    #: A two-state harness has to call those PASS, and `build.md` 5 is blunt
+    #: about what that costs: "a check that cannot fail reports success, and it
+    #: reports it in green, forever."
+    unmeasured: bool = False
+
+
+def unmeasured(name: str, detail: str) -> "Outcome":
+    """The assertion could not run. Not a pass, not a failure."""
+    return Outcome(name, False, detail, unmeasured=True)
+
+
+#: The floor a deck must clear here. `DECK_PROMPT` asks for five to eight slides
+#: and also tells the model to use only what the material supports, so a thin
+#: fixture corpus SHOULD produce a short deck -- firing on that is the
+#: `refusal_pass = 0/2` defect, a measurement punishing the behaviour the prompt
+#: exists to produce. Three is "somebody made a deck", not "the deck is good".
+DECK_MIN_SLIDES = 3
+
+
+def artifact_problem(recipe: str, body: bytes) -> str | None:
+    """Open the downloaded handout. Returns a reason it is unusable, or None.
+
+    These are the four content checks `new features/06-test-plan.md:183` has
+    promised since it was written -- "the .pptx opens with python-pptx; the .png
+    opens with PIL; the .csv parses; the .md is non-empty" -- and which S8 did
+    not perform. It asserted `status == "ready" and byte_size > 0`, which is
+    satisfied by a zero-slide deck (27,387 bytes, measured) and by 28 bytes of
+    PK junk.
+
+    Deliberately independent of `app/handouts/validate.py`, which does not exist
+    yet and which this must be able to outlive: a regression in the application's
+    validator must not be able to make this scenario pass. Same double-entry
+    reasoning as `sandbox_check.deck_problem`.
+
+    Never raises. A harness that dies on a malformed artefact reports nothing
+    about the artefact.
+    """
+    if not body:
+        return "the download was empty"
+    try:
+        if recipe == "deck":
+            import io as _io
+
+            from pptx import Presentation
+
+            prs = Presentation(_io.BytesIO(body))
+            slides = list(prs.slides)
+            if len(slides) < DECK_MIN_SLIDES:
+                return f"deck has {len(slides)} slide(s), fewer than {DECK_MIN_SLIDES}"
+            untitled = []
+            for n, slide in enumerate(slides, 1):
+                holder = getattr(slide.shapes, "title", None)
+                text = (
+                    holder.text_frame.text.strip()
+                    if holder is not None and getattr(holder, "has_text_frame", False)
+                    else ""
+                )
+                if not text:
+                    untitled.append(n)
+            if untitled:
+                return f"slide(s) {untitled} have no title"
+            return None
+
+        if recipe == "chart":
+            import io as _io
+
+            from PIL import Image
+
+            if not body.startswith(b"\x89PNG"):
+                return "no PNG signature"
+            image = Image.open(_io.BytesIO(body))
+            image.verify()
+            if min(image.size) <= 1:
+                return f"image is {image.size}, which is not a chart"
+            return None
+
+        if recipe == "table":
+            import csv as _csv
+            import io as _io
+
+            rows = list(_csv.reader(_io.StringIO(body.decode("utf-8", "replace"))))
+            rows = [r for r in rows if any(cell.strip() for cell in r)]
+            if len(rows) < 2:
+                return f"csv has {len(rows)} non-empty row(s); a header alone is not a table"
+            return None
+
+        if recipe == "sheet":
+            text = body.decode("utf-8", "replace").strip()
+            if not text:
+                return "the study sheet is empty"
+            if "#" not in text:
+                return "the study sheet has no markdown heading"
+            return None
+    except Exception as exc:  # noqa: BLE001 - see the docstring
+        return f"could not open the artefact: {type(exc).__name__}: {exc}"
+    return None
+
+
+def slide_count(body: bytes) -> int | None:
+    """How many slides the downloaded deck HAS, or None if it will not open.
+
+    Deliberately separate from `artifact_problem`, which answers "is this
+    usable" against a floor. A count and a verdict are different questions and
+    the scenarios below need both: S28 has to distinguish "the validator fired"
+    from "the model happened to clear a raised floor", and S8's feature-05 half
+    has to compare the stored `preview_text` against the real number. A verdict
+    cannot tell either pair apart.
+
+    Never raises, for `artifact_problem`'s reason: a harness that dies on a
+    malformed artefact reports nothing about the artefact.
+    """
+    try:
+        import io as _io
+
+        from pptx import Presentation
+
+        return len(list(Presentation(_io.BytesIO(body)).slides))
+    except Exception:  # noqa: BLE001 - see the docstring
+        return None
+
+
+# `validate._numbered` opens a deck outline with `"6 slides"` (or `"1 slide"`,
+# because `_plural` exists precisely so the card does not read "1 slides").
+# Anchored at the start, so a slide TITLE containing "12 slides" cannot be read
+# as the count.
+_PREVIEW_SLIDES = re.compile(r"^\s*(\d+)\s+slides?\b")
+
+
+def preview_slide_count(preview_text: str | None) -> int | None:
+    """The slide count the STORED preview claims, or None if it claims none.
+
+    Feature 05's whole product claim is that a user can tell an empty deck from
+    a real one without opening PowerPoint. That claim is only true if the number
+    on the card is the number in the file, and nothing else in this repo
+    compares the two -- `deck_check.py` asserts `outline()` against fixtures it
+    built itself, which cannot see a job that wrote the wrong field, wrote the
+    model's stdout caption instead, or wrote a preview from attempt 1 beside an
+    artefact from attempt 2.
+
+    **The anchor is what makes it able to fail.** Measured 2026-08-17:
+
+        "7 slides\\n1. Three Downlink Paths"                    ->    7
+        "1 slide\\n1. Only one"                                 ->    1
+        "0 slides"                                             ->    0
+        "Saved deck.pptx with 7 slides on the three downlink"   -> None
+        "deck written with 3 slides"                           -> None
+
+    The last two are the model's own `print()` caption -- exactly what
+    `preview_text` held before feature 05, and exactly what `_preview_for`
+    falls back to. So a regression that dropped the outline and kept the
+    caption reads as `preview_claims=None` and S8c goes red, rather than
+    matching a number out of the middle of a sentence and going green.
+    """
+    if not preview_text:
+        return None
+    match = _PREVIEW_SLIDES.match(preview_text)
+    return int(match.group(1)) if match else None
 
 
 # Phrases that mean "the upstream provider refused us", not "the code is wrong".
@@ -165,16 +338,62 @@ RATE_LIMIT_PHRASES = (
 
 
 def _flag(outcome: "Outcome") -> str:
-    """Three states, not two. `[rate]` is the one that matters: it says the
-    provider refused, so re-run in a minute rather than opening an editor."""
+    """FOUR states, not two.
+
+    `[rate]` says the provider refused, so re-run in a minute rather than opening
+    an editor. `[warn]` says the assertion never ran at all, which is the state
+    that was previously spelled "green".
+
+    Neither fails the suite -- see `_is_failure`. A red row that means "wait
+    sixty seconds" or "the fixture produced no input" sends its reader to debug
+    working code, and teaches them to ignore red.
+    """
     if outcome.ok:
         return "[ok]  "
+    if outcome.unmeasured:
+        return "[warn]"
     return "[rate]" if outcome.rate_limited else "[FAIL]"
+
+
+def _is_failure(outcome: "Outcome") -> bool:
+    """A genuine defect, as opposed to an environment refusal or a missing input.
+
+    Until 2026-08-17 the exit code was `not o.ok`, so a `[rate]` row exited
+    non-zero -- which is the opposite of what this file's own comment and
+    CLAUDE.md both describe, and it meant a Cohere 429 looked exactly like a
+    broken handout job. Treat both non-defect states as UNMEASURED, never as
+    passing, and never as failing.
+    """
+    return not outcome.ok and not outcome.rate_limited and not outcome.unmeasured
 
 
 def is_rate_limited(text: str) -> bool:
     lowered = text.lower()
     return any(phrase in lowered for phrase in RATE_LIMIT_PHRASES)
+
+
+def record(
+    outcome: "Outcome", outcomes: list["Outcome"], took: float | None = None
+) -> None:
+    """Re-flag, print, append. ONE implementation, used by both scenario loops.
+
+    The scenario loop and the handout-route loop each did this inline and the
+    two had already drifted once -- the summary spelled `_flag` out by hand and
+    printed `[FAIL]` for a row the run had printed `[rate]`, which is the
+    defect recorded at `_flag`. Two more copies is how that comes back.
+
+    Printing here rather than after the block is the other half: a handout
+    scenario is minutes of silence, and a reader watching a blank console
+    cannot tell a slow deck from a hung one.
+    """
+    if not outcome.ok and is_rate_limited(outcome.detail):
+        outcome.rate_limited = True
+    print(
+        f"  {_flag(outcome)} {outcome.name}"
+        + (f"  ({took:.1f}s)" if took is not None else "")
+    )
+    print(f"         {ascii_safe(outcome.detail)}")
+    outcomes.append(outcome)
 
 
 # --------------------------------------------------------------------------
@@ -506,11 +725,20 @@ async def s5_self_correction(db, agent, user) -> Outcome:
     )
     errors = payloads_of(events, "TOOL_ERROR")
     calls = payloads_of(events, "TOOL_CALL")
-    ok = bool(out.answer) and (len(errors) == 0 or len(calls) > len(errors))
-    return Outcome(
-        "S5 tool failure is recoverable", ok,
-        f"calls={len(calls)} errors={len(errors)} answered={bool(out.answer)}",
-    )
+    detail = f"calls={len(calls)} errors={len(errors)} answered={bool(out.answer)}"
+
+    # `len(errors) == 0 or len(calls) > len(errors)` short-circuits when the
+    # model called no tool at all, collapsing the whole assertion to
+    # `bool(out.answer)` -- the error-shaped test T2 forbids, sitting in the
+    # scenario whose docstring calls self-correction the most valuable behaviour
+    # a code interpreter has. Recovery cannot be observed if nothing failed.
+    if not errors:
+        return unmeasured(
+            "S5 tool failure is recoverable",
+            f"{detail} -- no tool error was provoked, so recovery was not exercised",
+        )
+    ok = bool(out.answer) and len(calls) > len(errors)
+    return Outcome("S5 tool failure is recoverable", ok, detail)
 
 
 async def s6_step_budget(db, agent, user) -> Outcome:
@@ -612,11 +840,18 @@ async def s10_citation_integrity(db, agent, user) -> Outcome:
     contiguous = markers == list(range(1, len(markers) + 1))
     used = {int(m) for m in re.findall(r"\[(\d+)\]", out.answer)}
     unresolved = sorted(used - set(markers))
+    detail = f"markers={markers} unresolved={unresolved}"
+
+    # With zero citations both halves are vacuously true: `[] == list(range(1,1))`
+    # and `set() - set()` is empty. A turn that retrieved nothing and cited
+    # nothing used to pass a check named "citation integrity".
+    if not markers:
+        return unmeasured(
+            "S10 citation integrity",
+            f"{detail} -- the turn cited nothing, so contiguity was not tested",
+        )
     ok = contiguous and not unresolved
-    return Outcome(
-        "S10 citation integrity", ok,
-        f"markers={markers} unresolved={unresolved}",
-    )
+    return Outcome("S10 citation integrity", ok, detail)
 
 
 # --------------------------------------------------------------------------
@@ -1280,7 +1515,18 @@ async def s23_two_mentions_two_sections(db, agent, user) -> Outcome:
 
     shared = set.intersection(*(markers_in(b) for b in bodies)) if len(bodies) >= 2 else set()
     shared_chunks = {m: by_rank.get(m) for m in sorted(shared)}
+    # `all([])` is True, so this half is vacuous whenever the two specialists
+    # happened not to cite the same passage. That is deliberate (see the
+    # docstring) and it is NOT the whole scenario -- the four assertions above it
+    # are real and always available, so flagging the run `[warn]` would hide four
+    # passing checks behind one that could not run. It is spelled out in the
+    # detail line instead, which is the smallest honest thing.
     shared_ok = all(cid is not None for cid in shared_chunks.values())
+    shared_note = (
+        f"shared_markers={sorted(shared)}"
+        if shared
+        else "shared_markers=none <- that half NOT MEASURED"
+    )
 
     ok = (
         len(delegates) == 2
@@ -1293,7 +1539,7 @@ async def s23_two_mentions_two_sections(db, agent, user) -> Outcome:
         "S23 two mentions, two sections, one ledger", ok,
         f"delegates={len(delegates)} sections={len(bodies)} "
         f"query_chunks={len(rows)} duplicate_ranks={duplicate_ranks} "
-        f"unresolved_markers={unresolved} shared_markers={sorted(shared) or 'none'}",
+        f"unresolved_markers={unresolved} {shared_note}",
     )
 
 
@@ -1564,180 +1810,1011 @@ async def s27_budget_exhaustion_still_answers(db, agent, user) -> Outcome:
 
 
 # --------------------------------------------------------------------------
-# HTTP scenarios -- the handout routes
+# S32-S33 -- the OTHER door. See `new features/12-robust-handouts/06-*.md`.
+#
+# A deck can be asked for in two places and until this change set they shared no
+# prompt, no grounding rules and no validation: the panel button ran
+# `run_handout_job` with a fifty-line `DECK_PROMPT`, and the chat turn ran
+# `run_python` with one bullet of guidance and nothing that opened the file. So
+# feature 02 landing alone would have shipped the same defect through the door
+# the workshop actually demonstrates.
+#
+# S32 is the necessity case and S33 is its regression twin, which is the S3/S1
+# pairing one layer over.
 # --------------------------------------------------------------------------
 
-async def http_scenarios(agent_id: uuid.UUID, user_id: uuid.UUID) -> list[Outcome]:
-    """Exercise the handout routes through an ASGI transport.
+# One question, asked by both, so the only variable between them is
+# `tools_enabled`. It names the file type explicitly: "make me some slides" is a
+# request a model can honour in prose, and a scenario about artefacts must not
+# be satisfiable without one.
+S32_DECK_ASK = (
+    "Make me a PowerPoint slide deck as a .pptx file summarising the three "
+    "downlink paths, one slide per path."
+)
+
+
+def _pptx_names(payloads: list[dict], key: str) -> list[str]:
+    """Filenames ending `.pptx` under `key` in a list of tool payloads."""
+    return [
+        str(entry.get("filename") or "")
+        for payload in payloads
+        for entry in (payload.get(key) or [])
+        if str(entry.get("filename") or "").lower().endswith(".pptx")
+    ]
+
+
+async def s32_tool_deck_is_rejected(db, agent, user) -> Outcome:
+    """A chat-made deck that fails validation: TOOL_ERROR, and NO handout row.
+
+    Feature 06, A7. Two halves, and the second is the one that matters: the tool
+    path may not persist a file it has already told the model is broken.
+    `PLAN.md` 1.8's all-or-nothing principle -- "a deck missing half its slides
+    is worse than a deck that failed" -- applies to the panel as much as to the
+    prompt, because a `ready` handout is a download button.
+
+    **It owns its conditions twice over, and the second one is the point.**
+    Feature 06 A7 says to starve `retrieve_k` "so a chat-requested deck cannot
+    fill `handout_deck_min_slides`", and that alone would be the S3 trap
+    verbatim: `PLAN.md` 8.3 MEASURED the model producing five to nine slides at
+    the most starved budget in this repo, so a scenario waiting for starvation
+    to shrink a deck below three is waiting for something that does not happen.
+    An intermittent scenario is re-run until it passes -- CLAUDE.md records
+    exactly that, on the fifth refusal-marker miss. So the deck is made
+    un-usable by `IMPOSSIBLE_BULLET_LIMIT` instead, for the reasons written
+    there, and retrieval is starved as well so the turn is a thin-material turn
+    rather than only a moved-threshold one. Both restored in the `finally`.
+
+    Three ways this is honestly unmeasurable, and each reports as such rather
+    than as green: the model may not call `run_python` at all, it may call it
+    and write something that is not a deck, or the run may crash before saving.
+    None of those is evidence about validation.
+
+    **Seen failing before it was believed** (`build.md` section 5). 2026-08-17,
+    same ask, same lever, with `handout_validate_artifacts=False` for one run:
+
+        validation on   [ok]   run_python=2 tool_errors=2 error_kinds=[invalid,
+                               invalid] rejected=[downlink_paths.pptx x2]
+                               persisted_pptx=0
+        validation off  [FAIL] run_python=1 tool_errors=0 error_kinds=none
+                               wrote_pptx=[downlink_paths.pptx] persisted_pptx=1
+
+    Read the left column twice. With validation on the model called
+    `run_python` a SECOND time after being told what was wrong -- the whole
+    point of returning a `ToolMessage` instead of raising (`loop.md` section 4)
+    -- and neither deck reached the panel.
+    """
+    prior_limit = settings.handout_deck_max_bullet_chars
+    prior_k, prior_n = agent.retrieve_k, agent.rerank_top_n
+    settings.handout_deck_max_bullet_chars = IMPOSSIBLE_BULLET_LIMIT
+    agent.retrieve_k, agent.rerank_top_n = 1, 1
+    await db.commit()
+    try:
+        out, events, _convo = await ask(db, agent, user, S32_DECK_ASK)
+        rows = (await db.scalars(
+            select(Handout).where(Handout.query_id == out.query_id)
+        )).all()
+    finally:
+        settings.handout_deck_max_bullet_chars = prior_limit
+        agent.retrieve_k, agent.rerank_top_n = prior_k, prior_n
+        await db.commit()
+
+    name = "S32 an invalid chat deck is rejected, not stored"
+    calls = [p for p in payloads_of(events, "TOOL_CALL") if p.get("tool") == "run_python"]
+    errors = payloads_of(events, "TOOL_ERROR")
+    results = payloads_of(events, "TOOL_RESULT")
+
+    rejected = _pptx_names(errors, "rejected")
+    # Anything the run wrote, from either payload. On a crash `artifacts` lists
+    # what the program managed to save and those are NOT persisted, so this is
+    # only ever used to decide whether a deck was ATTEMPTED -- the database
+    # below is what decides whether one was kept.
+    written = _pptx_names(results, "artifacts") + _pptx_names(errors, "artifacts")
+    persisted = [r for r in rows if "presentationml" in (r.mime_type or "")]
+    kinds = [p.get("error_kind") for p in errors]
+    detail = (
+        f"bullet_limit={IMPOSSIBLE_BULLET_LIMIT} run_python={len(calls)} "
+        f"tool_errors={len(errors)} "
+        f"error_kinds={kinds or 'none'} rejected_pptx={rejected or 'none'} "
+        f"wrote_pptx={written or 'none'} persisted_handouts={len(rows)} "
+        f"persisted_pptx={len(persisted)}"
+    )
+
+    if not calls:
+        return unmeasured(name, f"{detail} -- the model never called run_python")
+    if not rejected and not written and not persisted:
+        return unmeasured(
+            name, f"{detail} -- no .pptx was produced, so nothing was validated"
+        )
+
+    ok = (
+        bool(rejected)
+        and ARTEFACT_ERROR_KIND in kinds
+        and not persisted
+    )
+    return Outcome(name, ok, detail)
+
+
+async def s33_tools_off_makes_no_handout(db, agent, user) -> Outcome:
+    """The same deck request with tools OFF is the classic path, and makes nothing.
+
+    Feature 06, A8, and the standing form from `loop.md` S4: not "similar",
+    identical. S1 asserts it for a plain question; this asserts it for the one
+    request most likely to tempt a code path into running -- because the
+    interesting regression is not "tools off produces no TOOL_CALL", it is
+    "tools off produces no HANDOUT", and a `run_python` reached by any route
+    other than `_tools_active(agent)` would show up here and nowhere else.
+
+    Owns `tools_enabled` and restores it, the way S1 does.
+
+    **Seen failing before it was believed** (`build.md` section 5). Same ask,
+    2026-08-17, with the flag flipped for one run:
+
+        tools off  [ok]   events=[GENERATE, RERANK, RETRIEVE, REWRITE,
+                          SCORE_CHECK] handouts=0
+        tools on   [FAIL] STRAY=[TOOL_CALL, TOOL_RESULT] handouts_by_query=1
+
+    Both halves moved, which is what says the assertion is reading the flag and
+    not the weather.
+    """
+    agent.tools_enabled = False
+    await db.commit()
+    try:
+        out, events, convo = await ask(db, agent, user, S32_DECK_ASK)
+        by_query = (await db.scalars(
+            select(Handout).where(Handout.query_id == out.query_id)
+        )).all()
+        by_convo = (await db.scalars(
+            select(Handout).where(Handout.conversation_id == convo.id)
+        )).all()
+    finally:
+        agent.tools_enabled = True
+        await db.commit()
+
+    seen = set(event_types(events))
+    stray = seen - CLASSIC_EVENTS
+    ok = (
+        not stray
+        and "RETRIEVE" in seen
+        and "GENERATE" in seen
+        and "REWRITE" in seen
+        and bool(out.answer)
+        and not by_query
+        and not by_convo
+    )
+    return Outcome(
+        "S33 tools off makes no handout", ok,
+        f"events={sorted(seen)}" + (f" STRAY={sorted(stray)}" if stray else "")
+        + f" handouts_by_query={len(by_query)} handouts_by_conversation={len(by_convo)} "
+        f"answer_chars={len(out.answer or '')}",
+    )
+
+
+# --------------------------------------------------------------------------
+# HTTP scenarios -- the handout routes
+#
+# **These are ordinary scenarios now, and `--only` reaches them.** Until
+# 2026-08-17 the whole block was one function gated on `if not only:` in
+# `run_scenarios`, so every handout assertion was all-or-nothing with the
+# twenty-minute suite: there was no way to run S8 without also re-asking twenty
+# questions of a live model. `01-deck-harness-floor.md` section F names that as
+# the reason it pushed everything it could down to `deck_check.py` -- and it is
+# also why the criteria that CANNOT go to layer 1, the ones about a real job,
+# kept not being executed. A test that is expensive to run is a test that is not
+# run.
+#
+# Each function takes one `Http` and returns a LIST of outcomes, because some of
+# them genuinely produce several: S8 makes four recipes and its download check
+# reads what they left behind, and splitting those apart would mean making the
+# four recipes twice.
+# --------------------------------------------------------------------------
+
+
+@dataclass
+class Http:
+    """What one handout-route scenario is handed.
+
+    `agent` and `db` are the OUTER session's objects -- the same pair every
+    scenario above owns and restores -- so a handout scenario starves retrieval
+    exactly the way S3 and S13 do rather than inventing a second way. The
+    background job re-loads the agent in a session of its own, so a committed
+    write here is what that job reads.
+    """
+
+    client: object
+    base: str
+    agent_url: str
+    db: object
+    agent: Agent
+    user: User
+
+
+# THE LEVER S28 AND S32 USE TO FORCE A DECK TO BE INVALID, and it is not the
+# one `02-artefact-validation.md` A10 and `06-tool-path-parity.md` A7 name.
+#
+# Both criteria say to raise `handout_deck_min_slides` "above what the fixture
+# corpus can support". **Measured 2026-08-17, that lever does not work, and the
+# reason is a property of the retry rather than of this fixture: the repair turn
+# is TOLD the threshold.** `validate._check_deck` writes "has 6 slides, and the
+# handout needs at least N. Add slides with `prs.slides.add_slide(...)`", and
+# `_repair_message` hands that to the model verbatim. So:
+#
+#   floor = 12  ->  attempt 2 complies, the row ends `ready`, nothing measured
+#   floor = 40  ->  attempt 2 tries, and the program is TRUNCATED at
+#                   CODE_MAX_TOKENS: "Python syntax error on line 322:
+#                   unterminated string literal". Observed, twice.
+#
+# The second row is `PLAN.md` R7 and `04-failure-legibility.md` D happening
+# live -- nothing in the backend reads `finish_reason`, so a cut-off program
+# fails as a syntax error and is reported as `error_kind="import"`. A slide
+# floor is therefore either satisfiable (no failure to observe) or inflationary
+# (a failure that is not the one under test). There is no third value.
+#
+# A bullet-length limit of ZERO has neither problem. It is un-satisfiable BY
+# CONSTRUCTION rather than by luck -- `_check_deck` measures every paragraph
+# including the title, and a slide with a title has a paragraph longer than
+# zero characters -- and complying makes the program SHORTER, so it cannot
+# truncate. Its message still opens "The file deck.pptx opened with 6 slides,
+# but ...", so a failure is still legible as a statement about a deck.
+#
+# It costs nothing in discriminating power, which is the property that actually
+# matters: a validator that had been deleted, or one that only ever fired on
+# zero slides, ships the six-slide deck `ready` and S28 goes red.
+IMPOSSIBLE_BULLET_LIMIT = 0
+
+# What S31 shrinks `sandbox_timeout_s` to, so that both attempts time out and
+# the row fails with `error_kind="timeout"` -- a real sandbox classification
+# rather than a mocked one.
+#
+# **It was 1.0 and 1.0 DID NOT WORK, which is the reason this comment carries a
+# number.** Measured on this box, 2026-08-17: a matplotlib bar chart through
+# `sandbox.run` completes in **528 ms**, so a one-second ceiling let the run
+# succeed and S31 reported `[warn] ... the run succeeded inside 1.0s`. The
+# three-state result did its job -- a two-state harness would have called that
+# green or red and either would have been a lie -- but the lever was
+# machine-dependent, which is the thing to fix rather than to re-run.
+#
+# 50 ms is under Python's own interpreter start, so it cannot depend on how fast
+# matplotlib imports here. That is the property wanted: this scenario is about
+# `error_kind` surviving to the API, not about a realistic timeout.
+S31_TIMEOUT_S = 0.05
+
+# The five the sandbox mints, plus the one feature 02 adds. `error_kind` is a
+# plain string with no enum behind it (PLAN.md 3.4), so this list is the only
+# thing that would notice a sixth appearing unannounced.
+SANDBOX_ERROR_KINDS = {"import", "syntax", "timeout", "runtime", "output"}
+ARTEFACT_ERROR_KIND = "invalid"
+
+# Words that make a failed deck's `error` a statement about MATERIAL or about
+# the artefact, as opposed to about the sandbox falling over. S29 accepts a
+# failure only when it is one of these; anything else means the run died for a
+# reason that has nothing to do with what S29 is asking, and the honest report
+# is `unmeasured`.
+MATERIAL_SHAPED = ("slide", "material", "corpus", ".pptx", "no file", "upload a document")
+
+
+async def make_handout(
+    http: Http, recipe: str, brief: str, *, budget_s: float = 420
+) -> tuple[str | None, dict | None, str]:
+    """POST one handout and wait for a terminal row. Returns `(id, row, note)`.
+
+    `row` is the LIST route's view of it -- the one the panel polls, and the one
+    `error` and `error_kind` have to survive to (PLAN.md 3.4). `row` is None
+    when the POST was refused or the job never settled, and `note` says which;
+    every caller turns that into `unmeasured` rather than into a failure,
+    because "the job did not finish" is not an answer to any question asked
+    below.
+
+    Polls rather than trusting the POST. Under `httpx.ASGITransport` a Starlette
+    `BackgroundTask` runs inside the same ASGI call, so the 202 in fact does not
+    return until the job is done -- which is convenient and is an implementation
+    detail of the transport, not a property of the route. A scenario that
+    assumed it would break silently against a real server.
+    """
+    r = await http.client.post(http.base, json={"recipe": recipe, "brief": brief})
+    if r.status_code != 202:
+        return None, None, f"POST returned {r.status_code}: {preview(r.text, 160)}"
+    hid = r.json()["id"]
+
+    deadline = time.monotonic() + budget_s
+    while True:
+        listing = await http.client.get(http.base, params={"limit": 200})
+        if listing.status_code != 200:
+            return hid, None, f"GET list returned {listing.status_code}"
+        row = next((x for x in listing.json() if x["id"] == hid), None)
+        if row is not None and row["status"] in ("ready", "failed"):
+            return hid, row, ""
+        if time.monotonic() >= deadline:
+            status_now = row["status"] if row else "no row"
+            return hid, None, f"still {status_now} after {budget_s:.0f} s"
+        await asyncio.sleep(3)
+
+
+async def handout_meta(handout_id: str) -> dict:
+    """`handouts.meta` for one row, read in a session of its own.
+
+    **`meta` is deliberately absent from every response model** -- putting it on
+    the wire would hand a client the vocabulary `extra="forbid"` withholds
+    (`api/handouts.py`) -- so the database is the only place `chunk_ids` can be
+    read, and S30 needs it. Two facts are lifted out of `meta` onto the response
+    and those two are read through the API, where they belong.
+
+    Empty dict on anything unexpected: this feeds a detail line, never a
+    verdict on its own.
+    """
+    async with SessionLocal() as db:
+        row = await db.get(Handout, uuid.UUID(str(handout_id)))
+        meta = getattr(row, "meta", None)
+        return dict(meta) if isinstance(meta, dict) else {}
+
+
+async def corpus_chunks(db, agent: Agent) -> int:
+    """How many chunks the fixture corpus holds, read rather than assumed.
+
+    S18 makes the same call for the same reason: a literal 7 here would turn a
+    re-ingest at a different chunk size into a red row that names retrieval.
+    """
+    return await db.scalar(
+        select(func.count(Chunk.id))
+        .join(Document, Chunk.document_id == Document.id)
+        .where(Document.agent_id == agent.id)
+    ) or 0
+
+
+async def s8_recipes(http: Http) -> list[Outcome]:
+    """The four recipes, opened rather than weighed -- plus S8b and S8c.
+
+    Until 2026-08-17 this was `status == "ready" and byte_size > 0`, which is
+    satisfied by a zero-slide 27 KB deck and by 28 bytes of PK junk (both
+    measured, `PLAN.md` 1.1). `06-test-plan.md:183` promised these four content
+    checks since it was written and none of them had ever run.
+    """
+    outcomes: list[Outcome] = []
+    created: dict[str, str] = {}
+    for recipe, brief in (
+        ("sheet", "A one-page study sheet on the power subsystem."),
+        ("chart", "A bar chart of the power allocation by subsystem."),
+        ("table", "A CSV of each subsystem and its power allocation in kW."),
+        ("deck", "A short deck on the three downlink paths."),
+    ):
+        r = await http.client.post(http.base, json={"recipe": recipe, "brief": brief})
+        if r.status_code == 202:
+            created[recipe] = r.json()["id"]
+        else:
+            outcomes.append(Outcome(
+                f"S8 recipe {recipe}", False,
+                f"POST returned {r.status_code}: {preview(r.text, 200)}",
+            ))
+
+    # Poll. Recipes are LLM calls plus a subprocess; sheet is fastest.
+    deadline = time.monotonic() + 480
+    final: dict[str, dict] = {}
+    while created and time.monotonic() < deadline:
+        await asyncio.sleep(4)
+        r = await http.client.get(http.base, params={"limit": 200})
+        if r.status_code != 200:
+            break
+        rows = {row["id"]: row for row in r.json()}
+        for recipe, hid in list(created.items()):
+            row = rows.get(hid)
+            if row and row["status"] in ("ready", "failed"):
+                final[recipe] = row
+                created.pop(recipe)
+
+    deck_body: bytes | None = None
+    deck_row: dict | None = None
+    for recipe in ("sheet", "chart", "table", "deck"):
+        row = final.get(recipe)
+        if row is None:
+            outcomes.append(Outcome(f"S8 recipe {recipe}", False, "did not finish in 480 s"))
+            continue
+        detail = (
+            f"status={row['status']} bytes={row['byte_size']} "
+            f"mime={row['mime_type']} err={preview(row.get('error') or '-', 90)}"
+        )
+        if row["status"] != "ready":
+            outcomes.append(Outcome(f"S8 recipe {recipe}", False, detail))
+            continue
+
+        # THE FILE IS OPENED.
+        body_r = await http.client.get(f"{http.base}/{row['id']}/download")
+        if body_r.status_code != 200:
+            outcomes.append(unmeasured(
+                f"S8 recipe {recipe}",
+                f"{detail} download={body_r.status_code}, so the bytes were never inspected",
+            ))
+            continue
+        if recipe == "deck":
+            deck_body, deck_row = body_r.content, row
+        problem = artifact_problem(recipe, body_r.content)
+        outcomes.append(Outcome(
+            f"S8 recipe {recipe}", problem is None,
+            detail if problem is None else f"{detail} -- {problem}",
+        ))
+
+    # Download, including the header-safety check.
+    ready = [r for r in final.values() if r["status"] == "ready"]
+    if not ready:
+        # Was `if ready:` with no else, so when nothing reached `ready` this
+        # appended NO Outcome at all -- not a pass, not a failure, not a
+        # warning. It simply vanished from the summary count.
+        outcomes.append(unmeasured(
+            "S8b download + safe filename",
+            "no recipe reached `ready`, so no download was attempted",
+        ))
+    else:
+        hid = ready[0]["id"]
+        r = await http.client.get(f"{http.base}/{hid}/download")
+        disp = r.headers.get("content-disposition", "")
+        safe = "\n" not in disp and "\r" not in disp and '"' in disp
+        outcomes.append(Outcome(
+            "S8b download + safe filename",
+            r.status_code == 200 and len(r.content) > 0 and safe,
+            f"status={r.status_code} bytes={len(r.content)} disp={ascii_safe(disp)}",
+        ))
+
+    # S8c -- feature 05's A9. The number on the CARD against the number in the
+    # FILE.
+    #
+    # `deck_check.py` cases 50-56 assert `outline()` against fixtures it built
+    # itself, which is the function working. This is the only assertion anywhere
+    # that the right string reached the right column of a real row: a job that
+    # wrote the model's stdout caption instead of the outline, or wrote attempt
+    # 1's preview beside attempt 2's artefact, passes every layer-1 case and
+    # puts a lie on the card -- and the measured failure this change set exists
+    # for is precisely a caption reading "deck written with 6 slides" over a
+    # file holding none.
+    if deck_row is None or deck_body is None:
+        outcomes.append(unmeasured(
+            "S8c deck preview names the real slide count",
+            "the deck recipe never reached `ready` and downloaded, so no preview was read",
+        ))
+    else:
+        detail_r = await http.client.get(f"{http.base}/{deck_row['id']}")
+        if detail_r.status_code != 200:
+            outcomes.append(unmeasured(
+                "S8c deck preview names the real slide count",
+                f"GET detail returned {detail_r.status_code}",
+            ))
+        else:
+            stored = detail_r.json().get("preview_text")
+            claimed = preview_slide_count(stored)
+            actual = slide_count(deck_body)
+            outcomes.append(Outcome(
+                "S8c deck preview names the real slide count",
+                claimed is not None and claimed == actual,
+                f"preview_claims={claimed} file_has={actual} "
+                f"preview={preview(stored or '-', 90)}",
+            ))
+
+    return outcomes
+
+
+async def s11_list_does_not_load_bytea(http: Http) -> list[Outcome]:
+    """Listing must never select the bytea column."""
+    import logging
+
+    statements: list[str] = []
+
+    class _Capture(logging.Handler):
+        # `entry`, not `record` -- there is a module-level `record()` helper now
+        # and a parameter of that name inside a handler is a trap for whoever
+        # next wants to report something from in here.
+        def emit(self, entry):
+            statements.append(entry.getMessage())
+
+    sql_log = logging.getLogger("sqlalchemy.engine.Engine")
+    handler = _Capture()
+    prior_level = sql_log.level
+    sql_log.addHandler(handler)
+    sql_log.setLevel(logging.INFO)
+    try:
+        await http.client.get(http.base, params={"limit": 200})
+    finally:
+        sql_log.removeHandler(handler)
+        sql_log.setLevel(prior_level)
+
+    leaked = [s for s in statements if "handouts.content" in s]
+    if not statements:
+        # `ok = not leaked` over an empty capture is green forever. If the
+        # `sqlalchemy.engine.Engine` logger ever stops emitting -- a logging
+        # config change, an echo default, a library rename -- this asserted
+        # nothing and said so in green.
+        return [unmeasured(
+            "S11 list does not load bytea",
+            "the SQL log captured 0 statements, so nothing was inspected",
+        )]
+    return [Outcome(
+        "S11 list does not load bytea", not leaked,
+        f"statements={len(statements)} leaked={len(leaked)}",
+    )]
+
+
+async def s17_generation_model_switchable(http: Http) -> list[Outcome]:
+    """The model is switchable through the API, and a typo is not.
+
+    S13 proves that CHANGING the model changes behaviour, but it writes the
+    column directly, which was the only way to set it until 2026-08-16. This
+    asserts the route: the field round-trips, null clears it, and a bare id is
+    refused HERE rather than 404ing on every answer the agent later gives.
+
+    The refusal is the half worth having. Accepting `"gemma-4-31b-it"` is easy
+    and stores a value that makes the agent fail with `404 No endpoints
+    found...`, which CLAUDE.md records as reading like an outage -- so the user
+    changed a setting and the agent broke, with nothing connecting the two.
+    """
+    prior_model = (await http.client.get(http.agent_url)).json().get("generation_model")
+    try:
+        set_r = await http.client.patch(
+            http.agent_url, json={"generation_model": "google/gemma-4-31b-it"}
+        )
+        bad_r = await http.client.patch(
+            http.agent_url, json={"generation_model": "gemma-4-31b-it-typo"}
+        )
+        after_bad = (await http.client.get(http.agent_url)).json().get("generation_model")
+        clear_r = await http.client.patch(http.agent_url, json={"generation_model": None})
+        cleared = (await http.client.get(http.agent_url)).json().get("generation_model")
+        ok = (
+            set_r.status_code == 200
+            and set_r.json().get("generation_model") == "google/gemma-4-31b-it"
+            and bad_r.status_code == 422
+            # The rejected write must not have landed.
+            and after_bad == "google/gemma-4-31b-it"
+            and clear_r.status_code == 200
+            and cleared is None
+        )
+        return [Outcome(
+            "S17 generation_model is switchable, typos are not", ok,
+            f"set={set_r.status_code} bad={bad_r.status_code} "
+            f"after_bad={after_bad!r} cleared={cleared!r}",
+        )]
+    finally:
+        await http.client.patch(http.agent_url, json={"generation_model": prior_model})
+
+
+async def s12_quota_refuses(http: Http) -> list[Outcome]:
+    """Quota refuses rather than evicting."""
+    agent_id = http.agent.id
+    async with SessionLocal() as db:
+        before = len((await db.scalars(
+            select(Handout).where(Handout.agent_id == agent_id)
+        )).all())
+    original = settings.handout_max_per_agent
+    settings.handout_max_per_agent = max(1, before)
+    try:
+        r = await http.client.post(http.base, json={"recipe": "sheet", "brief": "over quota"})
+        async with SessionLocal() as db:
+            after = len((await db.scalars(
+                select(Handout).where(Handout.agent_id == agent_id)
+            )).all())
+        return [Outcome(
+            "S12 quota refuses, evicts nothing",
+            r.status_code == 409 and after == before,
+            f"status={r.status_code} before={before} after={after}",
+        )]
+    finally:
+        settings.handout_max_per_agent = original
+
+
+async def s28_invalid_deck_fails_the_job(http: Http) -> list[Outcome]:
+    """An unusable deck must FAIL, in a real job. Feature 02, A10.
+
+    **This is the case that makes `validate.py` necessary, and without it every
+    other assertion about the validator is over a function nothing is proven to
+    call.** `deck_check.py` cases 20-28 pass `check()` a fixture and read what
+    comes back; case 24 goes one step further and calls `_problem`. None of them
+    can see the branch being reached from `run_handout_job` -- a
+    `handout_validate_artifacts` read that got inverted, an exception swallowed
+    between `_primary_artifact` and `_problem`, a `_problem` whose result the
+    job stopped acting on -- and each of those leaves every layer-1 case green
+    while shipping the defect this whole change set exists to fix. That is
+    exactly how S3 went green twice: it tested a function and not a path.
+
+    **The scenario OWNS its condition** (`loop.md` section 5). Hoping the
+    fixture corpus is thin enough to produce a two-slide deck is the trap S3
+    fell into twice, and `PLAN.md` 8.3 has already disproved it by measurement:
+    at the most starved budget in this repo the model still produces five to
+    nine slides. So a threshold moves instead -- see `IMPOSSIBLE_BULLET_LIMIT`
+    for which one, and for the measurement that ruled out the slide floor A10
+    actually names. Restored in a `finally`, and the setting is process-global:
+    the job runs in this process, which is why writing it works and why leaking
+    it would poison every row after.
+
+    Four-state on purpose:
+
+      failed + error_kind="invalid"  -> the branch fired in the job. PASS
+      ready                          -> the branch did NOT fire. FAIL
+      failed + another error_kind    -> the run died elsewhere. unmeasured
+      no terminal row                -> the job never settled. unmeasured
+
+    The third state is not hypothetical padding: measured on this fixture, a
+    handout generation comes back with a mangled or truncated first program
+    often enough that a two-state version of this scenario would be
+    intermittently red for a reason that has nothing to do with validation --
+    and CLAUDE.md records what an intermittent red does, which is get re-run
+    until it passes.
+
+    **Seen failing before it was believed** (`build.md` section 5, applied to
+    the scenario rather than to the code). 2026-08-17, same brief, same lever,
+    with `handout_validate_artifacts=False` added for one run:
+
+        validation on   [ok]   status=failed error_kind=invalid attempts=2
+        validation off  [FAIL] status=ready  error_kind=None    attempts=1 slides=7
+
+    A seven-slide deck full of 107-character bullets, stored `ready`, is what
+    ships when the third branch is not reached. That is the row this scenario
+    exists to make impossible to miss.
+    """
+    prior = settings.handout_deck_max_bullet_chars
+    settings.handout_deck_max_bullet_chars = IMPOSSIBLE_BULLET_LIMIT
+    try:
+        hid, row, note = await make_handout(
+            http, "deck",
+            "A deck covering the downlink paths, the power allocation and the "
+            "battery store.",
+        )
+    finally:
+        settings.handout_deck_max_bullet_chars = prior
+
+    name = "S28 an invalid deck fails the job"
+    if row is None:
+        return [unmeasured(name, f"no terminal handout row: {note}")]
+
+    error = row.get("error") or ""
+    kind = row.get("error_kind")
+    detail = (
+        f"bullet_limit={IMPOSSIBLE_BULLET_LIMIT} status={row['status']} "
+        f"error_kind={kind} attempts={row.get('attempts')} "
+        f"names_the_deck={'slide' in error.lower()} err={preview(error, 110)}"
+    )
+
+    if row["status"] == "failed":
+        if kind == ARTEFACT_ERROR_KIND:
+            # The message is asserted as well as the kind. `error_kind` alone
+            # would pass on a validator that returned a bare "invalid" -- and a
+            # refusal the model cannot act on wastes the retry it triggers
+            # (`loop.md` section 4), which is the whole reason `_check_deck`
+            # writes a finding and a fix rather than a verdict.
+            return [Outcome(name, "slide" in error.lower(), detail)]
+        return [unmeasured(
+            name,
+            f"{detail} -- failed with a PROCESS error rather than an artefact "
+            "one, so the validation branch was not the one exercised",
+        )]
+
+    body_r = await http.client.get(f"{http.base}/{hid}/download")
+    slides = slide_count(body_r.content) if body_r.status_code == 200 else None
+    return [Outcome(
+        name, False,
+        f"{detail} slides={slides} -- a deck violating the limit was stored "
+        "`ready`; `_problem`'s third branch did not fire in the job",
+    )]
+
+
+async def s29_deck_survives_a_starved_agent(http: Http) -> list[Outcome]:
+    """A starved AGENT must not yield a silently-thin `ready` deck. Feature 03, A4.
+
+    **The scenario owns the starvation**, `loop.md` section 5: `retrieve_k=1,
+    rerank_top_n=1` is the smallest budget the agent row can express, and it is
+    written here rather than inherited from the fixture, exactly the way S3, S13,
+    S15, S18 and S27 own the same two columns.
+
+    What makes this interesting is that the agent's budget is the one thing the
+    deck job does NOT use: `RECIPES["deck"]` carries `retrieve_k=40,
+    rerank_top_n=10` and `gather_material` passes them through as per-call
+    overrides. So the honest reading of a pass here is "the recipe's budget
+    survived an agent configured to starve it", and the honest reading of a
+    silently-thin `ready` deck is that the override was dropped somewhere
+    between the recipe and `aretrieve`.
+
+    **Read the pairing with S30 rather than this row alone.** A deck can clear
+    the floor because the corpus is easy, and `PLAN.md` 8.3 measured five to
+    nine slides at the most starved budget in the repo -- so this assertion
+    alone is satisfiable by an override that never took effect. S30 is what
+    measures whether it did. The two are a pair for the same reason
+    `route_specialist_check.py` cases 25 and 26 are.
+
+    The failure branch is accepted only when the error is about material or the
+    artefact. A timeout or an import refusal is the run dying for an unrelated
+    reason, and calling that a pass would make this row green on a broken
+    sandbox.
+    """
+    agent = http.agent
+    prior_k, prior_n = agent.retrieve_k, agent.rerank_top_n
+    agent.retrieve_k, agent.rerank_top_n = 1, 1
+    await http.db.commit()
+    try:
+        hid, row, note = await make_handout(
+            http, "deck", "A deck on the three downlink paths and what each carries."
+        )
+    finally:
+        agent.retrieve_k, agent.rerank_top_n = prior_k, prior_n
+        await http.db.commit()
+
+    name = "S29 a starved agent yields no thin deck"
+    if row is None:
+        return [unmeasured(name, f"no terminal handout row: {note}")]
+
+    floor = settings.handout_deck_min_slides
+    meta = await handout_meta(hid)
+    chunks = len(meta.get("chunk_ids") or [])
+    error = row.get("error") or ""
+    detail = (
+        f"agent_budget=1/1 recipe_chunks={chunks or '-'} floor={floor} "
+        f"status={row['status']} error_kind={row.get('error_kind')} "
+        f"err={preview(error, 100)}"
+    )
+
+    if row["status"] == "failed":
+        if any(word in error.lower() for word in MATERIAL_SHAPED):
+            return [Outcome(name, True, f"{detail} -- failed, and said why")]
+        return [unmeasured(
+            name,
+            f"{detail} -- failed for a reason unrelated to material, so the "
+            "property was not exercised",
+        )]
+
+    body_r = await http.client.get(f"{http.base}/{hid}/download")
+    if body_r.status_code != 200:
+        return [unmeasured(name, f"{detail} download={body_r.status_code}")]
+    slides = slide_count(body_r.content)
+    if slides is None:
+        return [Outcome(
+            name, False, f"{detail} -- stored `ready` and does not open at all"
+        )]
+    return [Outcome(name, slides >= floor, f"{detail} slides={slides}")]
+
+
+async def s30_deck_uses_the_recipe_budget(http: Http) -> list[Outcome]:
+    """The deck retrieved at the RECIPE's width, not the agent's. Feature 03, A5.
+
+    **A4 alone is satisfiable by an override that never took effect** -- 03's
+    own acceptance table says so -- so this is the row that measures whether
+    `retrieve_k=40, rerank_top_n=10` actually reached `aretrieve`.
+
+    **HOW IT LOOKS, and what that CANNOT see.** A5 as written asks for "the
+    RETRIEVE trace payload for a deck job". There is no such payload and there
+    cannot be one: `jobs.py` never imports `TraceRecorder`, a recipe handout
+    carries `query_id = NULL` by construction, and `PLAN.md` 3.5 rules a trace
+    for background jobs out of this change set as needing a nullable anchor on
+    `trace_events` plus a new view. So the observation used here is
+    `meta["chunk_ids"]`, which `gather_material` writes from
+    `retrieval.documents` -- the set that actually reached the prompt.
+
+    What it sees: the WIDTH of the material, end to end, through the real job.
+    On this fixture, with the agent owned down to `retrieve_k=1,
+    rerank_top_n=1` and a seven-chunk corpus, the three possibilities separate
+    cleanly:
+
+        both overrides honoured   -> min(40, 7) reranked to min(10, 7) = 7
+        only `top_n` honoured     -> the agent's k=1 caps it at            1
+        neither honoured          ->                                       1
+
+    What it CANNOT see: `retrieve_k` apart from `rerank_top_n` above the corpus
+    size. Forty and eight are indistinguishable against seven chunks, and no
+    fixture this size can tell them apart -- that is a property of the corpus,
+    not a weakness of the observation, and it is why the assertion is written
+    against the corpus count rather than against 40.
+
+    **The `table` control is not decoration.** Without it, seven chunk ids would
+    also be produced by an agent whose starvation never landed -- a write that
+    did not commit, a job reading a cached row. `table` carries `retrieve_k =
+    None`, the identity case, so under the identical agent it must come back at
+    1. One variable between the two POSTs: the recipe.
+
+    **Seen failing before it was believed.** `gather_material` called directly
+    against this fixture at `agent = 1/1`, 2026-08-17, with no model call:
+
+        shipped recipe (40/10)         chunk_ids = 7
+        override REMOVED (None/None)   chunk_ids = 1
+
+    So the assertion below separates the shipped feature from its absence by
+    six chunks, not by a rounding error.
+    """
+    from app.handouts.recipes import RECIPES
+
+    deck = RECIPES["deck"]
+    agent = http.agent
+    corpus = await corpus_chunks(http.db, agent)
+    prior_k, prior_n = agent.retrieve_k, agent.rerank_top_n
+    agent.retrieve_k, agent.rerank_top_n = 1, 1
+    await http.db.commit()
+    try:
+        deck_id, deck_row, deck_note = await make_handout(
+            http, "deck", "A deck on the battery store and the power deficit it covers."
+        )
+        table_id, table_row, table_note = await make_handout(
+            http, "table", "A CSV of each downlink path and its data rate."
+        )
+    finally:
+        agent.retrieve_k, agent.rerank_top_n = prior_k, prior_n
+        await http.db.commit()
+
+    name = "S30 the deck retrieves at the recipe's budget"
+    deck_meta = await handout_meta(deck_id) if deck_id else {}
+    table_meta = await handout_meta(table_id) if table_id else {}
+    deck_chunks = deck_meta.get("chunk_ids")
+    table_chunks = table_meta.get("chunk_ids")
+
+    # `chunk_ids` is written by the SUCCESS path only; `_settle` records just
+    # `error_kind` and `attempts` on a failed row. So a failed job leaves this
+    # question genuinely unanswered rather than answered "zero".
+    if not isinstance(deck_chunks, list) or not isinstance(table_chunks, list):
+        return [unmeasured(
+            name,
+            f"deck={deck_row['status'] if deck_row else deck_note} "
+            f"table={table_row['status'] if table_row else table_note} -- "
+            "`meta[\"chunk_ids\"]` is written on success only, so the widths "
+            "were never recorded",
+        )]
+
+    expected_deck = min(corpus, deck.rerank_top_n or corpus)
+    detail = (
+        f"corpus={corpus} agent_budget=1/1 recipe_budget="
+        f"{deck.retrieve_k}/{deck.rerank_top_n} deck_chunks={len(deck_chunks)} "
+        f"(expected {expected_deck}) table_chunks={len(table_chunks)} "
+        f"(expected 1) rerank_enabled={agent.rerank_enabled}"
+    )
+    ok = (
+        len(deck_chunks) == expected_deck
+        and len(table_chunks) == 1
+        and len(deck_chunks) > len(table_chunks)
+    )
+    return [Outcome(name, ok, detail)]
+
+
+async def s31_failure_kind_reaches_the_api(http: Http) -> list[Outcome]:
+    """A failed handout carries `error` AND `error_kind` on the list route. Feature 04, A8.
+
+    `HandoutOut.error_kind` is not an attribute of `Handout` -- it is lifted out
+    of the `meta` JSONB by a wrap validator -- and `PLAN.md` 3.4 records that
+    the plan very nearly shipped it as a bare field, which would have serialised
+    `None` forever with no error, no warning and valid JSON. `deck_check.py`
+    cannot see that: the defect is in Pydantic serialisation of an ORM row, and
+    only a real failed row fetched through the real route proves the lift
+    happened.
+
+    **The lever is NOT the one feature 04 names, and that is a defect in the
+    criterion rather than a shortcut here.** A8 says to reach the
+    `Material.is_empty` refusal by POSTing against an agent with no corpus. That
+    path raises a bare `ValueError`, and `run_handout_job` records a kind only
+    for `HandoutFailure` -- deliberately, with a comment saying that a job which
+    never reached the sandbox has no kind to record. Measured 2026-08-17 by
+    driving `run_handout_job` into that same branch directly:
+
+        status         failed
+        error          "Unknown recipe 'no-such-recipe'"
+        meta           {}
+        API error_kind None      API attempts None
+
+    So written as specified this scenario would assert a value the shipped code
+    is designed not to write, and would be red forever. A red row that means
+    "the criterion was wrong" teaches its reader to ignore red.
+
+    So the failure is forced through the sandbox instead, by shrinking
+    `sandbox_timeout_s` for the duration -- owned and restored, and process-
+    global for `IMPOSSIBLE_BULLET_LIMIT`'s reason. Both attempts time out, the run
+    raises `HandoutFailure(error_kind="timeout")`, and the assertion is that
+    both strings survive to the panel's own polling endpoint. `chart` rather
+    than `deck` because it is the shortest of the three sandbox programs and
+    this scenario is paying for two generations it intends to throw away.
+    """
+    prior = settings.sandbox_timeout_s
+    settings.sandbox_timeout_s = S31_TIMEOUT_S
+    try:
+        _hid, row, note = await make_handout(
+            http, "chart", "A bar chart of the three downlink data rates."
+        )
+    finally:
+        settings.sandbox_timeout_s = prior
+
+    name = "S31 a failed handout carries error and error_kind"
+    if row is None:
+        return [unmeasured(name, f"no terminal handout row: {note}")]
+
+    error = row.get("error") or ""
+    kind = row.get("error_kind")
+    detail = (
+        f"timeout={S31_TIMEOUT_S}s status={row['status']} error_kind={kind} "
+        f"attempts={row.get('attempts')} err={preview(error, 100)}"
+    )
+    if row["status"] != "failed":
+        return [unmeasured(
+            name,
+            f"{detail} -- the run succeeded inside {S31_TIMEOUT_S}s, so no "
+            "failure was produced to describe",
+        )]
+
+    known = SANDBOX_ERROR_KINDS | {ARTEFACT_ERROR_KIND}
+    ok = bool(error.strip()) and isinstance(kind, str) and kind in known
+    if ok and kind != "timeout":
+        # Still a pass -- both fields arrived, which is what A8 asks -- but the
+        # lever missed, and a reader should see that rather than infer it.
+        detail = f"{detail} <- expected `timeout`; the lever hit a different failure"
+    return [Outcome(name, ok, detail)]
+
+
+HTTP_SCENARIOS = [
+    s8_recipes,
+    s11_list_does_not_load_bytea,
+    s17_generation_model_switchable,
+    s12_quota_refuses,
+    # The four owed by change set 12. Appended rather than interleaved, so a
+    # default run prints the first four in the order it always has.
+    #
+    # S28 before S29/S30 for the S16-before-S15 reason: it is the one that says
+    # whether the validator is reached at all, and a red S28 explains a thin
+    # deck under S29 without anyone re-deriving a retrieval budget.
+    s28_invalid_deck_fails_the_job,
+    s29_deck_survives_a_starved_agent,
+    s30_deck_uses_the_recipe_budget,
+    s31_failure_kind_reaches_the_api,
+]
+
+
+async def http_scenarios(db, agent: Agent, user: User, only: str | None) -> list[Outcome]:
+    """Run the selected handout-route scenarios through an ASGI transport.
 
     `current_user` is overridden; `owned_agent` is NOT. That split is deliberate:
     the identity assertion is the only thing a script cannot perform (it needs a
     human at a Google consent screen), while the ownership hop is exactly the
     thing worth testing, so it runs for real against the database.
+
+    Returns `[]` without starting the app when `--only` selects none of them, so
+    a targeted run of a chat scenario pays nothing for this block.
     """
+    selected = [fn for fn in HTTP_SCENARIOS if not only or only in fn.__name__]
+    if not selected:
+        return []
+
     import httpx
 
     from app.auth.deps import current_user
     from app.db.session import SessionLocal as SL
     from app.main import app
 
+    user_id = user.id
+
     async def _fake_user():
-        async with SL() as db:
-            return await db.get(User, user_id)
+        async with SL() as db_:
+            return await db_.get(User, user_id)
 
     app.dependency_overrides[current_user] = _fake_user
     outcomes: list[Outcome] = []
-    base = f"/api/agents/{agent_id}/handouts"
 
+    rule("Handout routes")
     try:
         transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-            # S8 -- the four recipes
-            created: dict[str, str] = {}
-            for recipe, brief in (
-                ("sheet", "A one-page study sheet on the power subsystem."),
-                ("chart", "A bar chart of the power allocation by subsystem."),
-                ("table", "A CSV of each subsystem and its power allocation in kW."),
-                ("deck", "A short deck on the three downlink paths."),
-            ):
-                r = await client.post(base, json={"recipe": recipe, "brief": brief})
-                if r.status_code == 202:
-                    created[recipe] = r.json()["id"]
-                else:
-                    outcomes.append(Outcome(
-                        f"S8 recipe {recipe}", False,
-                        f"POST returned {r.status_code}: {preview(r.text, 200)}",
-                    ))
-
-            # Poll. Recipes are LLM calls plus a subprocess; sheet is fastest.
-            deadline = time.monotonic() + 240
-            final: dict[str, dict] = {}
-            while created and time.monotonic() < deadline:
-                await asyncio.sleep(4)
-                r = await client.get(base, params={"limit": 100})
-                if r.status_code != 200:
-                    break
-                rows = {row["id"]: row for row in r.json()}
-                for recipe, hid in list(created.items()):
-                    row = rows.get(hid)
-                    if row and row["status"] in ("ready", "failed"):
-                        final[recipe] = row
-                        created.pop(recipe)
-
-            for recipe in ("sheet", "chart", "table", "deck"):
-                row = final.get(recipe)
-                if row is None:
-                    outcomes.append(Outcome(f"S8 recipe {recipe}", False, "did not finish in 240 s"))
-                    continue
-                ok = row["status"] == "ready" and row["byte_size"] > 0
-                outcomes.append(Outcome(
-                    f"S8 recipe {recipe}", ok,
-                    f"status={row['status']} bytes={row['byte_size']} "
-                    f"mime={row['mime_type']} err={preview(row.get('error') or '-', 90)}",
-                ))
-
-            # Download, including the header-safety check.
-            ready = [r for r in final.values() if r["status"] == "ready"]
-            if ready:
-                hid = ready[0]["id"]
-                r = await client.get(f"{base}/{hid}/download")
-                disp = r.headers.get("content-disposition", "")
-                safe = "\n" not in disp and "\r" not in disp and '"' in disp
-                outcomes.append(Outcome(
-                    "S8b download + safe filename",
-                    r.status_code == 200 and len(r.content) > 0 and safe,
-                    f"status={r.status_code} bytes={len(r.content)} disp={ascii_safe(disp)}",
-                ))
-
-            # S11 -- listing must never select the bytea column.
-            import logging
-
-            statements: list[str] = []
-
-            class _Capture(logging.Handler):
-                def emit(self, record):
-                    statements.append(record.getMessage())
-
-            sql_log = logging.getLogger("sqlalchemy.engine.Engine")
-            handler = _Capture()
-            prior_level = sql_log.level
-            sql_log.addHandler(handler)
-            sql_log.setLevel(logging.INFO)
-            try:
-                await client.get(base, params={"limit": 100})
-            finally:
-                sql_log.removeHandler(handler)
-                sql_log.setLevel(prior_level)
-
-            leaked = [s for s in statements if "handouts.content" in s]
-            outcomes.append(Outcome(
-                "S11 list does not load bytea", not leaked,
-                f"statements={len(statements)} leaked={len(leaked)}",
-            ))
-
-            # S17 -- the model is switchable through the API, and a typo is not.
-            #
-            # S13 proves that CHANGING the model changes behaviour, but it writes
-            # the column directly, which was the only way to set it until
-            # 2026-08-16. This asserts the route: the field round-trips, null
-            # clears it, and a bare id is refused HERE rather than 404ing on every
-            # answer the agent later gives.
-            #
-            # The refusal is the half worth having. Accepting `"gemma-4-31b-it"`
-            # is easy and stores a value that makes the agent fail with
-            # `404 No endpoints found...`, which CLAUDE.md records as reading like
-            # an outage -- so the user changed a setting and the agent broke, with
-            # nothing connecting the two.
-            agent_url = f"/api/agents/{agent_id}"
-            prior_model = (await client.get(agent_url)).json().get("generation_model")
-            try:
-                set_r = await client.patch(
-                    agent_url, json={"generation_model": "google/gemma-4-31b-it"}
-                )
-                bad_r = await client.patch(
-                    agent_url, json={"generation_model": "gemma-4-31b-it-typo"}
-                )
-                after_bad = (await client.get(agent_url)).json().get("generation_model")
-                clear_r = await client.patch(agent_url, json={"generation_model": None})
-                cleared = (await client.get(agent_url)).json().get("generation_model")
-                ok = (
-                    set_r.status_code == 200
-                    and set_r.json().get("generation_model") == "google/gemma-4-31b-it"
-                    and bad_r.status_code == 422
-                    # The rejected write must not have landed.
-                    and after_bad == "google/gemma-4-31b-it"
-                    and clear_r.status_code == 200
-                    and cleared is None
-                )
-                outcomes.append(Outcome(
-                    "S17 generation_model is switchable, typos are not", ok,
-                    f"set={set_r.status_code} bad={bad_r.status_code} "
-                    f"after_bad={after_bad!r} cleared={cleared!r}",
-                ))
-            finally:
-                await client.patch(agent_url, json={"generation_model": prior_model})
-
-            # S12 -- quota refuses rather than evicting.
-            async with SL() as db:
-                before = len((await db.scalars(
-                    select(Handout).where(Handout.agent_id == agent_id)
-                )).all())
-            original = settings.handout_max_per_agent
-            settings.handout_max_per_agent = max(1, before)
-            try:
-                r = await client.post(base, json={"recipe": "sheet", "brief": "over quota"})
-                async with SL() as db:
-                    after = len((await db.scalars(
-                        select(Handout).where(Handout.agent_id == agent_id)
-                    )).all())
-                outcomes.append(Outcome(
-                    "S12 quota refuses, evicts nothing",
-                    r.status_code == 409 and after == before,
-                    f"status={r.status_code} before={before} after={after}",
-                ))
-            finally:
-                settings.handout_max_per_agent = original
-
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://test", timeout=900
+        ) as client:
+            http = Http(
+                client=client,
+                base=f"/api/agents/{agent.id}/handouts",
+                agent_url=f"/api/agents/{agent.id}",
+                db=db,
+                agent=agent,
+                user=user,
+            )
+            for fn in selected:
+                started = time.perf_counter()
+                try:
+                    produced = await fn(http)
+                except Exception as exc:  # one scenario must never abort the block
+                    text = f"{type(exc).__name__}: {str(exc)[:300]}"
+                    produced = [Outcome(
+                        fn.__name__, False, ascii_safe(text)[:220],
+                        rate_limited=is_rate_limited(text),
+                    )]
+                took = time.perf_counter() - started
+                # The elapsed time is on the LAST row of the group, because it
+                # is the group that was timed: `s8_recipes` makes four handouts
+                # and stamping the same number on each would read as four jobs
+                # of that length.
+                for index, outcome in enumerate(produced, start=1):
+                    record(
+                        outcome, outcomes,
+                        took if index == len(produced) else None,
+                    )
     finally:
         app.dependency_overrides.pop(current_user, None)
 
@@ -1791,6 +2868,12 @@ SCENARIOS = [
     s25_no_self_check_on_a_socratic_turn,
     s26_critic_exempts_pedagogy,
     s27_budget_exhaustion_still_answers,
+    # S32-S33, the tool path's half of change set 12. S33 first, for the
+    # S16-before-S15 reason: it is the regression twin and it costs one plain
+    # turn, so a red S33 means the classic path moved and explains S32 without
+    # anyone reading a sandbox trace.
+    s33_tools_off_makes_no_handout,
+    s32_tool_deck_is_rejected,
 ]
 
 
@@ -1813,11 +2896,11 @@ async def run_scenarios(db, only: str | None) -> list[Outcome]:
     print(f"  namespace    : {agent.namespace}  ({doc_count} documents)")
 
     outcomes: list[Outcome] = []
-    rule("Scenarios")
-    for fn in SCENARIOS:
+    selected = [fn for fn in SCENARIOS if not only or only in fn.__name__]
+    if selected:
+        rule("Scenarios")
+    for fn in selected:
         name = fn.__name__
-        if only and only not in name:
-            continue
         started = time.perf_counter()
         try:
             outcome = await fn(db, agent, user)
@@ -1826,21 +2909,20 @@ async def run_scenarios(db, only: str | None) -> list[Outcome]:
             outcome = Outcome(
                 name, False, ascii_safe(text)[:220], rate_limited=is_rate_limited(text)
             )
-        if not outcome.ok and is_rate_limited(outcome.detail):
-            outcome.rate_limited = True
-        took = time.perf_counter() - started
-        print(f"  {_flag(outcome)} {outcome.name}  ({took:.1f}s)")
-        print(f"         {ascii_safe(outcome.detail)}")
-        outcomes.append(outcome)
+        record(outcome, outcomes, time.perf_counter() - started)
 
-    if not only:
-        rule("Handout routes")
-        for outcome in await http_scenarios(agent.id, user.id):
-            if not outcome.ok and is_rate_limited(outcome.detail):
-                outcome.rate_limited = True
-            print(f"  {_flag(outcome)} {outcome.name}")
-            print(f"         {ascii_safe(outcome.detail)}")
-            outcomes.append(outcome)
+    # **NOT gated on `if not only` any more, and that gate is why five handout
+    # criteria kept not being executed.** `--only` could never reach this block,
+    # so every assertion about a real handout job was all-or-nothing with the
+    # twenty-minute suite -- and a check that is expensive to run is a check
+    # that does not get run. `http_scenarios` applies the same substring match
+    # to its own function names and returns `[]` without starting the app when
+    # none of them is selected, so a targeted chat run costs exactly what it did
+    # before and a default run is unchanged.
+    outcomes.extend(await http_scenarios(db, agent, user, only))
+
+    if only and not outcomes:
+        print(f"\n  --only {only!r} matched no scenario.")
 
     return outcomes
 
@@ -1856,10 +2938,28 @@ async def main_async(args) -> int:
             outcomes = await run_scenarios(db, args.only)
 
         rule("Summary")
-        failed = [o for o in outcomes if not o.ok]
+        failed = [o for o in outcomes if _is_failure(o)]
+        rated = [o for o in outcomes if o.rate_limited and not o.ok]
+        unrun = [o for o in outcomes if o.unmeasured]
+        passed = [o for o in outcomes if o.ok]
         for o in outcomes:
-            print(f"  {'[ok]  ' if o.ok else '[FAIL]'} {o.name}")
-        print(f"\n  {len(outcomes) - len(failed)} / {len(outcomes)} passed")
+            # `_flag`, not a second copy of it. The summary used to spell the
+            # two-state version out inline, so a `[rate]` row printed as [FAIL]
+            # here after printing as [rate] above -- the one line a reader
+            # actually screenshots disagreed with the run.
+            print(f"  {_flag(o)} {o.name}")
+        print(f"\n  {len(passed)} / {len(outcomes)} passed")
+
+        # Printed even on a green run, and that is the whole point: an unmeasured
+        # check is invisible precisely when everything looks fine.
+        if unrun:
+            print(f"\n  {len(unrun)} NOT MEASURED -- treat as unknown, never as passing:")
+            for o in unrun:
+                print(f"    [warn] {o.name}  {o.detail}")
+        if rated:
+            print(f"\n  {len(rated)} refused upstream -- re-run in a minute:")
+            for o in rated:
+                print(f"    [rate] {o.name}  {o.detail}")
         return 1 if failed else 0
     finally:
         await engine.dispose()
@@ -1874,7 +2974,15 @@ def main() -> int:
         help="Run the scenarios (the default when no other mode is given)",
     )
     p.add_argument("--cleanup", action="store_true", help="Delete namespace, agent and rows")
-    p.add_argument("--only", default=None, help="Substring match on a scenario function name")
+    p.add_argument(
+        "--only",
+        default=None,
+        help=(
+            "Substring match on a scenario function name, INCLUDING the handout"
+            " routes (e.g. --only s28, --only s8_recipes). Match on the trailing"
+            " underscore -- `s3_` -- to separate S3 from S30-S33."
+        ),
+    )
     args = p.parse_args()
     return asyncio.run(main_async(args))
 

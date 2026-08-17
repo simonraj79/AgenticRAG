@@ -312,6 +312,28 @@ export type Handout = {
   /** Why a "failed" row failed. Without it a failure is a red card with no way
    *  to find out what went wrong short of reading the server log. */
   error: string | null;
+  /**
+   * WHAT KIND of failure that was: "import" | "syntax" | "timeout" | "runtime"
+   * | "output" | "invalid". Lifted out of `handouts.meta` by the API, never a
+   * column of its own.
+   *
+   * A plain `string`, for the reason `kind`, `status` and `origin` above are:
+   * the set grows -- "invalid" is newer than the other five -- and a union here
+   * would make this file the thing that breaks when the backend classifies
+   * something new.
+   *
+   * **Null on every row written before this existed, and on plenty written
+   * after.** The sandbox only classifies the failures it produces; a job that
+   * died before reaching it records prose and nothing else. So this is a
+   * refinement of `error`, never a replacement for it, and a read site that
+   * renders one without the other has lost information rather than gained it.
+   */
+  error_kind: string | null;
+  /** How many generation attempts the job spent: 1, or 2 when the retry
+   *  rescued it. Null on a row that never recorded it. "It worked first time"
+   *  and "it worked after reading its own traceback" are different facts about
+   *  the model, and `source_code` alone makes them look the same. */
+  attempts: number | null;
   /** The thread this was made in or from, null for a handout made from the
    *  panel with no conversation open. Deleting the conversation CASCADEs, so a
    *  handout listed under a thread does not outlive it. */

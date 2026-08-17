@@ -1319,6 +1319,47 @@ no CHECK, no migration — and it means none of the three is queryable in aggreg
 question anyone asks of this feature ("which specialist does this agent actually get routed
 to?") needs a JSONB scan or a column.
 
+### Opened 2026-08-17 by the robust-handouts build
+
+Full record in
+[new features/12-robust-handouts/PLAN.md](new%20features/12-robust-handouts/PLAN.md), whose §8
+carries the measurements.
+
+**33. The handout brief never goes through the question rewriter.** `gather_material` calls
+`aretrieve` directly, so `contextualize_question` — which `REWRITE_EVERY_TURN=true` exists to run
+on every turn precisely because typos and shorthand reaching the embedder unrepaired degrade
+retrieval — is never reached from the handout path. Wiring it is a few lines. **A brief is not a
+question**, the rewriter's prompt is measured on questions, and its failure mode is silent
+(`contextualize_question` swallows every exception and degrades to Stage 1). So it needs its own
+measurement before it needs code.
+
+**34. A hung handout job leaves a row at `pending` forever.** `_settle` runs in the job's own
+`finally`, so a crash, a cancellation and an early return all reach it; a job that never returns
+does not, and there is no sweeper. Reproduced accidentally on 2026-08-17 — a wedged deck
+generation sat at `pending` for 26 minutes until the process was killed. The user can delete the
+row, which is the only escape hatch. A sweeper needs a "started_at" notion the table does not
+have; `created_at` is enqueue time.
+
+**35. The deck outline does not reach the tool door.** `api/ask.py` never sets `preview_text`
+when persisting a `run_python` artefact, so a deck asked for **in chat** has no preview while the
+same deck made from the panel button does. Feature 06 closed the validation half of that
+asymmetry and this half was not in its scope. It is the third time this door has needed the same
+thing separately, which is itself the finding.
+
+**36. Nothing measures whether a WIDER retrieval budget makes a BETTER deck, only a more
+grounded-looking one.** Feature 03 is justified on citation density (52.9% → 75.1% pooled, and
+two-in-five catastrophically ungrounded decks going to zero), which is a proxy: a citation can be
+present and wrong. The honest measure is faithfulness against a golden set, and open item 20
+records faithfulness scoring a teaching persona's own pedagogy as unsupported — so the instrument
+needs choosing before the measurement, exactly as in item 30.
+
+**37. The true bullet-overflow point of a slide is unmeasured and unmeasurable here.**
+`handout_deck_max_bullet_chars = 400` bounds the model's *observed* behaviour (max seen 235), not
+the geometry. Knowing where text actually overflows a placeholder means rendering the deck, which
+needs LibreOffice or a font stack the sandbox deliberately lacks — and `fit_text`, the obvious
+shortcut, raises `OSError` on Linux. So the threshold must be re-read whenever the retrieval
+budget moves, because that is what moves bullet length.
+
 ---
 
 ## 11. Out of scope

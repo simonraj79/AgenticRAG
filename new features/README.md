@@ -1,6 +1,7 @@
 # new features
 
-Planning documents for one change set: **agentic tools + Handouts**.
+Planning documents for two change sets: **agentic tools + Handouts** (`00`–`11`, flat, shipped)
+and **[12 — robust handouts](12-robust-handouts/PLAN.md)** (a folder, **planned, not yet built**).
 
 > **[09-deepseek-agentic.md](09-deepseek-agentic.md) is the one to read next after
 > [loop.md](loop.md).** It is the first change here that made loop.md *wrong* rather
@@ -28,9 +29,15 @@ Planning documents for one change set: **agentic tools + Handouts**.
 > **A feature can pass its own harness and still be the wrong thing to ship** — §5.2
 > is that record, and §6.1 keeps the version worth building instead.
 
-**Four documents here are living; every numbered one records a change that has shipped.**
+**Four documents here are living; every numbered one records a change.**
 That distinction is the only thing letting a reader tell instruction from archive, so it is
 carried in the filename: **un-numbered means living.**
+
+**A numbered entry that has not shipped yet says so in the table, and nowhere else.** `00`–`11`
+have all shipped; `12-robust-handouts/` is a plan in flight. The convention used to read
+"numbered means shipped", which had no way to describe a change set between decompose and ship —
+[build.md §4](build.md) numbers the folder when it is created, not when it lands. The status
+column is the fix.
 
 They are two pairs, one nested inside the other. Each pair is a pattern plus the prompt that
 opens a session following it — the pattern says what to get right, the prompt gets those
@@ -67,24 +74,25 @@ criteria were written in prose and never executed. 07 replaces the layout and ad
 harness. Read 05 for the tap-target and overflow reasoning, which still stands; read 07 for
 the shape of the screen.
 
-| Document | What it covers |
-|---|---|
-| **[build.md](build.md)** | **The outer loop — living reference, START HERE for any new feature bigger than one prompt.** Audit before planning, shared contracts in one plan file, one feature file per feature with criteria that name a harness case, harness-first, verify low to high, then read one answer by eye |
-| **[build-prompt.md](build-prompt.md)** | **How to open each of its six sessions** — one prompt per phase, a worked example on PRD open item 18, and when not to use it |
-| **[loop.md](loop.md)** | **The agent loop as a reusable pattern — living reference, read before adding a tool** |
-| **[loop-prompt.md](loop-prompt.md)** | **How to open a session that follows it — prompt structure, worked example, and when not to use it** |
-| [00-IMPLEMENTATION-PLAN.md](00-IMPLEMENTATION-PLAN.md) | Audit, contracts, sequencing, risks, definition of done |
-| [01-agentic-tool-loop.md](01-agentic-tool-loop.md) | The bounded loop, `ContextLedger`, trace events, termination |
-| [02-code-interpreter.md](02-code-interpreter.md) | `run_python`, the sandbox, and **what it does not protect against** |
-| [03-corpus-search-tool.md](03-corpus-search-tool.md) | `search_corpus`, and why it supersedes PRD open item 7 |
-| [04-handouts-panel.md](04-handouts-panel.md) | The `handouts` table, four recipes, the job, the routes, the panel |
-| [05-ui-ux-overhaul.md](05-ui-ux-overhaul.md) | Five real layout and tap-target defects, with file:line |
-| [06-test-plan.md](06-test-plan.md) | Three test layers and the iteration protocol between them |
-| [07-workspace-shell.md](07-workspace-shell.md) | The workspace shell, the editable settings sheet, and the de-NotebookLM pass — plus `scripts/ui_check.py`, which finally executes 05's acceptance criteria |
-| [08-streaming-and-followups.md](08-streaming-and-followups.md) | SSE streaming, and the two defects that came from how the work was divided rather than how it was written — including why an unadvertised parameter sometimes 404s and sometimes does not |
-| **[09-deepseek-agentic.md](09-deepseek-agentic.md)** | The move to `deepseek/deepseek-v4-flash-0731` — **the change that inverted [loop.md](loop.md) T1**, why turning reasoning off is only safe because a Gemma-era paragraph survives, and the two new layer-1 harnesses |
-| **[11-orchestrator-and-self-check.md](11-orchestrator-and-self-check.md)** | The `adaptive-tutor` template, `@mentions`, and self-evaluation — **the first change here that applies [loop.md](loop.md) by NOT building three of the four mechanisms as tools.** Also the pattern audit: three of the five catalogue patterns already shipped, source routing is architecturally closed and building it would undo a security property, and the honest weighting that says this system's measured errors are generation-side rather than retrieval-side |
-| **[10-routing-and-embeddings.md](10-routing-and-embeddings.md)** | Embeddings move to OpenRouter with **no re-ingest** (same model, same space, cosine 1.000000) and the four kwargs that are each a different 400; the golden set moves to a third vendor for judge independence; the DeepSeek provider pin recorded as a **NO_GO with evidence**; and the rewriter losing its trigger — including the acronym bullet that **fabricated**, was fixed into a conditional that measured 5/5, and was **removed anyway**, with the grounded version deferred rather than guessed at |
+| Document | Status | What it covers |
+|---|---|---|
+| **[build.md](build.md)** | living | **The outer loop — living reference, START HERE for any new feature bigger than one prompt.** Audit before planning, shared contracts in one plan file, one feature file per feature with criteria that name a harness case, harness-first, verify low to high, then read one answer by eye |
+| **[build-prompt.md](build-prompt.md)** | living | **How to open each of its six sessions** — one prompt per phase, a worked example on PRD open item 18, and when not to use it |
+| **[loop.md](loop.md)** | living | **The agent loop as a reusable pattern — living reference, read before adding a tool** |
+| **[loop-prompt.md](loop-prompt.md)** | living | **How to open a session that follows it — prompt structure, worked example, and when not to use it** |
+| [00-IMPLEMENTATION-PLAN.md](00-IMPLEMENTATION-PLAN.md) | shipped | Audit, contracts, sequencing, risks, definition of done |
+| [01-agentic-tool-loop.md](01-agentic-tool-loop.md) | shipped | The bounded loop, `ContextLedger`, trace events, termination |
+| [02-code-interpreter.md](02-code-interpreter.md) | shipped | `run_python`, the sandbox, and **what it does not protect against** |
+| [03-corpus-search-tool.md](03-corpus-search-tool.md) | shipped | `search_corpus`, and why it supersedes PRD open item 7 |
+| [04-handouts-panel.md](04-handouts-panel.md) | shipped | The `handouts` table, four recipes, the job, the routes, the panel |
+| [05-ui-ux-overhaul.md](05-ui-ux-overhaul.md) | shipped | Five real layout and tap-target defects, with file:line |
+| [06-test-plan.md](06-test-plan.md) | shipped | Three test layers and the iteration protocol between them |
+| [07-workspace-shell.md](07-workspace-shell.md) | shipped | The workspace shell, the editable settings sheet, and the de-NotebookLM pass — plus `scripts/ui_check.py`, which finally executes 05's acceptance criteria |
+| [08-streaming-and-followups.md](08-streaming-and-followups.md) | shipped | SSE streaming, and the two defects that came from how the work was divided rather than how it was written — including why an unadvertised parameter sometimes 404s and sometimes does not |
+| **[09-deepseek-agentic.md](09-deepseek-agentic.md)** | shipped | The move to `deepseek/deepseek-v4-flash-0731` — **the change that inverted [loop.md](loop.md) T1**, why turning reasoning off is only safe because a Gemma-era paragraph survives, and the two new layer-1 harnesses |
+| **[11-orchestrator-and-self-check.md](11-orchestrator-and-self-check.md)** | shipped | The `adaptive-tutor` template, `@mentions`, and self-evaluation — **the first change here that applies [loop.md](loop.md) by NOT building three of the four mechanisms as tools.** Also the pattern audit: three of the five catalogue patterns already shipped, source routing is architecturally closed and building it would undo a security property, and the honest weighting that says this system's measured errors are generation-side rather than retrieval-side |
+| **[10-routing-and-embeddings.md](10-routing-and-embeddings.md)** | shipped | Embeddings move to OpenRouter with **no re-ingest** (same model, same space, cosine 1.000000) and the four kwargs that are each a different 400; the golden set moves to a third vendor for judge independence; the DeepSeek provider pin recorded as a **NO_GO with evidence**; and the rewriter losing its trigger — including the acronym bullet that **fabricated**, was fixed into a conditional that measured 5/5, and was **removed anyway**, with the grounded version deferred rather than guessed at |
+| **[12-robust-handouts/](12-robust-handouts/PLAN.md)** | **planned** | **The first change set to use [build.md](build.md) as a procedure rather than produce it.** Nothing between the model's `prs.save()` and a downloadable handout ever opens the bytes — measured, a zero-slide deck is 27,387 bytes and 28 bytes of `PK` junk is a `ready` handout, and both pass every assertion in the repository. The fix is a **third branch** on a retry trigger that is already [loop.md](loop.md) T2-correct, plus the three defects the audit turned up beside it: a deck written from **three chunks**, `stderr` on a successful run that nobody has ever seen, and truncation that retries at the same cap. Its audit deleted more than its plan adds, and **two of its acceptance criteria already existed in prose and had never been executed** |
 
 ---
 
