@@ -130,6 +130,7 @@ cd backend
 ./.venv/Scripts/python.exe ../scripts/route_specialist_check.py # mentions, routing, self-check
 ./.venv/Scripts/python.exe ../scripts/llm_check.py              # OpenRouter request body
 ./.venv/Scripts/python.exe ../scripts/sandbox_check.py          # code-interpreter sandbox
+./.venv/Scripts/python.exe ../scripts/deck_check.py             # handout pure functions, and what a .pptx IS
 ```
 
 The agent loop, tools, routing and handouts end to end — needs a database and burns provider

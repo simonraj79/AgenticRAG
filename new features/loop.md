@@ -153,12 +153,21 @@ different parts of the build:
 |---|---|---|---|
 | Agent loop | `detect_refusal` — did the turn decline? | The turn that answered *half* and gave up on the rest. Not a refusal, and precisely the turn that needed a search. | `detect_gap` — any admission of a gap, anywhere in the text |
 | Handout retry | `SandboxResult.ok` — did the code crash? | Code that computes the chart correctly and forgets `savefig`. Exit 0, no file. Among the *most* recoverable failures there is. | "the expected artefact is absent" |
+| **Handout retry, AGAIN** ([12](12-robust-handouts/PLAN.md)) | "is the expected artefact absent?" — the row above, i.e. T2's own previous answer | A `.pptx` that is **present** and has zero slides: 27,387 bytes, starts `PK`, opens fine, teaches nothing. Also 28 bytes of junk. Both stored `ready` and passed every assertion in the repo. | "does the file open, and is the thing inside it?" |
 | **Layout** ([07](07-workspace-shell.md)) | console errors, failed requests, horizontal overflow — did the page break? | The agent header growing past the viewport, so `calc(100dvh - top)` went negative and the chat pane collapsed to **24px with 0px of thread**. Rendered perfectly. Threw nothing. | "is the thread taller than zero?" |
 | **Forced upload** ([08](08-streaming-and-followups.md)) | the POST returned **202** and nothing raised | `force` was dropped at the background handoff, so the job re-deduplicated the upload and wrote `failed` a minute later — telling the user to do the thing they had just done | "is there a second copy in the corpus?" |
 
-In all three the error-shaped test **passed while the thing we wanted had not happened**.
+In all of them the error-shaped test **passed while the thing we wanted had not happened**.
 That is the failure mode to design against, and the question to ask is always *"did the goal
 occur?"* rather than *"did an error occur?"*.
+
+**T2 is a LADDER, not a single step, and row 5 is row 2 catching up with itself.** The handout
+retry appears twice on purpose. Its first fix — trigger on the artefact being absent rather than
+on a crash — was correct, shipped, and is still the right trigger. It was also still an
+error-shaped test one level up: *absent* is a proxy for *not the thing I wanted*, and a file can
+be present and worthless. **Every answer to "did the goal occur?" is itself a proxy for a goal
+one level further out**, so the question is worth re-asking of a check that already passes it.
+The tell is that the assertion talks about the artefact's *existence* rather than its *contents*.
 
 **And note where the third one came from.** Feature 07 is not a model-decided feature at all —
 no tool, no retry, no detector; every branch is code reading a viewport width. It was written

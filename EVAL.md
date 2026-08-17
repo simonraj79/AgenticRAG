@@ -94,6 +94,39 @@ Two things about this table are load-bearing:
   than scored against an empty string, and come back `None` meaning *not measured*. This is
   why `golden_questions.reference_answer` is not decorative.
 
+### 3.1 Handouts are OUTSIDE the scorecard, deliberately
+
+A scorecard says nothing about charts, decks, tables or study sheets. It is worth saying so
+here, because this document otherwise reads as "how good is this agent" and a reader would
+reasonably assume the panel's output is included in that.
+
+**Nothing here scores an artefact.** All four metrics read a question, an answer, the retrieved
+contexts and a reference; a handout has none of those shapes. A deck is not an answer, its
+"contexts" are the same chunks with no marker ledger, and there is no reference deck to compare
+against. Inventing a faithfulness-shaped score for a `.pptx` would be a new instrument of unknown
+validity — the same objection PRD open item 23 raises against scoring tool *choice*.
+
+**What DOES check handouts, and at which layer:**
+
+| Question | Where it is answered |
+|---|---|
+| Does the deck open, have slides, carry titles, keep bullets sane? | `scripts/deck_check.py` — layer 1, no DB, no model |
+| Does a live job actually produce one, and fail when it should? | `scripts/agentic_check.py` S8, S8c, S28–S33 |
+| How often is it right first time, and how grounded is it? | `scripts/deck_rate_check.py` — a MEASUREMENT, not a gate |
+
+**The one number that behaves like an eval metric is citation density**, and it is a proxy rather
+than a measure: `DECK_PROMPT` asks for a `[filename]` on each bullet, so the share of bullets
+carrying one is computable from the bytes with no judge. Measured 2026-08-17, and it moved a real
+decision — at `rerank_top_n=2` it is 52.9% pooled with **two decks in five under 50%**; at 10 it
+is 75.1% with none. A citation can still be present and wrong, so read it as "did the model have
+material to cite" and never as "is this deck correct". PRD open item 36 records what a real
+measure would take.
+
+**If handout quality is ever brought into an eval run, do not reach for faithfulness first.**
+Open item 20 already records faithfulness scoring a teaching persona's analogies and
+comprehension checks as unsupported claims, and then recommending the pedagogy's removal. A deck
+built by the same personas would be scored the same way, for the same wrong reason.
+
 ---
 
 ## 4. Settings

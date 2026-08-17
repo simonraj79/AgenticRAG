@@ -677,7 +677,39 @@ Worth keeping, because both were written confidently and both are wrong in ways 
   working lever is `handout_deck_max_bullet_chars = 0` — un-satisfiable by construction, and it
   makes the retry **shorter**.
 
-### 8.9 Still to fill in
+### 8.9 The full suite, run end to end — 2026-08-17
+
+`--setup` (corpus already ingested, no-op) → `--run` → **`--cleanup`**, the last of which is not
+optional: it deleted the Pinecone namespace first, and the Builder plan's 1,000-namespace cap
+**is** the maximum number of agents this deployment can hold.
+
+```
+  37 / 38 passed
+  1 NOT MEASURED -- treat as unknown, never as passing:
+    [warn] S5 tool failure is recoverable  calls=1 errors=0 answered=True
+           -- no tool error was provoked, so recovery was not exercised
+```
+
+**Zero failures. Zero `[rate]` rows.** Every feature in this change set confirmed on a live turn:
+
+| Scenario | What it proved |
+|---|---|
+| **S28** | an invalid deck ends `failed` with `error_kind=invalid` — feature 02's validator is reached in production, which nine layer-1 cases could not establish |
+| **S30** | `deck_chunks=7 (expected 7)` against `table_chunks=1 (expected 1)` — feature 03's per-recipe budget landed, with the untouched recipe as the control |
+| **S31** | `error_kind=timeout attempts=2` — feature 04 carrying the kind to the API |
+| **S8c** | the stored `preview_text` names the deck's real slide count — feature 05 |
+| **S32** | an invalid chat deck is rejected and **not persisted** — feature 06 |
+
+**The `[warn]` is the machinery working, and it is a finding.** S5's assertion was
+`bool(out.answer) and (len(errors) == 0 or len(calls) > len(errors))`; with no tool error
+provoked, the disjunction short-circuits and the whole check collapses to "did a turn come
+back". It would have printed green on this very run. Feature 01's three-state reporting turned
+that into `[warn] NOT MEASURED`, excluded from the exit code — so **S5 has plausibly been passing
+vacuously for some time**, in the scenario whose own docstring calls self-correction "the single
+most valuable behaviour a code interpreter has". Making it *reliably* provoke a tool error is
+owed work, not a defect in this change set.
+
+### 8.10 Still to fill in
 
 
 
