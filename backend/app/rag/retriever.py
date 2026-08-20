@@ -48,6 +48,31 @@ META_CHUNK_INDEX = "chunk_index"
 RERANK_SCORE_KEY = "relevance_score"
 
 
+def _metered(embeddings: Embeddings, *, model: str) -> Embeddings:
+    """Attach spend metering, or return the embedder untouched.
+
+    Kept beside the factory rather than inside `app/metering/` because the same
+    rule applies here as to the retriever itself: this is the ONE place an
+    embedder is constructed, so it is the one place metering can be attached
+    without a caller being able to forget.
+
+    Imports are local so that `metering_enabled=false` costs nothing and so the
+    metering package never becomes a hard dependency of retrieval -- the
+    embedder must construct on a machine where metering is off.
+    """
+    if not settings.metering_enabled:
+        return embeddings
+    from app.metering.embeddings import meter_embeddings
+    from app.metering.meter import LoggingSink
+
+    return meter_embeddings(
+        embeddings,
+        model=model,
+        sink=LoggingSink(),
+        strict=settings.metering_strict,
+    )
+
+
 @lru_cache(maxsize=1)
 def get_embeddings() -> Embeddings:
     """The embedding model. One instance, shared. Two roads to one space.
@@ -115,24 +140,27 @@ def get_embeddings() -> Embeddings:
     that a re-added step is caught rather than absorbed.
     """
     if settings.embedding_route == "openrouter":
-        return OpenAIEmbeddings(
+        return _metered(
+            OpenAIEmbeddings(
+                model=settings.openrouter_embedding_model,
+                base_url=settings.openrouter_base_url,
+                api_key=settings.openrouter_api_key,
+                dimensions=settings.embedding_dimension,
+                check_embedding_ctx_length=False,
+                chunk_size=settings.embedding_batch_size,
+                model_kwargs={"encoding_format": "float"},
+                # **A ceiling, not a tidiness.** `OpenAIEmbeddings` defaults to
+                # `request_timeout=None`, and as of 2026-08-16 embedding is on the
+                # REQUEST hot path for every question asked -- so a stalled
+                # OpenRouter connection hangs the turn and its SSE stream with no
+                # error and no bound, on a single uvicorn worker that is meanwhile
+                # trying to serve everyone else. The chat path has carried this same
+                # ceiling since it moved to OpenRouter; this is the half that was
+                # missing. Probed rather than assumed: the kwarg constructs cleanly
+                # on langchain-openai 1.5.1 and sets `request_timeout=120.0`.
+                timeout=settings.openrouter_timeout_s,
+            ),
             model=settings.openrouter_embedding_model,
-            base_url=settings.openrouter_base_url,
-            api_key=settings.openrouter_api_key,
-            dimensions=settings.embedding_dimension,
-            check_embedding_ctx_length=False,
-            chunk_size=settings.embedding_batch_size,
-            model_kwargs={"encoding_format": "float"},
-            # **A ceiling, not a tidiness.** `OpenAIEmbeddings` defaults to
-            # `request_timeout=None`, and as of 2026-08-16 embedding is on the
-            # REQUEST hot path for every question asked -- so a stalled
-            # OpenRouter connection hangs the turn and its SSE stream with no
-            # error and no bound, on a single uvicorn worker that is meanwhile
-            # trying to serve everyone else. The chat path has carried this same
-            # ceiling since it moved to OpenRouter; this is the half that was
-            # missing. Probed rather than assumed: the kwarg constructs cleanly
-            # on langchain-openai 1.5.1 and sets `request_timeout=120.0`.
-            timeout=settings.openrouter_timeout_s,
         )
 
     # The rollback, and the only reason `langchain-google-genai` is still
@@ -175,6 +203,31 @@ def get_vector_store(agent: Agent) -> PineconeVectorStore:
     )
 
 
+def _metered_rerank(compressor, *, model: str):
+    """Attach spend metering to the reranker, or return it untouched.
+
+    Same shape and same reasoning as `_metered` above: `_build_compressor` is
+    the one construction site, so it is the one place metering can be attached
+    without a caller being able to forget it.
+
+    Cohere reports SEARCH UNITS and no cost, so what lands in `api_usage` is a
+    measured unit count and -- only if `cohere_search_unit_usd` is set -- an
+    explicitly-flagged estimate in a different column from reported cost.
+    """
+    if not settings.metering_enabled:
+        return compressor
+    from app.metering.meter import LoggingSink
+    from app.metering.rerank import meter_rerank
+
+    return meter_rerank(
+        compressor,
+        model=model,
+        sink=LoggingSink(),
+        unit_price_usd=settings.cohere_search_unit_usd,
+        strict=settings.metering_strict,
+    )
+
+
 def _build_compressor(agent: Agent, *, top_n: int | None = None) -> CohereRerank:
     """The reranker. One construction site, two consumers.
 
@@ -188,10 +241,13 @@ def _build_compressor(agent: Agent, *, top_n: int | None = None) -> CohereRerank
     `top_n` overrides `agent.rerank_top_n` for one call. See `aretrieve` for the
     rule that makes that safe.
     """
-    return CohereRerank(
+    return _metered_rerank(
+        CohereRerank(
+            model=settings.rerank_model,
+            top_n=agent.rerank_top_n if top_n is None else top_n,
+            cohere_api_key=settings.cohere_api_key,
+        ),
         model=settings.rerank_model,
-        top_n=agent.rerank_top_n if top_n is None else top_n,
-        cohere_api_key=settings.cohere_api_key,
     )
 
 

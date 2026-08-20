@@ -42,6 +42,8 @@ from app.db.models import (
 from app.db.session import SessionLocal
 from app.eval.metrics_guide import METRIC_KEYS, summarise
 from app.eval.ragas_runner import EvalTurn, score_samples
+from app.metering.context import collect_usage, meter_as
+from app.metering import store as metering_store
 
 log = logging.getLogger("uvicorn.error")
 
@@ -100,187 +102,211 @@ async def run_eval_job(
     # object belongs to the session that loaded it. Everything is re-loaded
     # below, inside the session that will actually use it.
     # ------------------------------------------------------------------
-    try:
-        async with SessionLocal() as db:
-            agent = await db.get(Agent, agent_id)
-            run = await db.scalar(
-                select(EvalRun).where(
-                    EvalRun.id == eval_run_id,
-                    # Selected on the pair. The two ids arrive as separate
-                    # arguments and only the agent has been through the
-                    # ownership check in `app/api/deps.py`, so matching on both
-                    # means a mismatched pair fetches nothing rather than
-                    # scoring one tenant's corpus into another tenant's run.
-                    EvalRun.agent_id == agent_id,
-                )
-            )
-            user = await db.get(User, user_id)
+    # **The most expensive thing this system does, and it was the easiest to
+    # leave unmetered.** A ten-question run is 23-25 minutes: ten full agent
+    # turns plus four judged metric calls each, on a THIRD vendor's judge. None
+    # of it belongs to a `queries` row an admin would find, which is exactly why
+    # the metering unit is a call rather than a turn -- a turn-shaped unit would
+    # have shown a complete-looking total with the eval spend silently missing.
+    #
+    # `inherit=False`: this task may run inside a request's context, and eval
+    # spend belongs to the run, not to whatever turn happened to be in flight.
+    with collect_usage() as usage_records, meter_as(
+        user_id=user_id, agent_id=agent_id, call_kind="judge", inherit=False
+    ):
+      try:
+          async with SessionLocal() as db:
+              agent = await db.get(Agent, agent_id)
+              run = await db.scalar(
+                  select(EvalRun).where(
+                      EvalRun.id == eval_run_id,
+                      # Selected on the pair. The two ids arrive as separate
+                      # arguments and only the agent has been through the
+                      # ownership check in `app/api/deps.py`, so matching on both
+                      # means a mismatched pair fetches nothing rather than
+                      # scoring one tenant's corpus into another tenant's run.
+                      EvalRun.agent_id == agent_id,
+                  )
+              )
+              user = await db.get(User, user_id)
 
-            if run is None:
-                log.warning(
-                    "Eval job: run %s not found under agent %s", eval_run_id, agent_id
-                )
-                return
-            if agent is None or user is None:
-                # Deleted between the response and this task starting. `eval_runs`
-                # cascades from `agents`, so when the agent is gone there is
-                # probably no row left to mark either -- but when only the user
-                # is gone the run survives (`user_id` is SET NULL) and must be
-                # closed out rather than left at `running` forever.
-                await _fail_run(eval_run_id, "Agent or user no longer exists.")
-                return
+              if run is None:
+                  log.warning(
+                      "Eval job: run %s not found under agent %s", eval_run_id, agent_id
+                  )
+                  return
+              if agent is None or user is None:
+                  # Deleted between the response and this task starting. `eval_runs`
+                  # cascades from `agents`, so when the agent is gone there is
+                  # probably no row left to mark either -- but when only the user
+                  # is gone the run survives (`user_id` is SET NULL) and must be
+                  # closed out rather than left at `running` forever.
+                  await _fail_run(eval_run_id, "Agent or user no longer exists.")
+                  return
 
-            # `is_active` alone is NOT enough. `golden_questions.agent_id` is
-            # nullable, so rows written before golden sets belonged to an agent
-            # match any unscoped filter -- and a question about lecture
-            # transcripts scored against a policy corpus still returns numbers,
-            # it simply returns numbers about the wrong corpus. That silent
-            # mixing is the exact failure the column was added to prevent, and
-            # it is reintroduced by a query that forgets it.
-            questions = list(
-                await db.scalars(
-                    select(GoldenQuestion)
-                    .where(
-                        GoldenQuestion.agent_id == agent_id,
-                        GoldenQuestion.is_active.is_(True),
-                    )
-                    # Display order, with a stable tie-break: `order_index`
-                    # defaults to 0, so a set that has never been reordered is
-                    # entirely tied and would otherwise come back in whatever
-                    # order the scan produced -- making two runs of the same set
-                    # score its questions in different orders.
-                    .order_by(
-                        GoldenQuestion.order_index.asc(),
-                        GoldenQuestion.created_at.asc(),
-                        GoldenQuestion.id.asc(),
-                    )
-                )
-            )
+              # `is_active` alone is NOT enough. `golden_questions.agent_id` is
+              # nullable, so rows written before golden sets belonged to an agent
+              # match any unscoped filter -- and a question about lecture
+              # transcripts scored against a policy corpus still returns numbers,
+              # it simply returns numbers about the wrong corpus. That silent
+              # mixing is the exact failure the column was added to prevent, and
+              # it is reintroduced by a query that forgets it.
+              questions = list(
+                  await db.scalars(
+                      select(GoldenQuestion)
+                      .where(
+                          GoldenQuestion.agent_id == agent_id,
+                          GoldenQuestion.is_active.is_(True),
+                      )
+                      # Display order, with a stable tie-break: `order_index`
+                      # defaults to 0, so a set that has never been reordered is
+                      # entirely tied and would otherwise come back in whatever
+                      # order the scan produced -- making two runs of the same set
+                      # score its questions in different orders.
+                      .order_by(
+                          GoldenQuestion.order_index.asc(),
+                          GoldenQuestion.created_at.asc(),
+                          GoldenQuestion.id.asc(),
+                      )
+                  )
+              )
 
-            # ----------------------------------------------------------
-            # Open the run.
-            # ----------------------------------------------------------
-            # `generation_model` is written HERE, at run start, and never read
-            # back from `agents.generation_model` at display time. The agent's
-            # setting can change after a run, and reading it live would attribute
-            # a score to a model that never produced the answer.
-            run.status = "running"
-            run.started_at = func.now()
-            run.judge_model = settings.ragas_judge_model
-            run.generation_model = agent.generation_model or settings.generation_model
-            run.progress_total = len(questions)
-            run.progress_done = 0
-            # `func.now()` keeps every timestamp on the database's clock, matching
-            # the server defaults on `created_at`. The cost is that the attribute
-            # holds a SQL expression until refetched, so do NOT read
-            # `run.started_at` below -- on an async session the implicit reload
-            # raises MissingGreenlet.
-            await db.commit()
+              # ----------------------------------------------------------
+              # Open the run.
+              # ----------------------------------------------------------
+              # `generation_model` is written HERE, at run start, and never read
+              # back from `agents.generation_model` at display time. The agent's
+              # setting can change after a run, and reading it live would attribute
+              # a score to a model that never produced the answer.
+              run.status = "running"
+              run.started_at = func.now()
+              run.judge_model = settings.ragas_judge_model
+              run.generation_model = agent.generation_model or settings.generation_model
+              run.progress_total = len(questions)
+              run.progress_done = 0
+              # `func.now()` keeps every timestamp on the database's clock, matching
+              # the server defaults on `created_at`. The cost is that the attribute
+              # holds a SQL expression until refetched, so do NOT read
+              # `run.started_at` below -- on an async session the implicit reload
+              # raises MissingGreenlet.
+              await db.commit()
 
-            self_judged = run.judge_model == run.generation_model
-            if self_judged:
-                # Not an error, and not hidden either. See `ragas_judge_model` in
-                # app/config.py: the model is grading its own output, the number
-                # is still measured against the retrieved contexts, and the
-                # scorecard says so.
-                log.info(
-                    "Eval run %s is self-judged: %s answers and grades",
-                    eval_run_id,
-                    run.judge_model,
-                )
+              self_judged = run.judge_model == run.generation_model
+              if self_judged:
+                  # Not an error, and not hidden either. See `ragas_judge_model` in
+                  # app/config.py: the model is grading its own output, the number
+                  # is still measured against the retrieved contexts, and the
+                  # scorecard says so.
+                  log.info(
+                      "Eval run %s is self-judged: %s answers and grades",
+                      eval_run_id,
+                      run.judge_model,
+                  )
 
-            scored_rows: list[dict[str, Any]] = []
+              scored_rows: list[dict[str, Any]] = []
 
-            for index, question in enumerate(questions, start=1):
-                try:
-                    row = await _run_one_question(db, agent, user, run, question)
-                except Exception as exc:  # noqa: BLE001 - see below
-                    # ONE QUESTION FAILING MUST NOT ABORT THE RUN. That is the
-                    # whole reason `eval_results.error` exists next to
-                    # `eval_runs.error`: a per-question timeout belongs in the
-                    # former, and putting it in the latter would void a
-                    # scorecard for a single bad row.
-                    log.exception(
-                        "Eval run %s: question %s failed", eval_run_id, question.id
-                    )
-                    # The failed turn may have left a half-written `queries` row
-                    # in this transaction. Roll it back before recording the
-                    # failure, or the commit below carries the wreckage with it.
-                    await db.rollback()
-                    # Rollback expires every object in the session, and touching
-                    # an expired attribute on an async session raises
-                    # MissingGreenlet. Re-load the three we keep using.
-                    agent = await db.get(Agent, agent_id)
-                    user = await db.get(User, user_id)
-                    run = await db.get(EvalRun, eval_run_id)
-                    if agent is None or user is None or run is None:
-                        await _fail_run(
-                            eval_run_id,
-                            "Agent, user or run disappeared mid-run.",
-                        )
-                        return
+              for index, question in enumerate(questions, start=1):
+                  try:
+                      row = await _run_one_question(db, agent, user, run, question)
+                  except Exception as exc:  # noqa: BLE001 - see below
+                      # ONE QUESTION FAILING MUST NOT ABORT THE RUN. That is the
+                      # whole reason `eval_results.error` exists next to
+                      # `eval_runs.error`: a per-question timeout belongs in the
+                      # former, and putting it in the latter would void a
+                      # scorecard for a single bad row.
+                      log.exception(
+                          "Eval run %s: question %s failed", eval_run_id, question.id
+                      )
+                      # The failed turn may have left a half-written `queries` row
+                      # in this transaction. Roll it back before recording the
+                      # failure, or the commit below carries the wreckage with it.
+                      await db.rollback()
+                      # Rollback expires every object in the session, and touching
+                      # an expired attribute on an async session raises
+                      # MissingGreenlet. Re-load the three we keep using.
+                      agent = await db.get(Agent, agent_id)
+                      user = await db.get(User, user_id)
+                      run = await db.get(EvalRun, eval_run_id)
+                      if agent is None or user is None or run is None:
+                          await _fail_run(
+                              eval_run_id,
+                              "Agent, user or run disappeared mid-run.",
+                          )
+                          return
 
-                    message = str(exc) or exc.__class__.__name__
-                    db.add(
-                        EvalResult(
-                            id=uuid.uuid4(),
-                            eval_run_id=eval_run_id,
-                            golden_question_id=question.id,
-                            error=message,
-                        )
-                    )
-                    row = {
-                        "golden_question_id": question.id,
-                        "expected_behaviour": question.expected_behaviour,
-                        # Unknown rather than False: the agent never got to
-                        # answer, so nothing was observed about its behaviour and
-                        # claiming a behaviour failure would be a fabricated
-                        # measurement.
-                        "behaviour_ok": None,
-                        "scored": False,
-                        "error": message,
-                        **{key: None for key in METRIC_KEYS},
-                    }
+                      message = str(exc) or exc.__class__.__name__
+                      db.add(
+                          EvalResult(
+                              id=uuid.uuid4(),
+                              eval_run_id=eval_run_id,
+                              golden_question_id=question.id,
+                              error=message,
+                          )
+                      )
+                      row = {
+                          "golden_question_id": question.id,
+                          "expected_behaviour": question.expected_behaviour,
+                          # Unknown rather than False: the agent never got to
+                          # answer, so nothing was observed about its behaviour and
+                          # claiming a behaviour failure would be a fabricated
+                          # measurement.
+                          "behaviour_ok": None,
+                          "scored": False,
+                          "error": message,
+                          **{key: None for key in METRIC_KEYS},
+                      }
 
-                scored_rows.append(row)
+                  scored_rows.append(row)
 
-                # Committed per question, not once at the end. A run that dies
-                # halfway then keeps the answers it already paid for, and the
-                # progress the UI is polling actually moves.
-                run.progress_done = index
-                await db.commit()
+                  # Committed per question, not once at the end. A run that dies
+                  # halfway then keeps the answers it already paid for, and the
+                  # progress the UI is polling actually moves.
+                  run.progress_done = index
+                  await db.commit()
 
-            # ----------------------------------------------------------
-            # Close the run.
-            # ----------------------------------------------------------
-            # `completed` even when every question errored. The alternative --
-            # calling that `failed` -- would put the reason in `eval_runs.error`,
-            # which is defined as "the run ended without a summary", and this run
-            # has one: `error_count`, `scored_count` and the summary's `note`
-            # say exactly what happened. `failed` is reserved for the run
-            # machinery breaking, not for the agent or the judge scoring badly.
-            run.summary = summarise(scored_rows, self_judged=self_judged)
-            run.status = "completed"
-            run.finished_at = func.now()
-            await db.commit()
+              # ----------------------------------------------------------
+              # Close the run.
+              # ----------------------------------------------------------
+              # `completed` even when every question errored. The alternative --
+              # calling that `failed` -- would put the reason in `eval_runs.error`,
+              # which is defined as "the run ended without a summary", and this run
+              # has one: `error_count`, `scored_count` and the summary's `note`
+              # say exactly what happened. `failed` is reserved for the run
+              # machinery breaking, not for the agent or the judge scoring badly.
+              run.summary = summarise(scored_rows, self_judged=self_judged)
+              run.status = "completed"
+              run.finished_at = func.now()
+              await db.commit()
 
-            log.info(
-                "Eval run %s finished: %s of %s scored, weakest %s",
-                eval_run_id,
-                run.summary.get("scored_count"),
-                run.summary.get("total_count"),
-                run.summary.get("weakest_metric"),
-            )
+              log.info(
+                  "Eval run %s finished: %s of %s scored, weakest %s",
+                  eval_run_id,
+                  run.summary.get("scored_count"),
+                  run.summary.get("total_count"),
+                  run.summary.get("weakest_metric"),
+              )
 
-    except Exception as exc:  # noqa: BLE001
-        # NOTHING ESCAPES THIS FUNCTION. An exception raised out of a
-        # BackgroundTask is returned to nobody -- the response went out minutes
-        # ago -- so at best it lands in the log and at worst the task machinery
-        # swallows it. Either way the run stays at `running` forever, which looks
-        # like progress and is the single most confusing state available.
-        log.exception("Eval run %s failed", eval_run_id)
-        await _fail_run(eval_run_id, str(exc) or exc.__class__.__name__)
+      except Exception as exc:  # noqa: BLE001
+          # NOTHING ESCAPES THIS FUNCTION. An exception raised out of a
+          # BackgroundTask is returned to nobody -- the response went out minutes
+          # ago -- so at best it lands in the log and at worst the task machinery
+          # swallows it. Either way the run stays at `running` forever, which looks
+          # like progress and is the single most confusing state available.
+          log.exception("Eval run %s failed", eval_run_id)
+          await _fail_run(eval_run_id, str(exc) or exc.__class__.__name__)
 
+
+      finally:
+          # Written whether the run completed or failed. A run that died after
+          # eight of ten questions still spent the money for eight, and a
+          # scorecard that is missing is not a bill that is missing.
+          if usage_records:
+              try:
+                  async with SessionLocal() as meter_db:
+                      metering_store.persist(meter_db, usage_records)
+                      await meter_db.commit()
+              except Exception:  # noqa: BLE001 -- accounting never breaks a run
+                  log.warning("could not persist eval usage", exc_info=True)
 
 async def _run_one_question(
     db,

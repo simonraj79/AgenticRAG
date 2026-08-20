@@ -94,6 +94,7 @@ from app.rag.selfcheck import (
 )
 from app.tools.corpus import SEARCH_CORPUS
 from app.tools.registry import ToolArtifact
+from app.metering.context import meter_as
 
 log = logging.getLogger("uvicorn.error")
 
@@ -559,9 +560,15 @@ async def contextualize_question(
             messages.append(AIMessage(content=prior_answer))
 
     try:
-        result = await get_contextualizer().ainvoke(
-            {"history": messages, "question": question}
-        )
+        # Inherits the user and agent from the turn's scope and overrides only
+        # the kind -- the whole reason `meter_as` merges rather than replaces.
+        # This call runs on EVERY turn since 2026-08-16, so it is a standing
+        # cost the console should be able to name rather than a rounding error
+        # buried inside `generation`.
+        with meter_as(call_kind="rewrite"):
+            result = await get_contextualizer().ainvoke(
+                {"history": messages, "question": question}
+            )
     except Exception as exc:  # noqa: BLE001 - see below
         # Deliberately broad, and deliberately swallowed. **A failed rewrite
         # must degrade to Stage 1 behaviour, never fail the turn.** The raw

@@ -46,6 +46,8 @@ from app.handouts.recipes import (
 )
 from app.rag.llm import build_chat_model
 from app.tools import sandbox
+from app.metering.context import collect_usage, meter_as
+from app.metering import store as metering_store
 
 log = logging.getLogger("uvicorn.error")
 
@@ -745,212 +747,240 @@ async def run_handout_job(
     failure_kind: str | None = None
     failure_attempts = 0
     failure_source: str | None = None
-    try:
-        async with SessionLocal() as db:
-            agent = await db.get(Agent, agent_id)
-            if agent is None:
-                # Deleted between the 202 and this task starting. `handouts`
-                # cascades from `agents`, so there is very likely no row left to
-                # mark either. `_settle` below will no-op on a missing row.
-                log.warning(
-                    "Handout job %s: agent %s no longer exists", handout_id, agent_id
-                )
-                return
+    # Deck and chart generation is a real cost centre -- `handout_code_max_tokens`
+    # is 4,096 against generation's 2,048, and a failed program is RETRIED. It
+    # runs off the request thread, so without an explicit scope here every one of
+    # its model calls would fall through to a log line and the console would
+    # under-report while looking complete. `user_id` is nullable and null
+    # attribution is not a reason to lose the cost.
+    with collect_usage() as usage_records, meter_as(
+        user_id=user_id, agent_id=agent_id, call_kind="handout", inherit=False
+    ):
+      try:
+          async with SessionLocal() as db:
+              agent = await db.get(Agent, agent_id)
+              if agent is None:
+                  # Deleted between the 202 and this task starting. `handouts`
+                  # cascades from `agents`, so there is very likely no row left to
+                  # mark either. `_settle` below will no-op on a missing row.
+                  log.warning(
+                      "Handout job %s: agent %s no longer exists", handout_id, agent_id
+                  )
+                  return
 
-            handout = await db.scalar(
-                select(Handout).where(
-                    Handout.id == handout_id,
-                    # Selected on the PAIR. These two ids arrive as separate
-                    # arguments and only the agent has been through the
-                    # ownership check in `app/api/deps.py`; matching on both
-                    # means a mismatched pair fetches nothing rather than
-                    # writing one tenant's file into another tenant's panel.
-                    #
-                    # `content` stays deferred through this load, which is what
-                    # keeps a retry cheap: re-running a failed handout does not
-                    # drag the previous attempt's megabytes back out of Postgres
-                    # in order to overwrite them.
-                    Handout.agent_id == agent_id,
-                )
-            )
-            if handout is None:
-                log.warning(
-                    "Handout job: handout %s not found under agent %s",
-                    handout_id,
-                    agent_id,
-                )
-                return
+              handout = await db.scalar(
+                  select(Handout).where(
+                      Handout.id == handout_id,
+                      # Selected on the PAIR. These two ids arrive as separate
+                      # arguments and only the agent has been through the
+                      # ownership check in `app/api/deps.py`; matching on both
+                      # means a mismatched pair fetches nothing rather than
+                      # writing one tenant's file into another tenant's panel.
+                      #
+                      # `content` stays deferred through this load, which is what
+                      # keeps a retry cheap: re-running a failed handout does not
+                      # drag the previous attempt's megabytes back out of Postgres
+                      # in order to overwrite them.
+                      Handout.agent_id == agent_id,
+                  )
+              )
+              if handout is None:
+                  log.warning(
+                      "Handout job: handout %s not found under agent %s",
+                      handout_id,
+                      agent_id,
+                  )
+                  return
 
-            recipe = RECIPES.get(recipe_key)
-            if recipe is None:
-                # Unreachable through the API -- `HandoutRequest.recipe` is a
-                # `Literal` -- but reachable after a recipe is removed while a
-                # row is queued behind it. Fail the row rather than raise, so
-                # the panel shows a cause.
-                raise ValueError(f"Unknown recipe {recipe_key!r}")
+              recipe = RECIPES.get(recipe_key)
+              if recipe is None:
+                  # Unreachable through the API -- `HandoutRequest.recipe` is a
+                  # `Literal` -- but reachable after a recipe is removed while a
+                  # row is queued behind it. Fail the row rather than raise, so
+                  # the panel shows a cause.
+                  raise ValueError(f"Unknown recipe {recipe_key!r}")
 
-            # `recipe=` supplies the per-call retrieval budget. It is resolved
-            # above rather than passed down as `recipe_key`, so the widening is
-            # a property of the recipe object the rest of this job already
-            # holds and there is no second place for a key to be looked up.
-            material = await gather_material(
-                db, agent, brief, conversation_id, recipe=recipe
-            )
-            if material.is_empty:
-                # REFUSED, not generated. See `Material.is_empty`: a model given
-                # a brief and no material produces a beautifully formatted
-                # artefact out of parametric memory, and nothing downstream can
-                # tell it from a grounded one. An empty corpus is the state a
-                # brand-new agent is in, so this is the common first experience
-                # of the panel and it has to say why.
-                raise ValueError(
-                    "Nothing in this agent's corpus matches that brief, and "
-                    "there is no conversation to draw on. Upload a document or "
-                    "ask the agent a question first."
-                )
+              # `recipe=` supplies the per-call retrieval budget. It is resolved
+              # above rather than passed down as `recipe_key`, so the widening is
+              # a property of the recipe object the rest of this job already
+              # holds and there is no second place for a key to be looked up.
+              material = await gather_material(
+                  db, agent, brief, conversation_id, recipe=recipe
+              )
+              if material.is_empty:
+                  # REFUSED, not generated. See `Material.is_empty`: a model given
+                  # a brief and no material produces a beautifully formatted
+                  # artefact out of parametric memory, and nothing downstream can
+                  # tell it from a grounded one. An empty corpus is the state a
+                  # brand-new agent is in, so this is the common first experience
+                  # of the panel and it has to say why.
+                  raise ValueError(
+                      "Nothing in this agent's corpus matches that brief, and "
+                      "there is no conversation to draw on. Upload a document or "
+                      "ask the agent a question first."
+                  )
 
-            # A FACTORY rather than a model, because the sandbox path may need a
-            # second one at a bigger output cap when the first reply was cut off
-            # -- see `_run_sandbox_recipe`. `agent` is captured here, inside the
-            # session that loaded it, so the factory can be called later without
-            # any of the detached-ORM-object hazards this module opens with.
-            def build_model(max_tokens: int):
-                return _model_for(agent, max_tokens=max_tokens)
+              # A FACTORY rather than a model, because the sandbox path may need a
+              # second one at a bigger output cap when the first reply was cut off
+              # -- see `_run_sandbox_recipe`. `agent` is captured here, inside the
+              # session that loaded it, so the factory can be called later without
+              # any of the detached-ORM-object hazards this module opens with.
+              def build_model(max_tokens: int):
+                  return _model_for(agent, max_tokens=max_tokens)
 
-            messages: list[BaseMessage] = [
-                SystemMessage(content=SYSTEM_PREAMBLE),
-                HumanMessage(content=render(recipe, brief=brief, material=material)),
-            ]
+              messages: list[BaseMessage] = [
+                  SystemMessage(content=SYSTEM_PREAMBLE),
+                  HumanMessage(content=render(recipe, brief=brief, material=material)),
+              ]
 
-            if recipe.uses_sandbox:
-                content, filename, preview, source_code, attempts = await _run_sandbox_recipe(
-                    build_model, messages, recipe
-                )
-            else:
-                # One model at the ordinary cap. The direct path has no retry to
-                # raise a cap for, so it takes a model rather than a factory --
-                # see `_run_direct_recipe` for why truncation is not actionable
-                # there.
-                content, filename, preview, source_code, attempts = await _run_direct_recipe(
-                    build_model(settings.handout_code_max_tokens),
-                    messages,
-                    recipe,
-                    brief,
-                )
+              if recipe.uses_sandbox:
+                  content, filename, preview, source_code, attempts = await _run_sandbox_recipe(
+                      build_model, messages, recipe
+                  )
+              else:
+                  # One model at the ordinary cap. The direct path has no retry to
+                  # raise a cap for, so it takes a model rather than a factory --
+                  # see `_run_direct_recipe` for why truncation is not actionable
+                  # there.
+                  content, filename, preview, source_code, attempts = await _run_direct_recipe(
+                      build_model(settings.handout_code_max_tokens),
+                      messages,
+                      recipe,
+                      brief,
+                  )
 
-            # OBJECT FIRST, ROW SECOND. The key is derivable before the row is
-            # written because it is built from `agent_id` and this row's own id,
-            # both of which already exist -- which is the whole reason the
-            # ordering can be this way round. If the put fails it raises here,
-            # the `except` below marks the row `failed`, and no key was ever
-            # recorded; if the put succeeds and the commit does not, the
-            # `except` deletes what was written.
-            #
-            # `to_thread` because boto3 is synchronous, exactly like the Pinecone
-            # and Cohere clients this module already wraps. Render runs one
-            # uvicorn worker, so a blocking call here stalls every other request.
-            storage_key: str | None = None
-            if storage.enabled():
-                storage_key = storage.handout_key(agent.id, handout.id, recipe.mime_type)
-                await asyncio.to_thread(
-                    storage.put_object, storage_key, content, recipe.mime_type
-                )
+              # OBJECT FIRST, ROW SECOND. The key is derivable before the row is
+              # written because it is built from `agent_id` and this row's own id,
+              # both of which already exist -- which is the whole reason the
+              # ordering can be this way round. If the put fails it raises here,
+              # the `except` below marks the row `failed`, and no key was ever
+              # recorded; if the put succeeds and the commit does not, the
+              # `except` deletes what was written.
+              #
+              # `to_thread` because boto3 is synchronous, exactly like the Pinecone
+              # and Cohere clients this module already wraps. Render runs one
+              # uvicorn worker, so a blocking call here stalls every other request.
+              storage_key: str | None = None
+              if storage.enabled():
+                  storage_key = storage.handout_key(agent.id, handout.id, recipe.mime_type)
+                  await asyncio.to_thread(
+                      storage.put_object, storage_key, content, recipe.mime_type
+                  )
 
-            # `content` is still written on the R2 road, and that is deliberate
-            # rather than leftover. The change set keeps `storage_route=postgres`
-            # a working rollback, and a rollback whose bytes were never written
-            # is not one. The column is dropped in a later change set, once R2
-            # has been trusted in production for a while -- the same blue/green
-            # discipline `migrate_index.py` applies to a Pinecone index.
-            handout.content = content
-            handout.storage_key = storage_key
-            handout.byte_size = len(content)
-            handout.filename = filename
-            handout.mime_type = recipe.mime_type
-            handout.preview_text = preview
-            handout.source_code = source_code
-            handout.meta = {
-                # Provenance, per section 2.4: a handout can be traced back to
-                # the chunks that produced it the way an answer can.
-                "chunk_ids": material.chunk_ids,
-                "recipe": recipe.key,
-                "brief": brief,
-                "model": agent.generation_model or settings.generation_model,
-                "conversation_turns": material.turn_count,
-                # 1 or 2. Recorded because "it worked first time" and "it worked
-                # after reading its own traceback" are different facts about the
-                # model, and `source_code` alone makes them look the same to
-                # anything that is not a human reading it.
-                "attempts": attempts,
-            }
-            handout.error = None
-            handout.status = "ready"
-            await db.commit()
+              # `content` is still written on the R2 road, and that is deliberate
+              # rather than leftover. The change set keeps `storage_route=postgres`
+              # a working rollback, and a rollback whose bytes were never written
+              # is not one. The column is dropped in a later change set, once R2
+              # has been trusted in production for a while -- the same blue/green
+              # discipline `migrate_index.py` applies to a Pinecone index.
+              handout.content = content
+              handout.storage_key = storage_key
+              handout.byte_size = len(content)
+              handout.filename = filename
+              handout.mime_type = recipe.mime_type
+              handout.preview_text = preview
+              handout.source_code = source_code
+              handout.meta = {
+                  # Provenance, per section 2.4: a handout can be traced back to
+                  # the chunks that produced it the way an answer can.
+                  "chunk_ids": material.chunk_ids,
+                  "recipe": recipe.key,
+                  "brief": brief,
+                  "model": agent.generation_model or settings.generation_model,
+                  "conversation_turns": material.turn_count,
+                  # 1 or 2. Recorded because "it worked first time" and "it worked
+                  # after reading its own traceback" are different facts about the
+                  # model, and `source_code` alone makes them look the same to
+                  # anything that is not a human reading it.
+                  "attempts": attempts,
+              }
+              handout.error = None
+              handout.status = "ready"
+              await db.commit()
 
-            log.info(
-                "Handout %s ready: %s, %s bytes, %s attempt(s)",
-                handout_id,
-                filename,
-                len(content),
-                attempts,
-            )
+              log.info(
+                  "Handout %s ready: %s, %s bytes, %s attempt(s)",
+                  handout_id,
+                  filename,
+                  len(content),
+                  attempts,
+              )
 
-    except Exception as exc:
-        # NOTHING ESCAPES THIS FUNCTION. An exception raised out of a
-        # BackgroundTask is returned to nobody -- the response went out minutes
-        # ago -- so at best it lands in the log and at worst the task machinery
-        # swallows it. Either way the row stays `pending` forever, which reads
-        # as progress and never gets investigated.
-        log.exception("Handout job failed for handout %s (%s)", handout_id, recipe_key)
+      except Exception as exc:
+          # NOTHING ESCAPES THIS FUNCTION. An exception raised out of a
+          # BackgroundTask is returned to nobody -- the response went out minutes
+          # ago -- so at best it lands in the log and at worst the task machinery
+          # swallows it. Either way the row stays `pending` forever, which reads
+          # as progress and never gets investigated.
+          log.exception("Handout job failed for handout %s (%s)", handout_id, recipe_key)
 
-        # The fourth step of the write ordering. `storage_key` is only bound
-        # once a put has SUCCEEDED, so reaching here with it set means the
-        # bytes landed and something after that did not -- most likely the
-        # commit. That object is unreferenced by anything and its key is
-        # derived from a row that may be about to be marked `failed`, so
-        # nothing would ever find it again.
-        #
-        # `delete_quietly` cannot raise, which matters more here than anywhere
-        # else in the codebase: this is an `except` block whose entire job is to
-        # leave the row in a terminal state, and an exception thrown while
-        # cleaning up would skip `_settle` and strand the row at `pending`
-        # forever -- trading a leaked object for the exact failure this
-        # try/except exists to prevent.
-        if locals().get("storage_key"):
-            storage.delete_quietly(locals()["storage_key"])
+          # The fourth step of the write ordering. `storage_key` is only bound
+          # once a put has SUCCEEDED, so reaching here with it set means the
+          # bytes landed and something after that did not -- most likely the
+          # commit. That object is unreferenced by anything and its key is
+          # derived from a row that may be about to be marked `failed`, so
+          # nothing would ever find it again.
+          #
+          # `delete_quietly` cannot raise, which matters more here than anywhere
+          # else in the codebase: this is an `except` block whose entire job is to
+          # leave the row in a terminal state, and an exception thrown while
+          # cleaning up would skip `_settle` and strand the row at `pending`
+          # forever -- trading a leaked object for the exact failure this
+          # try/except exists to prevent.
+          if locals().get("storage_key"):
+              storage.delete_quietly(locals()["storage_key"])
 
-        failure = str(exc) or exc.__class__.__name__
-        if isinstance(exc, HandoutFailure):
-            # Everything else that lands here -- an empty corpus, a removed
-            # recipe, a dropped connection -- has no sandbox run behind it and
-            # therefore no kind to record. `None` is written as absence rather
-            # than guessed at, so a `meta` with no `error_kind` means "this did
-            # not fail in the sandbox", which is itself the useful fact.
-            failure_kind = exc.error_kind
-            failure_attempts = exc.attempts
-            # The code both attempts tried, which the success path assigns
-            # directly and the failure path used to LOSE -- the raise happens
-            # before `handout.source_code = ...` is ever reached, so a `failed`
-            # row stored nothing. Measured `len == 0` on two of them.
-            failure_source = exc.source_code
-    finally:
-        # THE TERMINAL STATUS, in a `finally` rather than in the `except`.
-        #
-        # The `except` covers the failures that raise. This covers the ones that
-        # do not: an early `return` above, a `sys.exit` from something exotic,
-        # and -- the one that actually happens -- a cancellation, because
-        # `CancelledError` is a BaseException and would sail straight past
-        # `except Exception`. All of those leave a row at `pending` with nothing
-        # coming to move it, which is the single most confusing state available:
-        # a spinner that never stops looks like a slow job, not a dead one.
-        await _settle(
-            agent_id,
-            handout_id,
-            failure,
-            error_kind=failure_kind,
-            attempts=failure_attempts,
-            source_code=failure_source,
-        )
+          failure = str(exc) or exc.__class__.__name__
+          if isinstance(exc, HandoutFailure):
+              # Everything else that lands here -- an empty corpus, a removed
+              # recipe, a dropped connection -- has no sandbox run behind it and
+              # therefore no kind to record. `None` is written as absence rather
+              # than guessed at, so a `meta` with no `error_kind` means "this did
+              # not fail in the sandbox", which is itself the useful fact.
+              failure_kind = exc.error_kind
+              failure_attempts = exc.attempts
+              # The code both attempts tried, which the success path assigns
+              # directly and the failure path used to LOSE -- the raise happens
+              # before `handout.source_code = ...` is ever reached, so a `failed`
+              # row stored nothing. Measured `len == 0` on two of them.
+              failure_source = exc.source_code
+      finally:
+          # THE TERMINAL STATUS, in a `finally` rather than in the `except`.
+          #
+          # The `except` covers the failures that raise. This covers the ones that
+          # do not: an early `return` above, a `sys.exit` from something exotic,
+          # and -- the one that actually happens -- a cancellation, because
+          # `CancelledError` is a BaseException and would sail straight past
+          # `except Exception`. All of those leave a row at `pending` with nothing
+          # coming to move it, which is the single most confusing state available:
+          # a spinner that never stops looks like a slow job, not a dead one.
+          await _settle(
+              agent_id,
+              handout_id,
+              failure,
+              error_kind=failure_kind,
+              attempts=failure_attempts,
+              source_code=failure_source,
+          )
+
+          # What the deck cost, written after the row is terminal.
+          #
+          # **A SEPARATE SESSION, on purpose.** Everything above may have exited
+          # via an exception or a cancellation, so the job's own session is not
+          # reliably usable here -- and the spend is a fact about calls that were
+          # BILLED regardless of whether the handout succeeded. A failed deck
+          # that burned two 4,096-token attempts costs exactly as much as a
+          # successful one, and is the case an operator most wants to see.
+          #
+          # In a `finally`, and quiet: this must never be the reason a handout is
+          # reported as failed.
+          if usage_records:
+              try:
+                  async with SessionLocal() as meter_db:
+                      metering_store.persist(meter_db, usage_records)
+                      await meter_db.commit()
+              except Exception:  # noqa: BLE001 -- accounting never breaks a job
+                  log.warning("could not persist handout usage", exc_info=True)
 
 
 def _retry_note(generation: Generation, result: sandbox.SandboxResult) -> str:

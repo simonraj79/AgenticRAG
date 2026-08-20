@@ -51,6 +51,7 @@ from pydantic import BaseModel, Field
 from app.config import settings
 from app.rag.llm import build_chat_model
 from app.rag.refusal import detect_refusal
+from app.metering.context import meter_as
 
 log = logging.getLogger(__name__)
 
@@ -272,7 +273,13 @@ async def run_grounding_critic(
 
     started = time.perf_counter()
     try:
-        verdict = await get_critic().ainvoke({"context": context, "answer": answer})
+        # The critic is the call most likely to be questioned on cost grounds --
+        # it is a second model call on a turn that already has an answer. Naming
+        # its kind is what lets that question be settled with a number.
+        with meter_as(call_kind="critic"):
+            verdict = await get_critic().ainvoke(
+                {"context": context, "answer": answer}
+            )
     except Exception as exc:  # noqa: BLE001 - see the docstring
         log.warning("Grounding critic failed, keeping the draft: %s", exc)
         return SelfCheckResult(

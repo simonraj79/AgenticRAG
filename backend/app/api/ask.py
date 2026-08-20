@@ -90,6 +90,8 @@ from app.db.models import (
 )
 from app.api.handouts import HandoutOut
 from app.db.specialists import BY_SLUG, roster
+from app.metering import store as metering_store
+from app.metering.context import collect_usage, meter_as
 from app.rag import events
 from app.rag.pipeline import HISTORY_TURNS, ChatTurn, answer_question
 from app.rag.refusal import detect_refusal
@@ -596,6 +598,52 @@ async def run_turn(
     question: str,
     rewrite: bool | None = None,
     emit: events.Emit | None = None,
+) -> AskOut:
+    """`_run_turn`, with every model call it makes attributed and buffered.
+
+    **A wrapper rather than a `with` block inside the engine**, because the
+    engine has several returns and a `finally` that must not grow a second job.
+    This shape also makes the off switch total: with metering disabled the two
+    context managers are still entered, the sink still finds an empty collection,
+    and nothing is written -- but `_run_turn` itself is untouched either way, so
+    "the classic path is byte-identical" stays a structural claim rather than a
+    careful one.
+
+    The scope names `generation` as the kind. Subsystems that make a DIFFERENT
+    kind of call open their own nested `meter_as` -- the rewriter, the router and
+    the critic each do -- and those inherit the user and agent set here, which is
+    the entire reason `meter_as` merges rather than replaces.
+
+    `query_id` is deliberately NOT set here: the row does not exist yet.
+    `store.persist` stamps it, and `app/metering/store.py` says why.
+    """
+    with collect_usage() as records, meter_as(
+        user_id=user.id, agent_id=agent.id, call_kind="generation"
+    ):
+        return await _run_turn(
+            db,
+            agent=agent,
+            user=user,
+            session=session,
+            conversation=conversation,
+            question=question,
+            rewrite=rewrite,
+            emit=emit,
+            usage_records=records,
+        )
+
+
+async def _run_turn(
+    db: AsyncSession,
+    *,
+    agent: Agent,
+    user: User,
+    session: Session | None,
+    conversation: Conversation,
+    question: str,
+    rewrite: bool | None = None,
+    emit: events.Emit | None = None,
+    usage_records: list | None = None,
 ) -> AskOut:
     """Answer one question inside one thread, and record everything about it.
 
@@ -1329,6 +1377,24 @@ async def run_turn(
     if conversation.title is None:
         conversation.title = derive_conversation_title(question)
     conversation.updated_at = func.now()
+
+    # ------------------------------------------------------------------
+    # 9b. What the turn cost
+    # ------------------------------------------------------------------
+    # Every model call this turn made -- generation, the rewrite, the route, the
+    # critic, and each step of the agent loop -- buffered by the sink and written
+    # here as one batch, INSIDE the commit below. That is what makes
+    # `queries.prompt_tokens` a trustworthy cache of the `api_usage` sum rather
+    # than a second source of truth that can drift: either both land or neither
+    # does.
+    #
+    # `api_usage` is authoritative and the two columns here are the cache. The
+    # admin console reads `api_usage`; these exist for the per-turn UI and for
+    # cheap sorting, and they have been NULL on every row written before this
+    # feature -- which the console renders as "not measured", never as zero.
+    query.prompt_tokens, query.completion_tokens = metering_store.persist_quietly(
+        db, usage_records or [], query_id=query.id
+    )
 
     # The single commit. Query, chunks, trace, handouts and conversation land
     # together or not at all.

@@ -350,6 +350,80 @@ check(
     f"banned_present={_present} kwargs={sorted(_kwargs)} extra_body={sorted(_extra)}",
 )
 
+# ---------------------------------------------------------------------------
+# 31. METERING MUST NOT TOUCH THE REQUEST.
+#
+#     `MeteredChatOpenAI` overrides one PARSING method to keep the usage frame
+#     langchain discards while streaming. It adds no field to the request -- and
+#     this case is the tripwire, not the claim, because everything above it is a
+#     record of what an added field costs: `max_completion_tokens` 404s at
+#     routing, `parallel_tool_calls` collapses 28 endpoints to 1, and `top_k` on
+#     the wrong family fails with NO ERROR AT ALL, just a different provider and
+#     a different bill.
+#
+#     Two of the four documented traps are silent, so "the app still works" is
+#     not evidence here. Byte equality is.
+#
+#     Checked across all four families, because the three per-family branches
+#     (`_NO_TOP_K_PREFIXES`, `_REASONING_ALWAYS_ON_PREFIXES`, and the Gemma
+#     passthrough) each build a different `extra_body`, and a subclass that
+#     perturbed only one of them would pass a single-model check.
+# ---------------------------------------------------------------------------
+print("\n-- metering changes parsing, never the request --")
+
+_was_metering = settings.metering_enabled
+
+
+def _request_shape(model: str) -> dict:
+    """Everything that reaches OpenRouter, plus the two langchain-side guards."""
+    m = build_chat_model(
+        model,
+        temperature=settings.generation_temperature,
+        top_k=settings.generation_top_k,
+        max_tokens=settings.generation_max_tokens,
+        reasoning=settings.generation_reasoning,
+    )
+    return {
+        "extra_body": dict(getattr(m, "extra_body", None) or {}),
+        "disabled_params": dict(getattr(m, "disabled_params", None) or {}),
+        "model_kwargs": dict(getattr(m, "model_kwargs", None) or {}),
+        "model_name": getattr(m, "model_name", None),
+        "temperature": getattr(m, "temperature", None),
+        # `stream_usage` must stay unset. OpenRouter DEPRECATED
+        # `stream_options: {include_usage: true}` and returns usage regardless,
+        # and base.py:1417 parses arriving usage unconditionally -- so setting it
+        # would add an unprobed key to the request to buy nothing at all.
+        # Measured 2026-08-20: identical usage either way.
+        "stream_usage": getattr(m, "stream_usage", None),
+    }
+
+
+_diffs = []
+for _model in (DEEPSEEK, GEMMA, GEMINI, MINIMAX):
+    try:
+        settings.metering_enabled = False
+        _off = _request_shape(_model)
+        settings.metering_enabled = True
+        _on = _request_shape(_model)
+    finally:
+        settings.metering_enabled = _was_metering
+    if _off != _on:
+        _diffs.append(f"{_model}: off={_off} on={_on}")
+
+check(
+    "31. metering on/off leaves the request byte-identical, all four families",
+    not _diffs,
+    "; ".join(_diffs) if _diffs else "extra_body/disabled_params/model_kwargs equal",
+)
+
+check(
+    "31b. and `stream_usage` is never set -- it would add stream_options for nothing",
+    all(
+        _request_shape(m)["stream_usage"] in (None, False)
+        for m in (DEEPSEEK, GEMMA)
+    ),
+)
+
 print("\n" + "=" * 74)
 if failures:
     print(f"{len(failures)} FAILED:")

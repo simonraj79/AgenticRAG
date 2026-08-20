@@ -145,6 +145,62 @@ class Settings(BaseSettings):
     openrouter_app_url: str = "https://github.com/simonraj79/ClaudeRAGAgent"
     openrouter_app_title: str = "Groundwork"
 
+    # ----------------------------------------------------------------------
+    # Metering -- see `new features/14-admin-observability/PLAN.md` section 3.1
+    # ----------------------------------------------------------------------
+    # The master switch. OFF must mean "byte-identical to the code that shipped
+    # before metering existed", not "similar to it": with this false,
+    # `build_chat_model` returns a plain `ChatOpenAI` rather than the subclass.
+    # That is what makes the regression claim checkable instead of careful --
+    # `metering_check.py` case 7 asserts the TYPE, `llm_check.py` case 31 asserts
+    # the request body.
+    metering_enabled: bool = True
+
+    # Re-raise a metering fault instead of swallowing it.
+    #
+    # **False in production and true in harnesses, and the asymmetry is the whole
+    # design.** A user asked a question and the model answered it; if the
+    # ACCOUNTING then fails, the accounting is what should fail -- a 500 on a
+    # working answer is a worse outcome than a missing row. But a swallow with no
+    # strict mode anywhere is how a meter records nothing for a month and reports
+    # success, which is the exact failure class CLAUDE.md has now caught six
+    # times. Strict mode is where that bug goes red.
+    metering_strict: bool = False
+
+    # Dollars per Cohere search unit, for the ONE cost centre that reports units
+    # and not cost. Zero means DO NOT ESTIMATE, which is the default and the
+    # honest position: units are recorded either way, and a rerank call then
+    # shows up under `calls` but not under `priced_calls`.
+    #
+    # It is off by default because a hardcoded price is a number nobody
+    # re-checks, and this repository already has that failure on this exact
+    # provider -- a Cohere key silently downgraded to a trial tier, discovered
+    # only under load, having looked identical the whole time. Set it from
+    # Cohere's current published rerank price if a dollar figure is wanted; the
+    # result lands in `api_usage.estimated_cost`, never in `cost_usd`.
+    cohere_search_unit_usd: float = 0.0
+
+    # Comma-separated emails promoted to `users.role = 'admin'`.
+    #
+    # **Read at PROMOTION time only -- never on a request path.** CLAUDE.md's
+    # rule is "key on `sub`, never `email`", because Google reassigns emails
+    # within a Workspace domain. Authorisation still reads `users.role` off a row
+    # found by `google_sub` (`app/auth/deps.py:69`, unchanged); this setting only
+    # decides whose role gets set, once, by a migration a human reviews.
+    #
+    # It must match EVERY row with that email, not one. `admin@example.com` is
+    # two user rows -- `dev|admin@example.com` from the dev-login shim and the
+    # real Google `sub` -- and promoting only the second one would leave the
+    # admin console unreachable from `dev-login`, i.e. untestable by anything
+    # that is not a human at a Google consent screen. That is the precise hole
+    # `dev-login` exists to fill.
+    admin_emails: str = ""
+
+    @property
+    def admin_email_list(self) -> list[str]:
+        """Lower-cased, de-blanked. The only reader is the promotion path."""
+        return [e.strip().lower() for e in self.admin_emails.split(",") if e.strip()]
+
     # Generation AND the agent loop AND handouts all read this (via
     # `agent.generation_model or settings.generation_model`). Moved off
     # `google/gemma-4-31b-it` on 2026-08-16, and the reason is one measurement

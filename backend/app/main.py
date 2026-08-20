@@ -16,6 +16,7 @@ from app.api.conversations import router as conversations_router
 from app.api.documents import router as documents_router
 from app.api.eval import router as eval_router
 from app.api.handouts import router as handouts_router
+from app.api.admin import router as admin_router
 from app.api.stream import router as stream_router
 from app.auth.routes import router as auth_router
 from app.config import settings
@@ -93,6 +94,14 @@ app.include_router(conversations_router)
 app.include_router(stream_router)
 app.include_router(eval_router)
 app.include_router(handouts_router)
+# LAST, and flat rather than nested under an agent. Every other router scopes
+# tenancy structurally -- `/api/agents/{agent_id}/...` resolving through
+# `owned_agent` -- so no request can even be expressed for someone else's data.
+# The admin router crosses that boundary on purpose, which means `AdminUser` is
+# the whole of the control rather than a second layer over a structural one.
+# `scripts/admin_check.py` asserts, by introspection, that every route on it
+# carries the dependency.
+app.include_router(admin_router)
 
 
 @app.get("/api/health")

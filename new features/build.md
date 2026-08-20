@@ -249,8 +249,8 @@ Then the step that is not a command:
 > ### Read one real output by eye. This is a phase, not advice.
 
 **"Do not stop until everything is implemented and tested" is the single most expensive
-sentence you can carry into this repo**, because a green suite here has been wrong five
-separate times, in five different modules:
+sentence you can carry into this repo**, because a green suite here has been wrong seven
+separate times, in seven different modules:
 
 | What was green | What was actually true |
 |---|---|
@@ -259,9 +259,14 @@ separate times, in five different modules:
 | A concurrency measurement, n=9 | `gather` ran third in every trial, so it measured position, not concurrency. Running it first reversed the verdict |
 | Every harness, after the DeepSeek swap | The model's raw `<｜DSML｜tool_calls>` markup was on screen, in the content channel, being read by the user |
 | `refusal_pass`, four times | The agent refused correctly and the detector missed the phrasing — three-quarters of one scorecard blamed the agent for a marker list |
+| `sandbox_check` S3 + `agentic_check` S8 | A **zero-slide** deck and 28 bytes of junk both passed `PK` + `>= 10_000 bytes`. Nothing between `prs.save()` and a download had opened the file |
+| `admin_check.py`, every case | `GET /api/admin/spend` returned **500 on every request** — `date_trunc` with a bound parameter cannot satisfy `GROUP BY`. An offline harness reads source and introspects routes; it cannot execute SQL, so a query that COMPILES and does not RUN is invisible to it. In the browser it surfaced as a **CORS error**, naming the wrong subsystem entirely |
 
 Every one of those was found by reading an answer, opening a page, or reordering a loop —
-never by a passing assertion. The generalisation is [loop.md](loop.md) T2 and it is the whole
+never by a passing assertion. The seventh adds a rule the first six only implied: **a layer-1
+harness cannot prove a query runs, only that it was written.** Anything that emits SQL, a
+request body or a file needs a case that EXECUTES it — which is why `admin_check.py` and
+`metering_check.py` both grew a `--live` mode rather than more introspection. The generalisation is [loop.md](loop.md) T2 and it is the whole
 reason this repo writes things down: **an error-shaped check passes while the thing you
 wanted silently did not happen.**
 
@@ -334,7 +339,7 @@ feature in a numbered folder, each carrying acceptance criteria that **name a ha
 rather than describing one, plus the thing that must keep working. Write those cases and watch
 them fail before writing the feature. Build one feature per session, lowest layer first,
 handing model-decided features to [loop-prompt.md](loop-prompt.md). Verify low to high, and
-then — because a green suite in this repo has been wrong five times in five modules — open the
+then — because a green suite in this repo has been wrong seven times in seven modules — open the
 page and read one real answer. Ship with the migration already applied, then move the durable
 half into CLAUDE.md, PRD.md, EVAL.md and loop.md, so the folder you just wrote can safely
 become archive.

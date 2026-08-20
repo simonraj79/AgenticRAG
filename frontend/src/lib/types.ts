@@ -1032,3 +1032,166 @@ export type GoldenSetFile = {
   exported_at?: string;
   questions: GoldenSetFileQuestion[];
 };
+
+// --------------------------------------------------------------------------
+// Admin console -- `new features/14-admin-observability/`
+// --------------------------------------------------------------------------
+
+/**
+ * A number and the population it rests on.
+ *
+ * **Never render `value` without `measured`/`total`.** 76 of this system's
+ * queries predate metering and can never be backfilled -- OpenRouter's
+ * generation ids were never stored, so there is nothing to look up. A cost of
+ * `0` over `measured: 0` and a cost of `0` over `measured: 400` are completely
+ * different facts and look identical once the denominator is dropped. EVAL.md
+ * records the same trap under `scored_count`, where a metric's mean had its own
+ * denominator and the scorecard's footnote did not.
+ */
+export type Measured = {
+  value: number | null;
+  measured: number;
+  total: number;
+};
+
+export type Spend = {
+  cost_usd: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  calls: number;
+  /** Calls whose cost the PROVIDER reported. The gap is embeddings and rerank. */
+  priced_calls: number;
+};
+
+export type AdminOverview = {
+  users: number;
+  /** Rows created by the dev-login shim. 15 users is not always 15 people. */
+  dev_identities: number;
+  agents: number;
+  documents: number;
+  conversations: number;
+  queries: number;
+  eval_runs: number;
+  handouts: number;
+  refusal_rate: Measured;
+  spend: Spend;
+  /** Metered queries over all queries. The most important number on the page. */
+  coverage: Measured;
+  since: string | null;
+};
+
+export type AdminUser = {
+  id: string;
+  email: string;
+  name: string | null;
+  role: string;
+  is_active: boolean;
+  created_at: string;
+  last_login_at: string | null;
+  is_dev_identity: boolean;
+  agents: number;
+  conversations: number;
+  queries: number;
+  spend: Spend;
+};
+
+export type AdminAgent = {
+  id: string;
+  name: string;
+  owner_email: string;
+  owner_user_id: string;
+  created_at: string;
+  documents: number;
+  conversations: number;
+  queries: number;
+  eval_runs: number;
+  handouts: number;
+  spend: Spend;
+};
+
+export type AdminConversation = {
+  id: string;
+  title: string | null;
+  created_at: string;
+  updated_at: string;
+  user_email: string;
+  agent_name: string;
+  agent_id: string;
+  turns: number;
+  refusals: number;
+  spend: Spend;
+};
+
+export type AdminTurn = {
+  id: string;
+  created_at: string;
+  question: string;
+  answer: string | null;
+  model_used: string | null;
+  latency_ms: number | null;
+  refused: boolean;
+  prompt_tokens: number | null;
+  completion_tokens: number | null;
+  cost_usd: number | null;
+  /** False means this turn predates metering. It does NOT mean it was free. */
+  measured: boolean;
+};
+
+export type AdminTranscript = {
+  id: string;
+  title: string | null;
+  user_email: string;
+  agent_name: string;
+  created_at: string;
+  turns: AdminTurn[];
+  spend: Spend;
+};
+
+export type AdminSpendGroup = Spend & { key: string | null };
+
+export type AdminSpend = {
+  group_by: string;
+  days: number;
+  groups: AdminSpendGroup[];
+  daily: { day: string; cost_usd: number; calls: number }[];
+};
+
+export type AdminAccount = {
+  recorded: { cost_usd: number; calls: number; since: string | null };
+  openrouter: {
+    ok: boolean;
+    error: string | null;
+    total_credits?: number;
+    total_usage?: number;
+    key_usage?: number;
+    key_usage_daily?: number;
+    key_usage_weekly?: number;
+    key_usage_monthly?: number;
+    key_limit_remaining?: number | null;
+  };
+  note: string;
+};
+
+export type AdminEvalRun = {
+  id: string;
+  agent_id: string;
+  agent_name: string;
+  owner_email: string;
+  created_at: string;
+  status: string;
+  judge_model: string | null;
+  generation_model: string | null;
+  scored_count: number | null;
+  error_count: number | null;
+  summary: Record<string, unknown> | null;
+};
+
+export type AdminAuditEntry = {
+  id: string;
+  created_at: string;
+  actor_email: string | null;
+  action: string;
+  resource_type: string | null;
+  resource_id: string | null;
+  metadata: Record<string, unknown> | null;
+};

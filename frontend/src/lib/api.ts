@@ -46,6 +46,17 @@ import type {
   HandoutRequest,
   TraceEvent,
 } from "./types.ts";
+import type {
+  AdminAccount,
+  AdminAgent,
+  AdminAuditEntry,
+  AdminConversation,
+  AdminEvalRun,
+  AdminOverview,
+  AdminSpend,
+  AdminTranscript,
+  AdminUser,
+} from "./types.ts";
 
 /**
  * The ONLY configuration value the frontend receives.
@@ -880,4 +891,55 @@ export const handouts = {
    */
   downloadUrl: (agentId: string, handoutId: string) =>
     `${API_URL}/api/agents/${encodeURIComponent(agentId)}/handouts/${encodeURIComponent(handoutId)}/download`,
+};
+
+
+/**
+ * The admin console's reads. Every one is 403 for a non-admin.
+ *
+ * **A 403 here is a correct answer, not a broken page.** `lib/api.ts` routes
+ * 401 to the login screen, which is right for an expired session and wrong for
+ * this: the caller IS authenticated and logging in again changes nothing. The
+ * backend returns 403 for exactly that reason (`app/auth/deps.py`), and the
+ * console renders it as a refusal.
+ *
+ * Nothing here hides a route from a non-admin as a security measure. The nav
+ * entry is hidden because showing a link that always fails is bad UI; the
+ * control is the 403.
+ */
+export const admin = {
+  overview: () => api<AdminOverview>("/api/admin/overview"),
+
+  users: () => api<AdminUser[]>("/api/admin/users"),
+
+  agents: () => api<AdminAgent[]>("/api/admin/agents"),
+
+  conversations: (opts: { userId?: string; agentId?: string; limit?: number } = {}) => {
+    const params = new URLSearchParams();
+    if (opts.userId) params.set("user_id", opts.userId);
+    if (opts.agentId) params.set("agent_id", opts.agentId);
+    if (opts.limit) params.set("limit", String(opts.limit));
+    const query = params.toString();
+    return api<AdminConversation[]>(`/api/admin/conversations${query ? `?${query}` : ""}`);
+  },
+
+  /**
+   * The only call that returns another person's text -- and the only one the
+   * backend writes an `audit_log` row for. Calling it is an act that is
+   * recorded, so do not call it speculatively (on hover, to prefetch, or in a
+   * list render). Fetch it when a human asked to read the thread.
+   */
+  transcript: (conversationId: string) =>
+    api<AdminTranscript>(`/api/admin/conversations/${encodeURIComponent(conversationId)}`),
+
+  spend: (groupBy: string, days = 30) =>
+    api<AdminSpend>(
+      `/api/admin/spend?group_by=${encodeURIComponent(groupBy)}&days=${days}`,
+    ),
+
+  evalRuns: () => api<AdminEvalRun[]>("/api/admin/eval-runs"),
+
+  account: () => api<AdminAccount>("/api/admin/account"),
+
+  audit: (limit = 100) => api<AdminAuditEntry[]>(`/api/admin/audit?limit=${limit}`),
 };
