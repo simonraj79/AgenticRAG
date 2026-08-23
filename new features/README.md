@@ -160,3 +160,24 @@ is COMPLETE, only that the instrumentation it was handed works**, and `--live` d
 a live case exercises what it invokes, and this was a call site nobody invoked. The answer is a
 case that reads the application's own source — case 12 walks the call graph with `ast` and
 fails on any entry point reaching `build_chat_model` outside a `meter_as`
+
+---
+
+**[15-failure-paths/](15-failure-paths/PLAN.md)** | shipped | Three defects that all lived on
+FAILURE paths -- a streamed turn that raises, a turn that dies mid-commit, a handout row with
+no storage key -- none of them visible on any happy path, which is why all three survived. A
+failed turn stranded the client on a rolled-back conversation id, so every later send 404'd
+until the user clicked New chat; a turn that raised discarded roughly nine billable calls'
+worth of `api_usage`, leaving neither a row nor a log line; and a keyless row under the R2
+route read a `deferred()` column on an async session, which is a 500 whose traceback names
+neither the line nor the column -- latent today at zero affected rows, and it breaks the
+documented `STORAGE_ROUTE=postgres` rollback, which is only ever discovered in an emergency.
+**The method is the finding.** Everything was built harness-first with every case watched
+failing, and every suite was green -- 280 backend assertions, 56 frontend tests -- and an
+adversarial review then deleted one line at a time and found THREE that no case guarded: the
+double-write flag, the fourth revert gate, and the download's `else`. Each carried a comment
+explaining why it was load-bearing, and every reader agreed; only deleting them showed nothing
+would notice if they went. That step is now `build.md` phase 6. The review also caught both
+new write modes borrowing a REAL user with `select(User).limit(1)` -- no `ORDER BY`, so which
+of 15 people got a fixture in their dashboard was whatever Postgres returned first. Harnesses
+own their subjects now, and CLAUDE.md carries the rule.

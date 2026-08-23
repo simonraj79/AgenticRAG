@@ -58,7 +58,7 @@ from pydantic import (
     StringConstraints,
     model_validator,
 )
-from sqlalchemy import func, select
+from sqlalchemy import func, inspect as sa_inspect, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import undefer
 
@@ -320,9 +320,18 @@ async def _load_owned(
     agent that does not hold it means the route is not agent-scoped and the
     boundary is decorative.
 
-    `with_content=True` is the ONLY place `content` is ever undeferred, and it is
-    reached from one route. Everything else in this module loads the row without
-    it.
+    `with_content=True` is the ONLY place `content` is ever UNDEFERRED, and it
+    is reached from one route. Everything else in this module loads the row
+    without it.
+
+    It is not, however, the only place the column is ever FETCHED, and that
+    distinction is worth a sentence rather than a discovery. `download_handout`'s
+    Postgres fallthrough selects `Handout.content` by hand, in a second
+    statement, because whether it needs the bytes at all is a fact about the ROW
+    -- `storage_key IS NULL` -- and that fact is not known until this query has
+    already returned. Reading those two as one thing is the defect change set 15
+    feature 03 fixed; the comment block at that fallthrough carries the whole
+    argument.
     """
     query = select(Handout).where(
         Handout.id == handout_id,
@@ -621,6 +630,12 @@ async def download_handout(
     proved the row belongs to this agent, and the presigned URL is minted only
     after it has. The bucket is private; an unsigned GET returns 400.
 
+    **A `ready` row with no `storage_key` falls through to Postgres even when
+    the route is R2**, and fetching its bytes then costs a second statement --
+    see the comment block at that fallthrough. That row shape is what makes the
+    documented `STORAGE_ROUTE=postgres` rollback survivable, and until change
+    set 15 feature 03 it answered 500.
+
     Three things are deliberately preserved across the two roads, because each
     has a consumer that would break silently:
 
@@ -642,6 +657,18 @@ async def download_handout(
     # `with_content` is False on the R2 road: the bytes are not needed to build a
     # redirect, and undeferring them would reintroduce exactly the cost this
     # route exists to remove.
+    #
+    # THIS IS AN OPTIMISATION AND NO LONGER A CORRECTNESS DECISION, which is the
+    # half of change set 15 feature 03 that is easiest to read past.
+    # `storage.enabled()` is a fact about the DEPLOYMENT; whether this particular
+    # download ends up needing bytes out of Postgres is a fact about the ROW, and
+    # the two disagree for exactly one shape -- a `ready` row with
+    # `storage_key IS NULL`, on the R2 road. Reading the deferred attribute in
+    # that gap was a 500. The fallthrough below no longer depends on this line
+    # having guessed right; all it decides now is whether the bytes arrive in
+    # THIS round trip or in a second one. On the Postgres road every ready row
+    # needs them, so fetching them here saves a statement; on the R2 road almost
+    # no row does.
     handout = await _load_owned(db, agent, handout_id, with_content=not storage.enabled())
 
     if handout.status != "ready":
@@ -677,18 +704,114 @@ async def download_handout(
         # `<img>` and httpx all follow for a GET without argument.
         return RedirectResponse(url, status_code=status.HTTP_302_FOUND)
 
-    # The Postgres road, unchanged -- and reachable two ways: `storage_route` is
-    # "postgres", or the route is R2 and this row predates the backfill. The
-    # second is why this is a fallthrough rather than an error: during the
-    # blue/green window both kinds of row exist and both must download.
-    if handout.content is None:
+    # ------------------------------------------------------------------
+    # THE POSTGRES ROAD -- reachable two ways: `storage_route` is "postgres", or
+    # the route is R2 and this row has no key. The second is why this is a
+    # fallthrough rather than an error: during the blue/green window both kinds
+    # of row exist and both must download.
+    #
+    # **`content` IS NOT NECESSARILY LOADED HERE, and reading it when it is not
+    # was an unconditional 500.** That is the defect this block exists to fix.
+    # On the R2 road the load above leaves the column `deferred()`, so the old
+    # `handout.content` was implicit IO on an `AsyncSession`: `MissingGreenlet`,
+    # raised from inside greenlet adaptation, naming neither this line nor the
+    # column nor the table. It did not arrive legibly at the browser either --
+    # the handler raises before `CORSMiddleware` can add its headers, so the
+    # failure presents as a CORS error and sends the reader into the wrong
+    # module entirely. `admin_check.py` records the identical misdirection for
+    # `GET /api/admin/spend`.
+    #
+    # NOBODY IS BROKEN BY IT TODAY, and that is the argument for fixing it
+    # rather than filing it. Counted against production, 2026-08-23: **ZERO**
+    # keyless rows are `ready` -- every one of them is `failed`, so no download
+    # that exists takes this branch on the R2 road. The absolute count of
+    # keyless rows is deliberately NOT quoted here: a live row count in a
+    # comment is perishable by construction and stops being true without anybody
+    # editing the file, and only the zero is load-bearing.
+    #
+    # What it breaks is the documented
+    # `STORAGE_ROUTE=postgres` ROLLBACK -- switch to postgres, write handouts,
+    # switch back, and every one of those rows 500s forever. A rollback that
+    # does not work is worse than no rollback, because it is only ever exercised
+    # in an emergency, by somebody already handling one.
+    #
+    # **The condition asks the OBJECT, not the deployment**, and that is the
+    # defect restated in reverse rather than fussiness. The bug was a fact about
+    # the deployment standing in for a fact about the row, so writing
+    # `if storage.enabled():` here would reproduce the same mistake in a new
+    # place and stay correct only for as long as nothing upstream changed its
+    # mind. `sa_inspect(handout).unloaded` is set arithmetic over the instance's
+    # own attribute dict -- no query, no IO, nothing that can raise -- and it
+    # cannot disagree with the load that actually happened. It stays right if
+    # the `with_content` line above is changed, or deleted.
+    #
+    # **What this must NOT become is an unconditional undefer.** That is the
+    # whole cost the R2 route exists to remove: Render's starter plan runs a
+    # single uvicorn worker, and undeferring at the load would put up to
+    # `sandbox_max_artifact_bytes` back through that one heap on EVERY download,
+    # redirects included. It would also pass every case written for this defect,
+    # which is why the harness measures the negative directly rather than
+    # trusting the positive.
+    #
+    # Pinned by `scripts/storage_check.py --live`. Case 78: a `ready` keyless row
+    # answers 200 with byte-identical content and a quoted disposition. Case 78b:
+    # the bytea is read on the keyless road AND NOT on the keyed one -- that
+    # second half is the guard against the unconditional fix, and nothing else in
+    # the repository catches it, because S8, S8b, S8c, S28 and S29 all follow
+    # redirects and stay green against a route that stopped emitting any. Case
+    # 79b is the second latent 500 at this same line, and the one that survives a
+    # careless repair: the `content is None` test below IS the read that raised,
+    # so the row with neither a key nor bytes was precisely the row that never
+    # reached the 409 written for it.
+    #
+    # **AND CASE 78d IS THE ONLY THING PINNING THE `if`/`else` DIRECTLY BELOW.**
+    # It is named here because the three cases above are not enough and an
+    # earlier version of this comment listed only those three -- an invitation to
+    # read the named guards, delete the `else`, refetch unconditionally, and
+    # watch every one of them pass. MEASURED against exactly that edit,
+    # 2026-08-23: 78 stayed 200 at 52/52 bytes, 78b stayed keyless=1/keyed=0, 79b
+    # stayed 409, and 78d alone went red at 2 statements mentioning the column
+    # where 1 is correct. A comment that names a subset of the guards is worse
+    # than one that names none, because it tells an editor when to stop looking.
+    #
+    # `agent_id` is repeated on this second statement even though `_load_owned`
+    # has already proved it. That docstring makes the argument -- a scoping check
+    # belongs in a WHERE clause, where an unrelated-looking edit cannot delete it
+    # -- and the property worth being able to establish by grep is that no
+    # statement in this module fetches a handout without naming its agent. It
+    # costs nothing; this is the same primary-key lookup either way.
+    #
+    # **That property is now ASSERTED, by case 77c, and it was not before.**
+    # Deleting `Handout.agent_id == agent.id` below left both modes of
+    # `storage_check.py` fully green (measured 2026-08-23) -- which is what a
+    # defence-in-depth check looks like by definition: redundant, therefore
+    # invisible to any assertion about a response, therefore deletable by a tidy
+    # edit with nothing going red. 77c parses this module and requires every
+    # `select(...)` chain that mentions `Handout` to mention `Handout.agent_id`.
+    # A paragraph claiming a property is greppable is not a grep.
+    # ------------------------------------------------------------------
+    if "content" in sa_inspect(handout).unloaded:
+        content = await db.scalar(
+            select(Handout.content).where(
+                Handout.id == handout.id,
+                Handout.agent_id == agent.id,
+            )
+        )
+    else:
+        content = handout.content
+
+    # `content is None` is now two facts arriving at one answer: the row never
+    # had bytes, or it was deleted between the two statements above. A 409 saying
+    # there is no stored file is honest about both, and a download racing a
+    # delete is a real sequence -- the panel offers both actions on one card.
+    if content is None:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="This handout has no stored file.",
         )
 
     return Response(
-        content=handout.content,
+        content=content,
         media_type=handout.mime_type,
         headers={
             # `_safe` is what stands between a model-written filename and this

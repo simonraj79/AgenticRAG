@@ -1537,6 +1537,51 @@ a guard; a real guard would be a start command that distinguishes "the DB is ahe
 DB is behind" and refuses only the second, or a pre-deploy check comparing
 `alembic heads` against `alembic current`. Neither exists.
 
+### Opened 2026-08-23 by the failure-paths change set
+
+Full record in
+[new features/15-failure-paths/PLAN.md](new%20features/15-failure-paths/PLAN.md). Three
+defects that all lived on FAILURE paths — what happens when a turn raises, a stream dies, or
+a row is missing a key — which is why none was visible on any happy path and all three
+survived this long. Items 51-55 are what is left after fixing them.
+
+**51. `app/metering/store.py::persist_quietly` is dead code.** `grep -rn persist_quietly
+backend/app` returns the definition and comments about it, and no call site. Its swallow —
+log string included — now lives at the `run_turn` call site, which is a shared contract stated
+twice and the copy that drifts is never the one you are reading. Either delete it, or widen
+its return so the row count comes from the writer and the call site's six lines collapse to
+one. `metering_check` case 13c asserts the log string is not restated, so it goes red if the
+duplication is reintroduced rather than resolved.
+
+**52. The artefact-storage failure branch is still unexecuted offline.** `metering_check` 13d
+pins that `ask.py`'s module logger EXISTS and answers `.exception` — a real fix, since
+`log.exception(...)` in the `except storage.StorageError` branch previously resolved to no
+binding at all and would have raised `NameError` and killed the whole turn on a bucket
+hiccup. But no case ENTERS that branch, which needs a real turn plus a storage fault. The
+NameError class of bug is caught; that handler's behaviour is not.
+
+**53. No Python floor is pinned anywhere in the repo.** No `runtime.txt`, no
+`python_requires`. The cancellation re-arm added by this change set uses `Task.cancelling()`,
+which is 3.11+; it is read through `getattr` so an older interpreter degrades to "do not
+re-arm" rather than raising inside an exception handler. That is defensive, not a
+specification. The floor should be stated rather than inferred from whatever the venv happens
+to hold.
+
+**54. `metering_check.py --db` commits exactly one real row, and that is unavoidable.** The
+seam under test opens its own session and commits, so a flush-and-rollback would not be
+exercising the thing under test. The residual risk is a process killed between the commit and
+the sweep. Mitigated by legibility rather than solved: the marker `gen-harness-D1-<uuid>` is
+printed BEFORE the write, so an orphan is findable by name. See CLAUDE.md's *Harnesses that
+write to the database*.
+
+**55. `agentic_check.py` S37 and S38 are named as acceptance criteria and were never
+written.** They are the live end of the phantom-conversation fix — a failed streamed turn
+observed through the real API rather than through mocked handlers in jsdom. The frontend
+cases (AC1-AC10) pin the client's behaviour against a scripted transport; nothing yet pins
+that the server actually rolls the row back. This is the same gap `build.md` §7 records as
+"a layer-1 harness cannot prove a query runs, only that it was written", arriving on the
+frontend side of the seam.
+
 ---
 
 ## 11. Out of scope

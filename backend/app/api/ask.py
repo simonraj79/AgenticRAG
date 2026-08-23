@@ -58,10 +58,12 @@ terminal `done` payload byte-identical to this route's body.
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 import time
 import uuid
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Annotated
 
@@ -89,6 +91,7 @@ from app.db.models import (
     User,
 )
 from app.api.handouts import HandoutOut
+from app.db.session import SessionLocal
 from app.db.specialists import BY_SLUG, roster
 from app.metering import store as metering_store
 from app.metering.context import collect_usage, meter_as
@@ -115,6 +118,16 @@ from app.rag.trace import (
 )
 
 router = APIRouter(prefix="/api", tags=["ask"])
+
+# **This module used `log` before it had one.** `log.exception(...)` at the
+# artefact-storage failure path (section 8, "Could not store a tool artefact")
+# has been a bare `NameError` waiting on that branch since it was written: the
+# name resolves nowhere, so a bucket hiccup -- the one thing that handler exists
+# to survive -- would have killed the whole turn instead of dropping one
+# attachment. Found while wiring the failure-path seam below, which needs a
+# logger of its own for exactly the same reason: a swallow that cannot say what
+# it swallowed is a silence, not a guard.
+log = logging.getLogger(__name__)
 
 # `queries.session_id` wants the session row's id, and only `optional_session`
 # returns the row rather than the user. Optional rather than required: the
@@ -587,6 +600,212 @@ async def _recent_history(db: AsyncSession, conversation_id: uuid.UUID) -> list[
 # --------------------------------------------------------------------------
 # The turn engine
 # --------------------------------------------------------------------------
+# A TURN THAT RAISES USED TO DISCARD THE SPEND IT HAD ALREADY PAID FOR, and the
+# loss was silent in the strongest sense this repository has a name for.
+#
+# Measured shape of one ordinary turn (CLAUDE.md, 2026-08-20, a two-document
+# agent): a rewrite, THREE embeddings, THREE reranks and TWO generation calls --
+# nine billable calls, $0.00049354. Every one of those records is buffered by
+# `collect_usage` and was drained in exactly one place, `_run_turn`'s
+# `persist_quietly` call, which only `db.add()`s; the commit that makes those
+# rows real is fifteen lines further on. So any raise between the `queries`
+# flush and that commit threw the whole buffer away, and a raise AT the commit
+# rolled back rows that had already been added.
+#
+# There was no log line either, which is what makes this `loop.md` T2 rather
+# than an ordinary leak. `LoggingSink.record` (`meter.py:124-136`) logs only
+# when NO collection is active -- it returns the moment `emit_record` accepts
+# the record into the turn's bucket. A turn with a bucket open therefore
+# produced neither a row nor a line. The spend was not unattributed; it was
+# ABSENT. There is no error anywhere to trigger on, only an outcome that did
+# not happen.
+#
+# The failure this makes visible is the one an operator most needs to see, and
+# CLAUDE.md records this project hitting it three separate times: an OpenRouter
+# `404 No endpoints found` storm, where every turn fails and the console reads
+# as a quiet week.
+#
+# Nor could the admin console reveal the hole on its own. Coverage there is
+# `distinct(api_usage.query_id) / count(queries)`, and on a failed turn both
+# sides disappear together -- the `queries` row rolls back with the usage rows,
+# so the ratio stays flat while the money leaves. A measurement can only report
+# a denominator it still has.
+#
+# `scripts/metering_check.py` cases 13, 13b, 13c, 13d, 14a-14e, 15, 16, 16b, 17a
+# and 17b pin the fix; D1/D2/D3 execute it against the real schema and D4 proves
+# the harness left nothing behind. The ones added after the first review found
+# them unpinned: 14d (rows added, then a FAILING commit), 14e (an empty buffer
+# opens no connection), 16 (the receipt is written where the commit is) and
+# 17a/17b (a cancellation is contained, and re-armed).
+
+
+@dataclass
+class _TurnReceipt:
+    """What the turn managed to make DURABLE. Two facts, two writers.
+
+    `_run_turn` writes both -- `rows_written` where it persists, `committed`
+    where its single commit returns -- and `_persist_orphaned_usage` reads them.
+    Nothing else touches it.
+
+    **Two fields rather than one boolean, because there are FOUR states and a
+    boolean reaches only two.** `store.persist_quietly` returns `(None, None)`
+    both when it had nothing to write and when it raised and was swallowed, so
+    "the commit returned" alone would mark a buffer durable that was never
+    written -- reproducing the original hole THROUGH the fix:
+
+        committed  rows_written  means                                seam writes
+        False      None          the turn raised at or before persist N rows
+        True       N             the ordinary successful turn         zero
+        True       None          persist raised, then commit returned N rows
+        False      N             persist added rows, then the COMMIT   N rows
+                                 RAISED and rolled them back
+
+    The third row is the one no plain boolean can reach; the fourth is the case
+    the feature was built for (PLAN section 3.5's headline: rows added, then
+    discarded by a failing commit) and an earlier version of this table omitted
+    it while calling itself exhaustive. `metering_check.py` case 14c drives the
+    first three in one case and 14d drives the fourth -- separately, because 14d
+    is the only one of the four that goes red when `durable` drops `committed`.
+    """
+
+    rows_written: int | None = None
+    committed: bool = False
+
+    @property
+    def durable(self) -> bool:
+        """Both facts, or neither counts. Dropping either is silent, differently.
+
+        Drop `committed` and the seam declines to write on a FAILING commit --
+        the one failure it was built for, and the fourth row above. Drop
+        `rows_written` and a swallowed persist followed by a good commit marks
+        the buffer durable having written nothing.
+
+        Both halves are pinned, and they needed different cases: 14c goes red
+        without `rows_written`, 14d goes red without `committed`. That
+        asymmetry is why the fourth state is driven separately rather than
+        folded into 14c, which stays green under the `committed` mutation.
+        """
+        return self.committed and bool(self.rows_written)
+
+
+async def _persist_orphaned_usage(records: list, receipt: _TurnReceipt) -> int:
+    """A failed turn's spend, written from a SECOND session. Returns rows written.
+
+    **The guard lives here, in the seam, not only at the call site**, and it is
+    the whole feature. A `finally` that fires on the success path too records
+    every normal turn's spend twice, and this repository has had that exact bug
+    once already: `collect_usage`'s docstring in `app/metering/context.py` is
+    the record of the eval-job / `run_turn` double-count -- roughly double the
+    real spend, no error anywhere, and both totals plausible, which is what
+    would have let it survive. `metering_check.py` case 13 is passed PERFECTLY by a `finally`
+    that always persists and cannot see this at all; case 14c is what does.
+
+    **It returns without opening a session on the durable path**, and that is a
+    different claim from "writes no rows" -- 14c asserts `sessions_opened == 0`
+    as well as `rows == 0`. A seam that opened a connection and added nothing
+    would still pay the cost below on EVERY successful turn, which is the one
+    path where the extra connection is never justified.
+
+    **Why a second session at all.** The turn's session is being rolled back --
+    that is the premise -- so writing through it writes nothing. The four
+    precedents in this repository do the same thing for the same reason
+    (`rag/jobs.py:230`, `eval/jobs.py:299`, `handouts/jobs.py:947`,
+    `api/eval.py:1086`).
+
+    **Their connection-cost reasoning does NOT transfer, and copying the fourth
+    precedent unread is the trap.** All four close their own `async with
+    SessionLocal()` BEFORE their `finally` runs, so their second session is
+    never concurrent with their first. `run_turn`'s callers hold the turn
+    session open across this call -- the FastAPI dependency in
+    `ask.py`/`conversations.py`, and `stream.py`'s own `async with`. Against
+    `pool_size=5, max_overflow=5` on a single uvicorn worker, with the 404 storm
+    above being precisely the moment every turn wants the extra connection at
+    once. No harness can prove a pool property, so the mitigation IS this code:
+    the function guards on `records` and awaits nothing else, so the second
+    connection is opened only when there is something to write and is held for
+    one insert and one commit. `metering_check.py` case 14e executes that guard
+    with an EMPTY buffer, on both non-durable receipts -- a turn that died before
+    its first model call is the ordinary shape during the 404 storm this is
+    written for. Every case before 14e passed three records, so the clause was
+    never run by anything.
+
+    **`query_id` is deliberately not passed, and that omission is measured
+    rather than argued.** The `queries` row was flushed inside the transaction
+    that just died, so naming its id from a surviving session is a
+    referential-integrity violation -- `metering_check.py --db` case D2 executes
+    that insert and watches the database refuse it. The column is nullable
+    precisely so an unattributed row is legal: losing the attribution must never
+    mean losing the cost. No `meter_as` site in the repo sets
+    `UsageRecord.query_id` (case 15 asserts that too), so `store.to_row` leaves
+    the column NULL for free.
+
+    **Nothing escapes this function, and `except Exception` was not enough to
+    say so.** It runs in a `finally` outside `_run_turn`'s commit handler, whose
+    `except` deletes staged storage keys and then RE-RAISES the original error.
+    An exception thrown from here would replace that error with an accounting
+    one, and the caller would be told the meter broke rather than what actually
+    killed the turn. Same asymmetry as `UsageMeter.on_llm_end`: if the
+    accounting is broken, the accounting is what should fail.
+
+    The claim was FALSE for one exception and it is the one that matters:
+    `asyncio.CancelledError` derives from BaseException, not Exception (verified
+    on this venv, Python 3.12.10), so a uvicorn shutdown or `--reload` landing
+    inside the seam's single DB round trip replaced a real
+    `404 No endpoints found` with `CancelledError` -- measured by driving the
+    seam with a session factory that raises it. Hence `except BaseException`.
+
+    **A swallowed cancellation is a different bug, so it is RE-ARMED rather than
+    eaten.** `asyncio.current_task().cancelling()` is non-zero only when a
+    cancel was genuinely requested (Python 3.11+), which separates "the server
+    is going away" from a driver raising `CancelledError` spuriously; in the
+    first case the cancel is requested again on the way out, so it is delivered
+    at the caller's next await instead of here, where it would be the accounting
+    replacing the turn's own error. `metering_check.py` case 17a asserts the
+    containment and 17b asserts the re-arm -- separately, because a build that
+    swallowed cancellation entirely would pass 17a alone.
+    """
+    if not records or receipt.durable:
+        return 0
+    try:
+        async with SessionLocal() as meter_db:
+            metering_store.persist(meter_db, records)
+            await meter_db.commit()
+        # INFO, not DEBUG. This line is the only surviving evidence that money
+        # was spent on a turn that produced nothing else -- no answer, no
+        # `queries` row, no trace -- so it is what an operator greps for when
+        # the console shows a quiet week and the OpenRouter bill does not.
+        log.info(
+            "recovered %s usage record(s) from a turn that did not commit; "
+            "written unattributed (query_id NULL)",
+            len(records),
+        )
+        return len(records)
+    except BaseException as exc:  # noqa: BLE001 -- accounting never replaces the real error
+        log.warning(
+            "could not persist the usage of a failed turn; %s record(s) lost",
+            len(records),
+            exc_info=True,
+        )
+        # See the docstring: contained here so the turn's own error survives,
+        # re-requested so a real shutdown is not silently declined. Anything
+        # else BaseException-shaped (KeyboardInterrupt, SystemExit) is swallowed
+        # too and that is the same trade, taken deliberately: this frame owes
+        # the caller the error that killed the turn, and it holds one insert and
+        # one commit.
+        if isinstance(exc, asyncio.CancelledError):
+            task = asyncio.current_task()
+            # `Task.cancelling()` is 3.11+; this venv is 3.12.10 and nothing in
+            # the repo pins a floor, so it is read defensively. An
+            # AttributeError raised HERE, inside the handler, would escape and
+            # do the exact thing this handler exists to prevent. Absent, the
+            # conservative reading is "no cancel was requested": a swallowed
+            # cancellation delays a shutdown by one turn, where cancelling a
+            # task nobody cancelled kills a healthy answer.
+            cancelling = getattr(task, "cancelling", None)
+            if task is not None and callable(cancelling) and cancelling():
+                task.cancel()
+        return 0
+
 
 async def run_turn(
     db: AsyncSession,
@@ -616,21 +835,44 @@ async def run_turn(
 
     `query_id` is deliberately NOT set here: the row does not exist yet.
     `store.persist` stamps it, and `app/metering/store.py` says why.
+
+    **The `finally` is the fifth of five `collect_usage()` sites to grow one**,
+    and it was the last because this is the only one whose happy path already
+    persisted -- which made the hole look like it was already plugged.
+    `metering_check.py` case 13 derives that denominator from the source rather
+    than from a list of filenames, so a sixth site added without a `finally`
+    goes red on the day it lands.
+
+    `records` is bound to an empty list BEFORE the `with`, so the `finally` has
+    something to read even if `collect_usage()` or `meter_as()` raises on entry.
+    The name is rebound to the bucket by the `with`, and the bucket outlives the
+    block: `collect_usage`'s own `finally` resets a ContextVar, it does not
+    empty the list.
     """
-    with collect_usage() as records, meter_as(
-        user_id=user.id, agent_id=agent.id, call_kind="generation"
-    ):
-        return await _run_turn(
-            db,
-            agent=agent,
-            user=user,
-            session=session,
-            conversation=conversation,
-            question=question,
-            rewrite=rewrite,
-            emit=emit,
-            usage_records=records,
-        )
+    records: list = []
+    receipt = _TurnReceipt()
+    try:
+        with collect_usage() as records, meter_as(
+            user_id=user.id, agent_id=agent.id, call_kind="generation"
+        ):
+            return await _run_turn(
+                db,
+                agent=agent,
+                user=user,
+                session=session,
+                conversation=conversation,
+                question=question,
+                rewrite=rewrite,
+                emit=emit,
+                usage_records=records,
+                receipt=receipt,
+            )
+    finally:
+        # Reads the receipt and does nothing on an ordinary turn. See
+        # `_persist_orphaned_usage` for why the guard is in the seam and not
+        # here: a `finally` that always persists passes case 13 perfectly and
+        # doubles the console.
+        await _persist_orphaned_usage(records, receipt)
 
 
 async def _run_turn(
@@ -644,6 +886,7 @@ async def _run_turn(
     rewrite: bool | None = None,
     emit: events.Emit | None = None,
     usage_records: list | None = None,
+    receipt: _TurnReceipt | None = None,
 ) -> AskOut:
     """Answer one question inside one thread, and record everything about it.
 
@@ -674,6 +917,13 @@ async def _run_turn(
     with `emit is None` every branch below and beneath is the line it already was.
     """
     started = time.perf_counter()
+
+    # Two assignments below write to this and nothing else reads it here, so an
+    # absent one is a receipt nobody collects rather than a branch. That keeps
+    # the two writes unconditional, which matters: a receipt updated inside an
+    # `if` is a receipt that can be silently skipped, and the whole guard in
+    # `_persist_orphaned_usage` keys on those two fields being honest.
+    receipt = receipt or _TurnReceipt()
 
     # History BEFORE the row for this turn exists. `Query.created_at` is a
     # server-side now() assigned at flush, so a placeholder added first would be
@@ -1392,9 +1642,55 @@ async def _run_turn(
     # admin console reads `api_usage`; these exist for the per-turn UI and for
     # cheap sorting, and they have been NULL on every row written before this
     # feature -- which the console renders as "not measured", never as zero.
-    query.prompt_tokens, query.completion_tokens = metering_store.persist_quietly(
-        db, usage_records or [], query_id=query.id
-    )
+    #
+    # **`persist` inside a `try` here, rather than `persist_quietly`, and the
+    # duplication is deliberate.** The failure-path seam has to know whether
+    # this write ADDED ROWS, and `persist_quietly`'s return value cannot say:
+    # it answers `(None, None)` when there was nothing to write, when it raised
+    # and swallowed, AND on a perfectly good write of records that carry no
+    # token counts -- a rerank-only turn is exactly that shape. Reading a token
+    # sum as a row count would mark such a turn's buffer durable when it was
+    # not, or not durable when it was, and the second of those is the
+    # double-count `collect_usage`'s docstring in `context.py` records. So the
+    # count is taken from the records handed over (`persist` writes one row per
+    # record and filters none), and the swallow is repeated here rather than
+    # inferred.
+    #
+    # `new features/15-failure-paths/02-failed-turn-metering.md` section 6(b)
+    # names the alternative and PREFERS it: widen `store.persist_quietly`'s
+    # return so the count comes from the writer. That edit belongs to
+    # `app/metering/store.py`, which this change set does not own, so what ships
+    # here is the route 6(b) argues against -- disclosed, not chosen. If it is
+    # ever made, collapse these six lines back to one call: cases 14a/14b/14c/14d
+    # drive the seam through an explicit receipt and are independent of which
+    # side counts, which is why the guard's behaviour is pinned either way.
+    #
+    # **The live cost of the deviation, stated so it is not rediscovered:
+    # `store.persist_quietly` now has ZERO call sites** (`grep -rn
+    # persist_quietly backend/app` finds only its definition and these comments)
+    # and its swallow lives here instead. The log line below therefore does NOT
+    # repeat store.py's -- one message, one call site, so an operator grepping a
+    # warning lands on the code that emitted it. `metering_check.py` case 13c
+    # asserts the two strings stay distinct, and case 13's drain names are
+    # derived from store.py rather than restated, so deleting the dead function
+    # is a one-line change over there that costs this harness nothing.
+    usage_records = usage_records or []
+    try:
+        query.prompt_tokens, query.completion_tokens = metering_store.persist(
+            db, usage_records, query_id=query.id
+        )
+        receipt.rows_written = len(usage_records)
+    except Exception:  # noqa: BLE001 -- accounting never costs the user an answer
+        # Same asymmetry as `persist_quietly`, which this replaces: this runs
+        # inside the caller's transaction, so a raise here would roll back the
+        # ANSWER. `receipt.rows_written` stays None, which is the third receipt
+        # state -- the seam will write the buffer from its own session even
+        # though the commit below is about to succeed.
+        log.warning(
+            "could not persist this turn's usage inside its transaction; "
+            "the failure-path seam will write it unattributed",
+            exc_info=True,
+        )
 
     # The single commit. Query, chunks, trace, handouts and conversation land
     # together or not at all.
@@ -1408,6 +1704,24 @@ async def _run_turn(
     # the caller needs to see.
     try:
         await db.commit()
+        # IMMEDIATELY after the commit RETURNS, and the position is the control.
+        # Move this one line above `await db.commit()` and a failing commit
+        # marks the buffer durable, so the seam declines to rewrite rows that
+        # just rolled back -- the exact failure this feature was built for, with
+        # nothing raising.
+        #
+        # **`metering_check.py` case 16 holds this line in place, and the note
+        # that used to sit here said no automated case could.** That was wrong,
+        # and measured wrong: deleting this line left cases 13/13b/14a/14b/14c/15
+        # and `admin_check.py` 5/5b/5c/5d ALL GREEN while every successful turn
+        # wrote its usage twice -- once attributed inside the transaction, once
+        # unattributed from the seam, because `durable` is `committed and
+        # rows_written` and the first half was now never set. It is true that
+        # both positions are syntactically fine and that every offline case
+        # constructs its own receipt; what does not follow is that nothing can
+        # read the source. 16 is ~15 lines of AST over this `try` body: find the
+        # `await db.commit()`, assert the next statement is this assignment.
+        receipt.committed = True
     except Exception:
         for key in staged_keys:
             storage.delete_quietly(key)

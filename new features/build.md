@@ -280,6 +280,34 @@ For those, "every case passes" and "every call site is covered" are unrelated st
 reason this repo writes things down: **an error-shaped check passes while the thing you
 wanted silently did not happen.**
 
+> ### Then mutate. A passing suite tells you nothing about what it would let through.
+
+**Added 2026-08-23, and it is a METHOD rather than a ninth incident — it caught three defects
+BEFORE they shipped, which is the first time that has happened here.** Change set 15 was
+implemented harness-first, every case watched failing, and every suite green: 280 backend
+assertions, 56 frontend tests. An adversarial review then deleted one line at a time and
+re-ran, and found three lines that **no case guarded**:
+
+| Delete this | And the suite says |
+|---|---|
+| `receipt.committed = True` (`ask.py`) | green — while every successful turn now writes its usage **twice** |
+| the fourth revert gate (`AgentChat.tsx`) | green — while the revert fires on a thread the user has since left |
+| the `else:` on the download fallthrough (`handouts.py`) | green — while every R2 download reads the bytea it exists to avoid |
+
+Each one had a comment explaining why it was load-bearing. Every reviewer who *read* the code
+agreed it was load-bearing. Only deleting it revealed that nothing would notice if it went.
+
+So the question at the end of verification is not *does the suite pass* — you already know
+that — it is **what could I break without the suite noticing?** Pick the three lines whose
+loss would be worst, delete them one at a time, and run. A line that survives its own deletion
+is undefended, whatever its comment claims. Restore it, write the case that goes red, and put
+the mutation in the case's own comment so the next reader can repeat it.
+
+This is the same instrument as `metering_check.py` case 12 walking the call graph for an
+unwrapped call site, and as the `--live` modes executing SQL a layer-1 harness could only
+read. All three ask the same question from different directions: **the harness measures what
+it was handed, and the interesting failures are always in what it was not.**
+
 Distinguish environment failure from defect while you are here. `agentic_check.py` prints
 `[rate]` rather than `[FAIL]` for an upstream refusal and does not exit non-zero, because a
 suite that goes red when a provider says no teaches its reader to ignore red. Treat those

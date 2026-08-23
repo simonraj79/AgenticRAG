@@ -33,7 +33,15 @@
 
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent, KeyboardEvent } from "react";
-import { chat } from "../lib/api.ts";
+// `ApiError` is imported for its STATUS rather than for its message, which is
+// the one thing `errorMessage` cannot give back. See the catch in `send`: a
+// non-zero status means the server itself reported the turn dead and its
+// transaction has already resolved, while `status === 0` is `api.ts`'s marker
+// for "the client could not complete the exchange" -- a dropped connection or a
+// stream that ended with no terminal frame -- where the turn is very likely
+// still running. The two need opposite responses, and nothing else in the
+// thrown value distinguishes them.
+import { ApiError, chat } from "../lib/api.ts";
 import type { AskStreamHandlers } from "../lib/api.ts";
 import type {
   AskResult,
@@ -391,6 +399,18 @@ export default function AgentChat({
    * attempts it and surfaces the real server error if there is one -- which is
    * the honest outcome, and the same "let the server be the authority" line the
    * settings sheet takes.
+   *
+   * **Give-up RELEASES and never reverts, and the budget is a real cost rather
+   * than a formality.** 20 attempts three seconds apart is about sixty seconds
+   * of a thread that refuses input, and CLAUDE.md measures persona turns at
+   * 30-60 s -- so a turn that outran the budget is very likely still running
+   * and about to commit, which is exactly why throwing the address away at the
+   * end of the wait is the tempting wrong edit (PLAN.md R7). The cost falls on
+   * ONE thread: `settling` is derived below as `activeId === unsettledId`, so
+   * New chat and every other conversation stay usable throughout.
+   * `AgentChat.address.test.tsx` AC5 runs the budget out on the abort path;
+   * `AgentChat.test.tsx` AC10 runs it out on the indeterminate-failure path and
+   * asserts the address survives it.
    */
   /** The thread on screen is the one waiting to commit. Derived rather than a
    *  second piece of state, so it cannot disagree with `unsettledId` -- and it
@@ -421,6 +441,50 @@ export default function AgentChat({
         window.setTimeout(() => void tick(), 3_000);
       };
       window.setTimeout(() => void tick(), 3_000);
+    },
+    [agentId],
+  );
+
+  /**
+   * Did the server COMMIT the conversation it announced, or was it rolled back?
+   *
+   * The same evidence `settleAddress` polls for, read ONCE. The difference is
+   * what the caller already knows: a stopped turn is still running and its row
+   * is still coming, so the only correct response is to wait; a turn the server
+   * has reported dead has already resolved its transaction one way or the other,
+   * so a single look is the whole answer and waiting three more seconds for it
+   * would only be theatre.
+   *
+   * The evidence is real rather than a heuristic. `chat.list` is its own
+   * request, therefore its own server session, so a row it returns has been
+   * committed by definition -- there is no other discriminator a browser can
+   * reach, because the id in the `start` frame was flushed inside `run_turn`'s
+   * transaction (`stream.py:206`) and is indistinguishable from a committed one
+   * until something outside that transaction can see it.
+   *
+   * **A list request that FAILS answers "committed", and the asymmetry is the
+   * reason.** Keeping a dead address costs one 404 banner on the next question,
+   * which New chat escapes. Reverting a live one silently orphans a thread the
+   * user is looking at and splits their conversation across two rows with
+   * nothing on screen to explain it -- read as data loss rather than as a bug in
+   * a revert (`new features/15-failure-paths/PLAN.md` R4, pinned by
+   * `AgentChat.address.test.tsx` AC2 and by `AgentChat.test.tsx` AC8). So
+   * uncertainty resolves to "keep", always.
+   *
+   * The fetched rows go into the sidebar on the way past, because the failed
+   * turn's `refreshList()` never ran -- on the AC2 shape the conversation is
+   * real, holds the question, and would otherwise be missing from the list until
+   * something else refreshed it.
+   */
+  const conversationCommitted = useCallback(
+    async (id: string) => {
+      try {
+        const rows = await chat.list(agentId);
+        setConversations(rows);
+        return rows.some((row) => row.id === id);
+      } catch {
+        return true;
+      }
     },
     [agentId],
   );
@@ -713,21 +777,60 @@ export default function AgentChat({
     } catch (cause) {
       const cancelled = cause instanceof DOMException && cause.name === "AbortError";
       const draft = turn.current.text;
+      /**
+       * The id THIS turn promoted the view onto, or `null` if it promoted
+       * nothing.
+       *
+       * `threadId` is the address at send time and `turn.current.address` is the
+       * address now, so the pair is `onStart`'s promotion read back after the
+       * fact. Both halves are load-bearing. A turn sent into an existing thread
+       * promoted nothing and its address was committed long before the turn
+       * began, so none of the machinery below applies to it -- including the
+       * settling wait, which cost that user three seconds of a disabled composer
+       * under a banner claiming the server had not finished a turn it committed
+       * yesterday (`AgentChat.test.tsx` AC7). A draft turn that died before its
+       * `start` frame never got an id at all, and `onStart`'s own address guard
+       * means it also never got one if the user had already navigated away.
+       *
+       * **Which stopped turns that cost used to fall on, stated precisely,
+       * because the wider claim was wrong and a wrong claim here would make the
+       * case that pins it unfalsifiable.** The pre-fix gate was
+       * `if (cancelled && draft)`, so the wait ran on a stop that had already
+       * produced OUTPUT -- not on every stopped turn. AC7 therefore has to emit
+       * a delta before aborting or it takes the same no-settle path the fixed
+       * build takes and passes against the build it is cited as measuring;
+       * measured 2026-08-23 against `HEAD`'s `AgentChat.tsx`. The token-less
+       * stop is the OTHER half of the fix and is AC4's subject, not this one's.
+       */
+      const promotedAddress = threadId === null ? turn.current.address : null;
       if (!onAddress()) return;
 
       /*
         Stop means the READER stopped, not the agent.
 
-        The branch is "did any output occur?", never "was there an abort?" --
-        and the two cases have opposite right answers. With nothing on screen,
-        discarding costs nothing and handing the question back is a kindness.
-        With half an answer on screen, discarding deletes text the user was
-        actively reading, in response to a button they pressed to stop MORE
-        text, and the same turn after a reload shows a complete answer they
-        never saw. A truncated bubble with a label on it beats that silence.
+        The turn runs to completion and commits either way -- `stream.py`'s drain
+        loop says so in as many words: "WHAT HAPPENS WHEN THE CLIENT
+        DISCONNECTS: the turn runs to completion and commits. Nothing is
+        cancelled." So nothing here may treat a stop as a failure.
+
+        What varies inside the branch is only what is on screen. "Did any output
+        occur?" -- never "was there an abort?" -- and the two cases have opposite
+        right answers. With nothing on screen, discarding costs nothing and
+        handing the question back is a kindness. With half an answer on screen,
+        discarding deletes text the user was actively reading, in response to a
+        button they pressed to stop MORE text, and the same turn after a reload
+        shows a complete answer they never saw. A truncated bubble with a label
+        on it beats that silence.
       */
-      if (cancelled && draft) {
-        setMessages((current) => [...current, stoppedMessage(text, turn.current)]);
+      if (cancelled) {
+        if (draft) {
+          setMessages((current) => [...current, stoppedMessage(text, turn.current)]);
+        } else {
+          // Handed back rather than swallowed, for the reason above: nothing
+          // streamed, so there is no bubble to keep and the question is all the
+          // user has left of the turn.
+          setQuestion((current) => (current === "" ? text : current));
+        }
         /*
           The stopped turn is still running on the server, and its conversation
           row does not exist for anybody else until it commits.
@@ -750,12 +853,105 @@ export default function AgentChat({
           the follow-up would open a SECOND conversation while the first one
           commits underneath it, and the user would be left with their thread
           split across two rows and no indication why.
+
+          **This runs OUTSIDE the `draft` test, and that placement is the fix for
+          the sibling hole.** It used to sit inside `cancelled && draft`, so a
+          Stop pressed before the first token -- most of a tool turn's first ten
+          seconds, against a `start` frame at ~0.1 s -- promoted the address and
+          then settled nothing, handing the composer straight back pointed at an
+          uncommitted id. The trigger for waiting is that this turn CREATED the
+          address, which has nothing to do with whether any tokens reached the
+          screen (`AgentChat.address.test.tsx` AC4).
         */
-        if (turn.current.address) settleAddress(turn.current.address);
+        if (promotedAddress) settleAddress(promotedAddress);
         return;
       }
 
-      if (!cancelled) setError(errorMessage(cause));
+      setError(errorMessage(cause));
+
+      /*
+        The turn failed, and the address it promoted the user onto may no longer
+        exist -- forever, and with nothing on screen to say so.
+
+        `stream.py` flushes the new `Conversation` inside `run_turn`'s
+        transaction and announces its id in the first frame; `ask.py`'s single
+        commit is twenty-five to forty-five seconds later. Every second in
+        between is one in which this client is holding an id no other request can
+        resolve, and a turn that raises in that window rolls the row back while
+        the client keeps the id. The old JSON route could not reach this state:
+        it learned the id only after the commit. Streaming is what opened the
+        window, so every later send 404s on a thread the user can see, until they
+        happen to click New chat.
+
+        FOUR conditions, and each one exists to stop the revert firing where it
+        would do harm. Each names the case that pins it, because a condition
+        justified only in prose is one a later reader deletes as defensive --
+        and the fourth one was found the hard way: it named no case, and an
+        adversarial review replaced it with `if (true)` and watched all 54
+        frontend tests stay green.
+
+        1. **This turn must have CREATED the address.** Otherwise there is
+           nothing to revert to: the thread predates the turn, was committed
+           before it started, and cannot be the phantom.
+           `AgentChat.test.tsx` AC7 / `AgentChat.address.test.tsx` AC1.
+        2. **The server must have reported the turn DEAD.** A non-zero
+           `ApiError.status` after a `start` frame can only be `api.ts:546`'s
+           error frame, which `stream.py` emits only after its `async with
+           SessionLocal()` has already unwound -- so the transaction has
+           resolved, committed or rolled back, before the client is told. Status
+           0 is the opposite case: `api.ts` uses it for a dropped connection and
+           for a stream that ended with no terminal frame, and it tells the user
+           as much -- "It may still be recorded". That turn is very likely still
+           running, exactly like a stopped one, so it WAITS instead of reverting;
+           reverting on a network blip would split the thread across two rows
+           (`new features/15-failure-paths/PLAN.md` R7). It waits instead, and
+           what that wait COSTS is `AgentChat.test.tsx` AC10's subject rather
+           than a thing left in prose.
+           `AgentChat.test.tsx` AC6 / `AgentChat.address.test.tsx` AC1.
+        3. **The row must actually be ABSENT from a freshly fetched list.** An
+           exception raised AFTER the commit -- the `model_dump`, the handout
+           refresh, the `AskOut` construction -- leaves a genuinely committed
+           conversation holding the user's question, and reverting then orphans
+           it. See `conversationCommitted` for why the list is the only evidence
+           a browser can reach, and why a list that cannot be read answers
+           "keep". `AgentChat.address.test.tsx` AC2 / `AgentChat.test.tsx` AC8.
+        4. **The user must still be ON the address being reverted**, re-read
+           AFTER the verdict request rather than before it. Conditions 1-3 are
+           all decided before the `await`; this is the only one that can change
+           during it, because a `chat.list` round trip is exactly the window in
+           which a user opens another thread. It is what makes the note beside
+           the revert ("`messages` is deliberately left alone... there is by
+           construction nothing to clear") true: without it the revert lands
+           while `messages` holds the OTHER thread's transcript, and the next
+           question opens a third conversation.
+           `AgentChat.test.tsx` AC9.
+      */
+      const serverReportedFailure = cause instanceof ApiError && cause.status !== 0;
+      if (promotedAddress) {
+        if (!serverReportedFailure) {
+          settleAddress(promotedAddress);
+        } else if (!(await conversationCommitted(promotedAddress))) {
+          // Condition 4. Re-checked after the await, for the reason every other
+          // handler in this file re-checks: the user had a round trip in which
+          // to open another thread, and moving THEIR address back to a draft is
+          // the navigation-behind-their-back that `onAddress` exists to prevent.
+          // `AgentChat.test.tsx` AC9 holds the verdict request open and clicks
+          // another thread inside it; replacing this line with `if (true)` turns
+          // that case red and nothing else.
+          if (activeIdNow.current === promotedAddress) {
+            setActiveId(null);
+            activeIdNow.current = null;
+            turn.current.address = null;
+            // `messages` is deliberately left alone rather than cleared.
+            // `activeId === null` is only reachable from `startDraft` or a bare
+            // mount, both of which leave the thread empty, and a promoted turn
+            // that raised appended nothing -- so there is by construction
+            // nothing to clear, and clearing anyway would be a destructive
+            // action taken on a state that cannot occur.
+          }
+        }
+      }
+
       // Handed back rather than swallowed: a 15-second wait that ends in a
       // 500 should not also cost the user their typing. Only into an empty
       // box, though -- they may have started typing the next question while
@@ -763,10 +959,44 @@ export default function AgentChat({
       // losing it.
       setQuestion((current) => (current === "" ? text : current));
     } finally {
-      // All three land in the same batch as the fold above, because everything
-      // from the last `await` to here runs in one continuation -- which is what
-      // keeps the folded message and the in-flight bubble from ever being
-      // mounted at the same time under the same key.
+      // On the success path all three land in the same batch as the fold above,
+      // because everything from the last `await` to here runs in one
+      // continuation -- which is what keeps the folded message and the in-flight
+      // bubble from ever being mounted at the same time under the same key.
+      //
+      // The failure path now has an await of its own, so it does NOT share that
+      // batch, and it does not need to: the only branch that folds a message is
+      // the stopped one, which returns before reaching it. What the extra await
+      // buys is the stronger property -- the composer is never handed back
+      // addressed to an id whose commit status is still unknown, because
+      // `pending` is not cleared until the verdict is in.
+      //
+      // TWO costs, stated plainly rather than discovered later, and the second
+      // is much the larger of them. Only the first was disclosed here at first,
+      // which is the cheaper one -- a disclosure that names the small cost and
+      // omits the big one reads as though the big one does not exist.
+      //
+      // 1. On a promoted turn the server reported DEAD, the in-flight bubble
+      //    stays up for one extra `chat.list` round trip, overlapping the error
+      //    banner that has already rendered. Paying it the other way round --
+      //    composer back first, address resolved after -- reopens the defect in
+      //    a smaller window, since a question typed and sent during that round
+      //    trip goes to the id under investigation.
+      // 2. On a promoted turn that failed INDETERMINATELY (`status === 0`: a
+      //    dropped connection, or an intermediary's idle timeout closing the
+      //    body with no terminal frame) the address is settled instead, and
+      //    that thread then refuses input for up to `settleAddress`'s whole
+      //    budget -- about sixty seconds -- while showing the user two banners
+      //    at once: `api.ts:574`'s "It may still be recorded" and the settling
+      //    banner's "still finishing that turn on the server". Both are true,
+      //    and they are not stacked -- `ErrorBanner` is inside the scrolling
+      //    thread pane and `chat-settling` is inside the composer form, so the
+      //    pair costs the composer no height (`ui_check.py` A5 is unaffected).
+      //    New chat and every other thread stay usable meanwhile,
+      //    because `settling` is per-thread. `AgentChat.test.tsx` AC10 asserts
+      //    the pair of banners AND the release at the end of the budget, so a
+      //    future edit to either string arrives at a red case rather than at a
+      //    screenshot.
       if (requestController.current === controller) requestController.current = null;
       setPending(null);
       setStreamText("");
