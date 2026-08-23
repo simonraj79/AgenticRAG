@@ -31,6 +31,8 @@ from sqlalchemy import select
 from app.db.models import Agent, Document
 from app.db.session import SessionLocal
 from app.rag.ingest import ingest_bytes, record_ingest_failure
+from app.metering.context import collect_usage, meter_as
+from app.metering import store as metering_store
 
 log = logging.getLogger("uvicorn.error")
 
@@ -66,150 +68,176 @@ async def run_ingest_job(
     # one across is the same bug wearing the shape of an argument. The agent is
     # re-loaded below, inside the session that will actually use it.
     # ------------------------------------------------------------------
-    try:
-        async with SessionLocal() as db:
-            agent = await db.get(Agent, agent_id)
-            if agent is None:
-                # Deleted between the 201 and this task starting. `documents`
-                # cascades from `agents`, so there is very likely no row left to
-                # mark either -- and marking a row that is about to vanish would
-                # be the only work done here. Log and stop.
-                log.warning(
-                    "Ingest job for document %s: agent %s no longer exists",
-                    document_id,
-                    agent_id,
-                )
-                return
+    # **Ingest is where embedding spend actually lives.** A single question
+    # embeds one string; ingesting one document embeds every chunk of it, in
+    # batches of `embedding_batch_size`. Without a scope here that entire cost
+    # centre falls through to log lines while the console shows a
+    # complete-looking total built only from query-time embeddings.
+    #
+    # `inherit=False`: a BackgroundTask can run inside a request's context, and
+    # ingest spend belongs to the upload, not to whatever turn was in flight.
+    with collect_usage() as usage_records, meter_as(
+        user_id=uploaded_by_user_id,
+        agent_id=agent_id,
+        call_kind="embedding",
+        inherit=False,
+    ):
+      try:
+          async with SessionLocal() as db:
+              agent = await db.get(Agent, agent_id)
+              if agent is None:
+                  # Deleted between the 201 and this task starting. `documents`
+                  # cascades from `agents`, so there is very likely no row left to
+                  # mark either -- and marking a row that is about to vanish would
+                  # be the only work done here. Log and stop.
+                  log.warning(
+                      "Ingest job for document %s: agent %s no longer exists",
+                      document_id,
+                      agent_id,
+                  )
+                  return
 
-            document = await db.scalar(
-                select(Document).where(
-                    Document.id == document_id,
-                    # Selected on the pair. These two ids arrive as separate
-                    # arguments and only the agent has been through the ownership
-                    # check in `app/api/deps.py`; selecting on both means a
-                    # mismatched pair fetches nothing rather than driving one
-                    # tenant's row with another tenant's namespace.
-                    Document.agent_id == agent_id,
-                )
-            )
-            if document is None:
-                log.warning(
-                    "Ingest job: document %s not found under agent %s",
-                    document_id,
-                    agent_id,
-                )
-                return
+              document = await db.scalar(
+                  select(Document).where(
+                      Document.id == document_id,
+                      # Selected on the pair. These two ids arrive as separate
+                      # arguments and only the agent has been through the ownership
+                      # check in `app/api/deps.py`; selecting on both means a
+                      # mismatched pair fetches nothing rather than driving one
+                      # tenant's row with another tenant's namespace.
+                      Document.agent_id == agent_id,
+                  )
+              )
+              if document is None:
+                  log.warning(
+                      "Ingest job: document %s not found under agent %s",
+                      document_id,
+                      agent_id,
+                  )
+                  return
 
-            # pending -> processing, committed on its own before the slow work
-            # starts rather than folded into the ingest transaction. The row has
-            # to be observable: a client polling during the next several minutes
-            # must be able to tell "queued behind something" from "running", and
-            # so must an operator looking for the stuck rows described below.
-            document.status = "processing"
-            await db.commit()
+              # pending -> processing, committed on its own before the slow work
+              # starts rather than folded into the ingest transaction. The row has
+              # to be observable: a client polling during the next several minutes
+              # must be able to tell "queued behind something" from "running", and
+              # so must an operator looking for the stuck rows described below.
+              document.status = "processing"
+              await db.commit()
 
-            # ------------------------------------------------------------------
-            # WHAT MAKES A STUCK DOCUMENT RECOVERABLE.
-            #
-            # A row can be left at `processing` with nothing behind it: Render
-            # restarts the service, a deploy lands mid-ingest, the worker is
-            # OOM-killed. No exception is raised in that case, so nothing below
-            # ever marks the row, and `processing` is the worst of the available
-            # states precisely because it renders as progress.
-            #
-            # Such a row is still not RESUMED, and the reason has changed in a
-            # way worth stating precisely, because the old one is now false.
-            #
-            # It used to be that the original bytes were never stored and existed
-            # only as this task's `data` argument, which died with the process --
-            # so resuming was impossible rather than merely unbuilt. As of the
-            # object-storage change set the original IS kept
-            # (`documents.storage_key`), so the bytes a resume would need are
-            # sitting in a bucket. What is missing is the RESUME, not the data:
-            # nothing reads that key back, and no route re-enters ingest for an
-            # existing row.
-            #
-            # So recovery remains "delete it and upload again", and the two
-            # properties below are still what make that work. The difference is
-            # that a resume is now a feature somebody could build rather than one
-            # the architecture forbids.
-            #
-            #   1. `ingest_bytes`'s dedup matches `status == "ready"` only, so a
-            #      stuck row does NOT block re-uploading the same file. This is
-            #      the one that matters: without it the stuck row would be a
-            #      permanent bar to its own fix.
-            #   2. `delete_document` reads its Pinecone id list from `chunks`,
-            #      which is empty here, so it skips the vector call entirely and
-            #      the delete is a plain row delete. Nothing to fail against a
-            #      namespace that was never written.
-            #
-            # What would close the gap is a sweep at startup flipping
-            # `processing` rows older than any plausible ingest to `failed`, so
-            # the UI says so rather than the user waiting. That belongs in the
-            # app lifespan, which this module does not own.
-            # ------------------------------------------------------------------
+              # ------------------------------------------------------------------
+              # WHAT MAKES A STUCK DOCUMENT RECOVERABLE.
+              #
+              # A row can be left at `processing` with nothing behind it: Render
+              # restarts the service, a deploy lands mid-ingest, the worker is
+              # OOM-killed. No exception is raised in that case, so nothing below
+              # ever marks the row, and `processing` is the worst of the available
+              # states precisely because it renders as progress.
+              #
+              # Such a row is still not RESUMED, and the reason has changed in a
+              # way worth stating precisely, because the old one is now false.
+              #
+              # It used to be that the original bytes were never stored and existed
+              # only as this task's `data` argument, which died with the process --
+              # so resuming was impossible rather than merely unbuilt. As of the
+              # object-storage change set the original IS kept
+              # (`documents.storage_key`), so the bytes a resume would need are
+              # sitting in a bucket. What is missing is the RESUME, not the data:
+              # nothing reads that key back, and no route re-enters ingest for an
+              # existing row.
+              #
+              # So recovery remains "delete it and upload again", and the two
+              # properties below are still what make that work. The difference is
+              # that a resume is now a feature somebody could build rather than one
+              # the architecture forbids.
+              #
+              #   1. `ingest_bytes`'s dedup matches `status == "ready"` only, so a
+              #      stuck row does NOT block re-uploading the same file. This is
+              #      the one that matters: without it the stuck row would be a
+              #      permanent bar to its own fix.
+              #   2. `delete_document` reads its Pinecone id list from `chunks`,
+              #      which is empty here, so it skips the vector call entirely and
+              #      the delete is a plain row delete. Nothing to fail against a
+              #      namespace that was never written.
+              #
+              # What would close the gap is a sweep at startup flipping
+              # `processing` rows older than any plausible ingest to `failed`, so
+              # the UI says so rather than the user waiting. That belongs in the
+              # app lifespan, which this module does not own.
+              # ------------------------------------------------------------------
 
-            # `ingest_bytes` drives the rest of the state machine: processing ->
-            # ready, or -> failed with the reason recorded on the way out, and it
-            # commits both. Its blocking work -- parse, split, embed, upsert -- is
-            # already pushed onto worker threads inside that function, so this
-            # await does not pin the event loop for the minutes an ingest can
-            # take. That matters more here than anywhere: Render's starter plan
-            # runs a single uvicorn worker, and a background task that blocks the
-            # loop stalls every request the service is meanwhile trying to serve.
-            run = await ingest_bytes(
-                db,
-                agent,
-                filename,
-                data,
-                uploaded_by_user_id=uploaded_by_user_id,
-                # Adopt the row the route already committed instead of inserting
-                # a second one. Without this the user would poll a `pending` row
-                # that nothing was ever going to touch while a different row
-                # quietly went `ready`.
-                document_id=document_id,
-                # Carried all the way through, and it was missing.
-                #
-                # The route accepts `?force=true` and skips its OWN duplicate
-                # pre-check, but `ingest_bytes` runs the same check again -- so
-                # dropping the flag here meant a forced upload passed the route,
-                # answered 202, and was then re-deduplicated inside this job and
-                # written `failed` with the text "Re-upload with force to ingest
-                # it again". The user had just done that.
-                #
-                # It is the T2 shape from `new features/loop.md` in its purest
-                # form: every error-shaped check passed. The POST returned 202,
-                # no exception was raised, the UI cleared its prompt and started
-                # polling. The OUTCOME -- a second copy of the document being
-                # indexed -- silently did not happen, and the only symptom
-                # arrived a minute later on a row nobody was still watching.
-                # `ingest_in_background` defaults to True, so this was the
-                # default path, not an edge case.
-                force=force,
-            )
-            log.info(
-                "Ingest finished for document %s (%s): %s chunks, run %s",
-                document_id,
-                filename,
-                run.chunk_count,
-                run.status,
-            )
+              # `ingest_bytes` drives the rest of the state machine: processing ->
+              # ready, or -> failed with the reason recorded on the way out, and it
+              # commits both. Its blocking work -- parse, split, embed, upsert -- is
+              # already pushed onto worker threads inside that function, so this
+              # await does not pin the event loop for the minutes an ingest can
+              # take. That matters more here than anywhere: Render's starter plan
+              # runs a single uvicorn worker, and a background task that blocks the
+              # loop stalls every request the service is meanwhile trying to serve.
+              run = await ingest_bytes(
+                  db,
+                  agent,
+                  filename,
+                  data,
+                  uploaded_by_user_id=uploaded_by_user_id,
+                  # Adopt the row the route already committed instead of inserting
+                  # a second one. Without this the user would poll a `pending` row
+                  # that nothing was ever going to touch while a different row
+                  # quietly went `ready`.
+                  document_id=document_id,
+                  # Carried all the way through, and it was missing.
+                  #
+                  # The route accepts `?force=true` and skips its OWN duplicate
+                  # pre-check, but `ingest_bytes` runs the same check again -- so
+                  # dropping the flag here meant a forced upload passed the route,
+                  # answered 202, and was then re-deduplicated inside this job and
+                  # written `failed` with the text "Re-upload with force to ingest
+                  # it again". The user had just done that.
+                  #
+                  # It is the T2 shape from `new features/loop.md` in its purest
+                  # form: every error-shaped check passed. The POST returned 202,
+                  # no exception was raised, the UI cleared its prompt and started
+                  # polling. The OUTCOME -- a second copy of the document being
+                  # indexed -- silently did not happen, and the only symptom
+                  # arrived a minute later on a row nobody was still watching.
+                  # `ingest_in_background` defaults to True, so this was the
+                  # default path, not an edge case.
+                  force=force,
+              )
+              log.info(
+                  "Ingest finished for document %s (%s): %s chunks, run %s",
+                  document_id,
+                  filename,
+                  run.chunk_count,
+                  run.status,
+              )
 
-    except Exception as exc:
-        # NOTHING ESCAPES THIS FUNCTION. An exception raised out of a
-        # BackgroundTask is not returned to anyone -- the response went out
-        # minutes ago -- so at best it lands in the log and at worst it is
-        # swallowed by the task machinery. Either way the document stays at
-        # `processing` forever, which looks like progress and is the single most
-        # confusing outcome available. So: log it with the traceback, then make
-        # the row say what happened.
-        log.exception("Ingest job failed for document %s (%s)", document_id, filename)
-        await _mark_failed(
-            document_id,
-            str(exc) or exc.__class__.__name__,
-            uploaded_by_user_id,
-        )
+      except Exception as exc:
+          # NOTHING ESCAPES THIS FUNCTION. An exception raised out of a
+          # BackgroundTask is not returned to anyone -- the response went out
+          # minutes ago -- so at best it lands in the log and at worst it is
+          # swallowed by the task machinery. Either way the document stays at
+          # `processing` forever, which looks like progress and is the single most
+          # confusing outcome available. So: log it with the traceback, then make
+          # the row say what happened.
+          log.exception("Ingest job failed for document %s (%s)", document_id, filename)
+          await _mark_failed(
+              document_id,
+              str(exc) or exc.__class__.__name__,
+              uploaded_by_user_id,
+          )
 
+
+      finally:
+          # Written whether the ingest succeeded or failed. A document that died
+          # at chunk 40 of 50 still paid to embed 40 chunks, and that is exactly
+          # the run an operator wants to find.
+          if usage_records:
+              try:
+                  async with SessionLocal() as meter_db:
+                      metering_store.persist(meter_db, usage_records)
+                      await meter_db.commit()
+              except Exception:  # noqa: BLE001 -- accounting never breaks ingest
+                  log.warning("could not persist ingest usage", exc_info=True)
 
 async def _mark_failed(
     document_id: uuid.UUID,

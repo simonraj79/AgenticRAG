@@ -436,4 +436,43 @@ def build_chat_model(
         params["extra_body"] = extra_body
 
     params.update(overrides)
-    return ChatOpenAI(**params)
+
+    # **Metering attaches HERE, at the one chokepoint, and adds NOTHING to the
+    # request.** Eight call sites reach this function -- generation, the
+    # rewriter, routing, the critic, handout code, the golden-set drafter and
+    # the Ragas judge -- and none of them bypasses it, the same property
+    # CLAUDE.md relies on for `retriever.py`. One handler here meters all of
+    # them, including the last two, which belong to no `queries` row and which
+    # per-call-site instrumentation would have forgotten.
+    #
+    # The `else` branch is the regression guarantee rather than a courtesy: with
+    # the flag off this returns the exact class that shipped, so "unchanged" is
+    # structural instead of careful. `MeteredChatOpenAI` overrides one PARSING
+    # method and touches no field of the request; `llm_check.py` case 31 asserts
+    # `extra_body`, `disabled_params` and `model_kwargs` are identical either way,
+    # because CLAUDE.md records four separate ways an added parameter goes wrong
+    # and two of them fail silently.
+    if not settings.metering_enabled:
+        return ChatOpenAI(**params)
+
+    from app.metering.chat import MeteredChatOpenAI
+    from app.metering.meter import LoggingSink, UsageMeter
+
+    # Callbacks are APPENDED, never assigned over: `params.update(overrides)` ran
+    # above, so a caller that passed its own `callbacks=` must keep them. Losing
+    # a caller's callback to a metering line would be a silent behaviour change
+    # in someone else's feature.
+    callbacks = list(params.get("callbacks") or [])
+    callbacks.append(
+        UsageMeter(
+            sink=LoggingSink(),
+            strict=settings.metering_strict,
+            # The RESOLVED slug, not the caller's argument -- `openrouter_slug`
+            # may have mapped a legacy bare id, and the admin console must group
+            # by what was actually requested. A streamed response cannot supply
+            # this: see `UsageMeter.__init__`.
+            model=slug,
+        )
+    )
+    params["callbacks"] = callbacks
+    return MeteredChatOpenAI(**params)

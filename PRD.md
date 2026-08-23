@@ -700,9 +700,31 @@ Pydantic model rather than a hand-built dict.
 **`feedback`** — `query_id`, `user_id`, `rating` (+1/−1), `comment`.
 Ten golden questions catch regressions; real users catch what you didn't think to test.
 
-**`api_usage`** — `user_id`, `provider`, `operation`, `units`, `estimated_cost`.
-The workshop names cost blowout as one of four agentic failure modes. Per-loop token
-accounting is how you see it coming rather than discovering it on a bill.
+**`api_usage`** — the spend ledger, and **one row per billable CALL, never per turn**.
+Original columns `user_id`, `provider`, `operation`, `units`, `estimated_cost`; widened
+2026-08-20 with `agent_id`, `query_id`, `call_kind`, `model`, `served_provider`,
+`prompt_tokens`, `completion_tokens`, `reasoning_tokens`, `cached_tokens`, `cost_usd`,
+`cost_is_estimated`, `generation_id` and `duration_ms`. The workshop names cost blowout as one
+of four agentic failure modes; this is how you see it coming rather than discovering it on a
+bill.
+
+**A call, not a turn, because one question is nine billable calls** — measured on a
+two-document agent: a rewrite, three embeddings, three reranks and two generation calls,
+$0.00049354. A turn-shaped row would have shown a complete-looking total with the eval judge
+and the golden-set drafter silently missing, since neither belongs to any `queries` row.
+
+**`cost_usd` is REPORTED by OpenRouter, never computed here.** No price table exists or
+should: two identical 282/2-token requests measured $2.002e-05 and $5.684e-06 because they
+landed on different endpoints, so arithmetic over a published rate is *less* accurate than the
+number already on the wire. `served_provider` records which endpoint answered.
+`cost_is_estimated` is true only for Cohere reranking, the one provider that reports units and
+not cost — and estimating it is opt-in (`COHERE_SEARCH_UNIT_USD`, default `0.0` = do not
+estimate), landing in `estimated_cost` and never in `cost_usd`.
+
+**`agent_id` and `query_id` are `ON DELETE SET NULL`, deliberately not CASCADE.** Deleting an
+agent must not delete the record that it cost money. Contrast `query_chunks`, whose CASCADE
+destroys eval evidence (open item 18) — the same choice made the other way, for a table where
+it was wrong.
 
 **`audit_log`** — `user_id`, `action`, `resource_type`, `resource_id`, `metadata` JSONB.
 Day 1 lists "a full audit trail of every retrieval" as one of the reasons to build rather
@@ -724,8 +746,8 @@ environment settings. `.env.example` is the committed template.
 
 | Variable | Consumer | Auto-read by SDK |
 |---|---|---|
-| `OPENROUTER_API_KEY` | **Every chat model** — generation, decision, golden-set generator, Ragas judge | ❌ passed explicitly in `app/rag/llm.py` |
-| `GEMINI_API_KEY` | **Embeddings only** — still required; see §2 | ✅ `langchain-google-genai` |
+| `OPENROUTER_API_KEY` | **Every model call** — generation, decision, golden-set drafter, Ragas judge **and embeddings** (since 2026-08-16) | ❌ passed explicitly in `app/rag/llm.py` |
+| `GEMINI_API_KEY` | The **rollback** embedding route only (`EMBEDDING_ROUTE=google`) — optional since 2026-08-16 | ✅ `langchain-google-genai` |
 | `PINECONE_API_KEY` | Vector store | ✅ `pinecone` SDK |
 | `PINECONE_INDEX_NAME` | Vector store | ❌ app convention |
 | `COHERE_API_KEY` | Stage 2 reranker | ✅ `langchain-cohere` |
@@ -741,11 +763,16 @@ environment settings. `.env.example` is the committed template.
 | `DEV_AUTH_ENABLED` | Gates the dev-login route | ❌ defaults to `false` |
 | `MAX_UPLOAD_MB` | Upload cap (§3.3) | ❌ defaults to 50 |
 | `INGEST_IN_BACKGROUND` | Off-request ingest (§3.3) | ❌ defaults to `true` |
-| `GOLDEN_SET_MODEL` | Drafts the golden set (§3.6.1) | ❌ defaults to `google/gemini-3.7-flash` |
+| `GOLDEN_SET_MODEL` | Drafts the golden set (§3.6.1) | ❌ defaults to `minimax/minimax-m3` — a **third** vendor, so a run is not graded against references its own judge wrote |
 | `RAGAS_JUDGE_MODEL` | Stage 3 judge (§2.1) | ❌ defaults to `google/gemini-3.7-flash` |
 | `RAGAS_JUDGE_REASONING_EFFORT` | Thinking is **mandatory** on Flash — only turnable down | ❌ defaults to `low` |
 | `RAGAS_MAX_CONCURRENCY` | Judged calls in flight | ❌ defaults to 2, for provider rate limits |
 | `OPENROUTER_REQUIRE_PARAMETERS` | Route only to providers advertising every parameter sent | ❌ defaults to `true` — **leave it on** |
+| `EMBEDDING_ROUTE` | Which gateway reaches the embedder — the ROAD, never the space | ❌ defaults to `openrouter`; `google` is the rollback |
+| `ADMIN_EMAILS` | Comma-separated. Read **once, by a migration**, never on a request path | ❌ defaults to empty — nobody is promoted, and the console 403s for everyone |
+| `METERING_ENABLED` | Master switch for the usage meter | ❌ defaults to `true`. Off: no rows, and every other code path is byte-identical |
+| `METERING_STRICT` | Re-raise instead of swallowing a metering fault | ❌ defaults to `false`. **On in harnesses, off in production** |
+| `COHERE_SEARCH_UNIT_USD` | Price per rerank search unit, for an **opt-in** estimate | ❌ defaults to `0.0` = do not estimate. A hardcoded price is a number nobody re-checks |
 
 **`ENVIRONMENT` must be set to `production` on Render.** It defaults to `development`, so on
 the deployed service only two of the dev-login route's three gates are doing work. The route
@@ -1204,7 +1231,7 @@ Infrastructure is complete. Stages 1 and 3 are built; Stage 2 is half-built.
 |---|---|---|
 | 1 | Seed `agent_templates` | ✅ **8 templates**, five of them teaching personas (§4.2) |
 | 2 | OAuth routes + session middleware (`app/auth/`) | ✅ done |
-| 3 | Agent CRUD | ✅ done — admin listing still outstanding |
+| ~~3~~ | ~~Agent CRUD~~ | ✅ **done, admin listing included 2026-08-20.** `/api/admin/agents` lists every agent across every owner with corpus size and spend, behind `AdminUser`. The listing was the last piece of "private agents + admin oversight" (§10 design decisions) |
 | 4 | RAG dependencies | ✅ done, plus `ragas`, `langchain-community<0.4`, `python-multipart` |
 | 5 | Ingest pipeline, namespace-scoped | ✅ done, now 50 MB and off-request (§3.3) |
 | 6 | Retriever seam + Stage 1 chain | ✅ done |
@@ -1428,6 +1455,63 @@ Recorded as an accepted loss rather than solved.
 `mindfulspeak-uploads`, which belongs to an unrelated project. Nothing in this codebase names
 another bucket — `settings.r2_bucket` is the only one any call site uses — so this is blast
 radius rather than a live path. A bucket-scoped token is the fix.
+
+### Opened 2026-08-20 by the admin-observability change set
+
+Full record in
+[new features/14-admin-observability/PLAN.md](new%20features/14-admin-observability/PLAN.md),
+whose §8 carries the two places the plan was wrong.
+
+**44. `queries.prompt_tokens` / `completion_tokens` are a CACHE that can disagree with
+`api_usage`, and nothing detects the disagreement.** `api_usage` is the source of truth — one
+row per call — and the two `queries` columns are a denormalised SUM over that turn's rows,
+written in the same transaction. They exist for the per-turn UI and for cheap sorting. If a
+metering write fails, the answer still returns (R1: accounting never breaks a turn) and the
+two numbers diverge silently. The admin console reads `api_usage` and never the cached
+columns, so the console stays right; a per-turn chip reading the cache can be wrong. No
+reconciliation job exists.
+
+**45. The 76 queries that predate 2026-08-20 are unbackfillable, and that is permanent.**
+OpenRouter's `GET /generation?id=` would return the cost of any past call, but the `gen-…` id
+was never stored, so there is nothing to look up. `api_usage.generation_id` exists so this is
+true only of the past. Those rows render as **not measured** rather than as zero — every admin
+aggregate carries `measured_count` / `total_count` beside it for exactly this reason, and a
+lifetime spend total is a **lower bound**, not a total.
+
+**46. Rerank spend is unpriced by default and therefore invisible in dollars.** Cohere is the
+only provider that reports **units** (`meta.billed_units.search_units`, measured 1.0 per call)
+and not cost. The units are recorded as a measurement; the dollar figure is opt-in via
+`COHERE_SEARCH_UNIT_USD`, defaults to off, and lands in `estimated_cost` — never in
+`cost_usd`, because a guess must not sit in the reported column. Off by default because a
+hardcoded price is a number nobody re-checks, and this repo already has that failure on this
+exact provider. Consequence: a turn's *reported* cost omits three rerank calls.
+
+**47. Metering coverage is now asserted, but only against a MISSING SCOPE — not a missing
+collection.** `metering_check.py` case 12 walks the application's own call graph and fails
+when an entry point reaches `build_chat_model` outside a `meter_as`. It found the one instance
+that existed (the golden-set drafter). It would **not** catch a call site that opens
+`meter_as` and forgets `collect_usage()`: `emit_record` returns `False` with no active
+collection, so the record is logged and never written, and the scope check passes. The two
+contextvars are independent by design — that is what makes nesting correct — and "metered" is
+therefore two things a call site must remember, with a harness for one of them. See §8.2 of
+the change set plan for why the register predicted the wrong tell.
+
+**48. "What did this eval run cost" is not a question the console answers directly, and the
+obvious way to ask it undercounts.** `/api/admin/eval-runs` returns no spend. Judge calls are
+`call_kind='judge'`, attributed to the run's agent with **no `query_id`** — but a ten-question
+run also drives ten real turns through `run_turn`, which records them as ordinary
+`call_kind='generation'` rows indistinguishable from a user's own questions except by
+timestamp. So `/api/admin/spend?group_by=call_kind` filtered to `judge` is the *judging* cost,
+not the run's. The run's true cost is judge + goldenset + those ten turns, and no join
+expresses it.
+
+**49. `/api/admin/account` cannot reconcile exactly, by construction.** It is the only
+external check that our per-call sum matches what OpenRouter billed, and it must stay. But
+OpenRouter reports per **key** and per **account**, and this account's key also serves work
+that is not Groundwork — measured 2026-08-20 at `total_usage: 66.61` account-wide against
+`usage_monthly: 0.83` on this key. The console says so rather than hiding it. What the check
+actually establishes is that **ours is not zero while theirs moves**, which is R5's tell, not
+an audit.
 
 ---
 

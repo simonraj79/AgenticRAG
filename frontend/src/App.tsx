@@ -39,8 +39,16 @@ import { ErrorBanner, Spinner, errorMessage } from "./components/ui.tsx";
 import Login from "./views/Login.tsx";
 import Dashboard from "./views/Dashboard.tsx";
 import AgentDetail from "./views/AgentDetail.tsx";
+import Admin from "./views/Admin.tsx";
 
-type View = { kind: "dashboard" } | { kind: "agent"; agentId: string };
+type View =
+  | { kind: "dashboard" }
+  | { kind: "agent"; agentId: string }
+  // Admin is a view like any other, not a route: this app has no router by
+  // choice (see the header above). The 403 from `require_admin` is the access
+  // control -- the nav entry below is hidden from non-admins only because a
+  // link that always fails is bad UI, never as a security measure.
+  | { kind: "admin" };
 
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
@@ -194,9 +202,21 @@ export default function App() {
               // spend its width on the two things that are (the way back to the
               // agent list, and the way out). The monogram stays because it is
               // the only remaining answer to "who am I signed in as".
-              <span className="hidden rounded-full border border-sky-800/60 bg-sky-950/40 px-2 py-0.5 text-xs font-medium text-sky-300 sm:inline-flex">
+              // Was a status label; it is now the way in. The `sm:` gate stays
+              // for the reason the comment above gives -- at 320px the width
+              // belongs to the way back and the way out.
+              <button
+                type="button"
+                onClick={() => setView({ kind: "admin" })}
+                aria-current={view.kind === "admin" ? "page" : undefined}
+                className={`hidden min-h-11 rounded-full border px-2.5 py-0.5 text-xs font-medium transition sm:inline-flex sm:items-center ${
+                  view.kind === "admin"
+                    ? "border-sky-500 bg-sky-900/70 text-sky-100"
+                    : "border-sky-800/60 bg-sky-950/40 text-sky-300 hover:border-sky-600 hover:text-sky-100"
+                }`}
+              >
                 admin
-              </span>
+              </button>
             )}
             <button
               type="button"
@@ -219,6 +239,10 @@ export default function App() {
       <main>
         {view.kind === "dashboard" && (
           <Dashboard onOpenAgent={(agentId) => setView({ kind: "agent", agentId })} />
+        )}
+
+        {view.kind === "admin" && (
+          <Admin onBack={() => setView({ kind: "dashboard" })} />
         )}
 
         {view.kind === "agent" && (

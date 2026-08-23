@@ -49,6 +49,7 @@ from pydantic import BaseModel, Field
 from app.config import settings
 from app.db.specialists import SPECIALISTS, Specialist, resolve
 from app.rag.llm import build_chat_model
+from app.metering.context import meter_as
 
 log = logging.getLogger(__name__)
 
@@ -265,13 +266,14 @@ async def route_specialist(
             messages.append(AIMessage(content=prior_answer))
 
     try:
-        decision = await get_router().ainvoke(
-            {
-                "roster": _roster_block(roster),
-                "history": messages,
-                "question": question,
-            }
-        )
+        with meter_as(call_kind="route"):
+            decision = await get_router().ainvoke(
+                {
+                    "roster": _roster_block(roster),
+                    "history": messages,
+                    "question": question,
+                }
+            )
     except Exception as exc:  # noqa: BLE001 - see the docstring
         log.warning("Routing failed, falling back to the agent prompt: %s", exc)
         return RouteResult(

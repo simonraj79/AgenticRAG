@@ -694,6 +694,28 @@ class Feedback(Base):
 
 
 class ApiUsage(Base):
+    """One PROVIDER CALL and what it cost. The unit the admin console groups on.
+
+    The first four columns are original and unchanged; everything below
+    `agent_id` arrived with the admin console (`new features/14-admin-
+    observability/`). The table had existed with zero rows since the initial
+    schema, which is why this is an extension rather than a new table.
+
+    **Per CALL, not per turn, and that was a decision.** One question makes 1-3
+    generation calls plus a rewrite plus a route plus possibly a critic. But the
+    deciding argument was coverage rather than granularity: the Ragas judge and
+    the golden-set drafter belong to no `queries` row at all, so a turn-shaped
+    unit would have had nowhere to put evaluation spend and would have shown a
+    complete-looking total that silently excluded it.
+
+    **Every foreign key here is SET NULL, never CASCADE, and that is the point of
+    the table.** Deleting an agent must not delete the evidence that it cost
+    money -- an accounting record whose subject is gone is still an accounting
+    record. Contrast `query_chunks`, whose CASCADE CLAUDE.md records as silently
+    destroying the stored contexts of every past query when a document is
+    deleted: scores survive, evidence does not, and nothing signals it.
+    """
+
     __tablename__ = "api_usage"
 
     id: Mapped[uuid.UUID] = _pk()
@@ -702,10 +724,62 @@ class ApiUsage(Base):
     user_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL")
     )
+    # "openrouter" | "cohere" | "pinecone"
     provider: Mapped[str] = mapped_column(String(64), nullable=False)
+    # "chat" | "embedding" | "rerank"
     operation: Mapped[str] = mapped_column(String(64), nullable=False)
+    # Whatever the provider bills in when it is not tokens -- Cohere search
+    # units, documents embedded. Null for a chat call, where tokens are below.
     units: Mapped[int | None] = mapped_column(Integer)
+    # ORIGINAL COLUMN, and its name is now load-bearing rather than incidental:
+    # it holds a cost we had to ESTIMATE, and `cost_usd` below holds one the
+    # provider REPORTED. Keeping them apart is what lets the console say which
+    # half of a total it actually knows.
     estimated_cost: Mapped[float | None] = mapped_column(Float)
+
+    # -- added with the admin console ------------------------------------
+    agent_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("agents.id", ondelete="SET NULL"), index=True
+    )
+    query_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("queries.id", ondelete="SET NULL"), index=True
+    )
+    # Which part of the system spent this. See `app.metering.context.CALL_KINDS`.
+    call_kind: Mapped[str | None] = mapped_column(String(32), index=True)
+    model: Mapped[str | None] = mapped_column(String(128))
+    # WHICH OpenRouter endpoint served the call. CLAUDE.md records that
+    # `llm_check.py` structurally cannot know this and that only a live call can
+    # -- and OpenRouter has been sending it on every response all along, in a
+    # field langchain-openai drops. Two identical requests have been measured
+    # here costing 2.002e-05 and 5.684e-06 depending on which endpoint answered,
+    # so this column is what makes a cost anomaly explainable instead of eerie.
+    served_provider: Mapped[str | None] = mapped_column(String(64))
+    # OpenRouter's `gen-...`. Its absence on the 76 pre-instrumentation queries
+    # is precisely why they cannot be backfilled: `GET /api/v1/generation?id=`
+    # works, and there is no id to give it.
+    generation_id: Mapped[str | None] = mapped_column(String(128))
+
+    prompt_tokens: Mapped[int | None] = mapped_column(Integer)
+    completion_tokens: Mapped[int | None] = mapped_column(Integer)
+    # Billed at the completion rate. CLAUDE.md measured 60-79% of billed output
+    # being thinking on this model's default, which is why generation turns it
+    # off -- this column is how that stays true rather than remembered.
+    reasoning_tokens: Mapped[int | None] = mapped_column(Integer)
+    cached_tokens: Mapped[int | None] = mapped_column(Integer)
+
+    # REPORTED by the provider. NULL means not measured, never free.
+    cost_usd: Mapped[float | None] = mapped_column(Float)
+    cost_is_estimated: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False
+    )
+
+    duration_ms: Mapped[int | None] = mapped_column(Integer)
+
+    __table_args__ = (
+        Index("ix_api_usage_created", "created_at"),
+        Index("ix_api_usage_user_created", "user_id", "created_at"),
+        Index("ix_api_usage_agent_created", "agent_id", "created_at"),
+    )
 
 
 class AuditLog(Base):

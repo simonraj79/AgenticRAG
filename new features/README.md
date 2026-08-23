@@ -128,3 +128,35 @@ found a real defect before the code had a caller -- `delete_quietly`, documented
 raising, caught only `StorageError` while its callee wrapped only `ClientError` -- alongside
 **two false reds of its own**, both substring assertions standing in for semantic ones, one of
 which was tripped by the docstring of the guard it was testing.
+
+---
+
+**[14-admin-observability/](14-admin-observability/PLAN.md)** | shipped | An admin console —
+users, agents, full conversations, eval runs, and what all of it cost. **Its audit is the
+reason it is small.** The brief asked whether LiteLLM should be deployed to track token
+spend; the measurement said no, and not for the reason anyone expected. OpenRouter has
+always returned the real cost of every call, and `langchain-openai` discards it on the
+streaming path (`_create_usage_metadata`, base.py:4175) — so the 1.7 MB price table LiteLLM
+ships to *estimate* cost is redundant against a number already on the wire. The disqualifying
+argument was not the second container or the second Postgres: **LiteLLM builds its own
+request body**, which re-opens all five documented OpenRouter parameter traps, two of which
+fail silently. Beside that, the audit found `require_admin`, `AdminUser`, `api_usage` and
+both `queries.*_tokens` columns already built with **zero callers and zero rows** — so the
+change set reduced to a callback on the one factory every model call passes through, and a
+view. Three findings generalise. **A fifth parameter shape**: not a parameter wrongly sent,
+but one that became *unnecessary* — `stream_usage` was declined as unprobed and measured
+byte-identical to leaving it off, so **a deferral written down as a risk needs a re-check
+date the way a measurement does**. **One person is two user rows**, because the dev-login
+shim keys on `dev|<email>` precisely so it cannot collide with a real Google `sub` — which
+makes "grant admin to this email" ambiguous, and granting by `sub` would make the console
+reachable only by a human at a consent screen. And the **seventh** green-suite failure:
+`admin_check.py` passed every case while a route returned 500 on every request, because a
+layer-1 harness cannot prove a query *runs*, only that it was *written*. An **eighth** landed
+after that sentence was written and is the one that changes practice: `metering_check.py`'s
+ten cases were green while the golden-set drafter's spend was logged and never recorded,
+because every case opened its *own* scope and then asserted attribution survived — so the
+harness only ever tested call sites it wrote itself. **A harness cannot prove instrumentation
+is COMPLETE, only that the instrumentation it was handed works**, and `--live` does not fix it:
+a live case exercises what it invokes, and this was a call site nobody invoked. The answer is a
+case that reads the application's own source — case 12 walks the call graph with `ast` and
+fails on any entry point reaching `build_chat_model` outside a `meter_as`
