@@ -362,6 +362,39 @@ class Settings(BaseSettings):
     # that shows the rewritten string.
     eval_rewrite_questions: bool = False
 
+    # ---- Trajectory evaluation (change set 16, PRD open item 23) ----
+    #
+    # The second scoring pass: whether the agent DID the right thing, beside the
+    # existing four metrics on whether its answer was faithful. It is a separate
+    # pass rather than four more metrics because `EvaluationDataset` is
+    # homogeneous -- mixing a MultiTurnSample with a SingleTurnSample raises --
+    # and because keeping it separate means no EVAL.md baseline moves.
+    #
+    # Off reproduces today byte-for-byte: `eval_results.trajectory` stays NULL and
+    # `eval_runs.summary` gains no key. That is the standing regression assertion
+    # for every feature in the change set, the same shape `tools_enabled` gave the
+    # agent loop -- a feature that cannot be turned off cannot be compared against.
+    eval_trajectory_enabled: bool = True
+
+    # The judged half, separately switchable from the counted half. The
+    # deterministic tool-use rubric needs no provider at all, so a judge outage --
+    # or a deliberate zero-token run -- should still produce numbers rather than
+    # nothing. Set false and the scorecard reports goal accuracy as NOT MEASURED,
+    # which is a different fact from zero and renders as one.
+    trajectory_goal_accuracy: bool = True
+
+    # Per-ToolMessage truncation, applied at the loop boundary. Load-bearing
+    # twice rather than tidy: it bounds JSONB growth on a table that already
+    # takes one row per event, AND it bounds the judge prompt, because
+    # `MultiTurnSample.pretty_repr()` renders every ToolOutput in full into the
+    # judge's context. One constant, both ceilings.
+    #
+    # 2000 is sized on the real payload: `search_corpus` returns a header plus a
+    # <=400-character snippet per chunk at `rerank_top_n=3`, so a normal search
+    # result lands near 1.2 KB and is not truncated at all. A sandbox traceback
+    # is what this actually clips.
+    trajectory_max_tool_content_chars: int = 2000
+
     # The model that DRAFTS the golden set (§3.6.1). Split out of
     # `decision_model`, which it used to share by accident rather than by
     # argument: the rewriter is a mechanical pronoun dereference on every

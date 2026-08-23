@@ -57,6 +57,7 @@ sys.path.insert(0, str(ROOT / "backend"))
 from langchain_core.messages import AIMessage  # noqa: E402
 from langchain_core.tools import tool  # noqa: E402
 
+from app.config import settings  # noqa: E402
 from app.rag import agent_loop as loop_mod  # noqa: E402
 from app.rag.agent_loop import ContextLedger, SEARCH_CORPUS, run_agent_loop  # noqa: E402
 
@@ -239,6 +240,93 @@ check(
     result3.steps == 0,
     f"steps={result3.steps}",
 )
+
+
+# ---------------------------------------------------------------------------
+print()
+print("-- 10-13. what a ToolInvocation carries back for the trajectory --")
+# ---------------------------------------------------------------------------
+# Change set 16. The judged agent metrics read a trajectory through
+# `MultiTurnSample.pretty_repr()`, which renders every tool output IN FULL. Until
+# now the string the model actually read died with the loop's local message list
+# and only `summary` survived -- a one-line rendering FOR A HUMAN. Scoring a
+# trajectory assembled from summaries would be scoring a conversation that never
+# happened, so these assert the real content comes back on the invocation.
+
+result10, _ = asyncio.run(run(forced_returns_a_call=True))
+succeeded = [i for i in result10.tool_calls if i.ok]
+
+check(
+    "10. a successful call carries the tool's returned string as `content`",
+    bool(succeeded) and succeeded[0].content == "[1] a stub chunk",
+    f"content={succeeded[0].content!r}" if succeeded else "no successful call",
+)
+
+check(
+    "13. and the assistant text that accompanied the call",
+    bool(succeeded) and succeeded[0].assistant_text == GAP_ANSWER,
+    f"assistant_text={succeeded[0].assistant_text[:40]!r}..." if succeeded else "-",
+)
+
+
+# A FAILED call is a separate return path inside `_execute` -- `failed()` builds
+# its own ToolMessage -- so stamping the success path alone passes case 10 while
+# leaving unrecorded the case a reader most wants: the traceback the model read
+# and corrected from.
+class _ExplodingModel(ScriptedModel):
+    def respond(self, tool_choice):  # noqa: ANN001
+        self.calls.append(str(tool_choice))
+        if tool_choice == "none":
+            return AIMessage(content=FINAL_ANSWER)
+        return AIMessage(
+            content="Let me look that up.",
+            tool_calls=[
+                {"name": "no_such_tool", "args": {"query": "x"}, "id": "call-bad"}
+            ],
+        )
+
+
+async def _run_failing():
+    model = _ExplodingModel(forced_returns_a_call=False)
+    return await run_agent_loop(
+        agent=SimpleNamespace(id="agent-under-test"),
+        question="q",
+        ledger=ContextLedger(),
+        system_prompt="You are a test.",
+        model=model,
+        max_steps=1,
+    )
+
+
+result11 = asyncio.run(_run_failing())
+failed_calls = [i for i in result11.tool_calls if not i.ok]
+check(
+    "11. a FAILED call carries the error text the model read as `content`",
+    bool(failed_calls) and "no_such_tool" in failed_calls[0].content,
+    f"content={failed_calls[0].content[:60]!r}" if failed_calls else "no failed call",
+)
+
+
+# The cap bounds the JSONB write AND the judge prompt with one constant, so it is
+# applied at the loop boundary rather than at either reader. Asserted by moving
+# the SETTING, never by reaching into the function -- a case that patched the
+# clipper would pass with the clipper never called.
+_original_limit = settings.trajectory_max_tool_content_chars
+try:
+    settings.trajectory_max_tool_content_chars = 12
+    result12, _ = asyncio.run(run(forced_returns_a_call=True))
+    clipped = [i for i in result12.tool_calls if i.ok]
+    check(
+        "12. `content` is truncated at TRAJECTORY_MAX_TOOL_CONTENT_CHARS",
+        bool(clipped)
+        and clipped[0].content.startswith("[1] a stub c")
+        and clipped[0].content.endswith("[truncated]"),
+        f"content={clipped[0].content!r}" if clipped else "-",
+    )
+finally:
+    # Restored in a `finally`: a scenario owns the conditions it needs. A leaked
+    # setting would silently truncate every later case in this file.
+    settings.trajectory_max_tool_content_chars = _original_limit
 
 print("\n" + "=" * 74)
 if failures:

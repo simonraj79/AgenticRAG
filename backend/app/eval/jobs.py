@@ -37,11 +37,14 @@ from app.db.models import (
     EvalRun,
     GoldenQuestion,
     QueryChunk,
+    TraceEvent,
     User,
 )
 from app.db.session import SessionLocal
 from app.eval.metrics_guide import METRIC_KEYS, summarise
 from app.eval.ragas_runner import EvalTurn, score_samples
+from app.eval.trajectory import build_trajectory
+from app.eval.trajectory_metrics import score_trajectory, summarise_trajectory
 from app.metering.context import collect_usage, meter_as
 from app.metering import store as metering_store
 
@@ -184,6 +187,15 @@ async def run_eval_job(
               run.generation_model = agent.generation_model or settings.generation_model
               run.progress_total = len(questions)
               run.progress_done = 0
+              # The tool configuration this run was MEASURED UNDER, stamped for
+              # the same reason the two models above are: `agents` can change
+              # after the run, so re-deriving provenance at read time would
+              # describe a configuration that never produced these numbers.
+              # Without it, toggling tools between two runs moves every metric for
+              # a reason the scorecard cannot state -- which EVAL.md already
+              # named as a real gap.
+              run.tools_enabled = bool(agent.tools_enabled)
+              run.max_tool_steps = agent.max_tool_steps
               # `func.now()` keeps every timestamp on the database's clock, matching
               # the server defaults on `created_at`. The cost is that the attribute
               # holds a SQL expression until refetched, so do NOT read
@@ -273,7 +285,25 @@ async def run_eval_job(
               # has one: `error_count`, `scored_count` and the summary's `note`
               # say exactly what happened. `failed` is reserved for the run
               # machinery breaking, not for the agent or the judge scoring badly.
-              run.summary = summarise(scored_rows, self_judged=self_judged)
+              # Passed INTO `summarise` rather than merged onto its result.
+              # `RunSummary` is the schema for a JSONB column with no enforced
+              # shape, and pydantic's default `extra="ignore"` means a key added
+              # to the returned dict is written to the column and then silently
+              # DROPPED when the API reads it back -- stored, unreadable, and no
+              # error at either end. The model's own docstring says it: do not
+              # write this column from a hand-built dict.
+              #
+              # `summarise_trajectory` returns None for an empty list rather than
+              # a dict of zeros, so a run with the pass disabled stores None --
+              # which is "not measured", not "measured and zero".
+              trajectory_rows = [
+                  row["trajectory"] for row in scored_rows if row.get("trajectory")
+              ]
+              run.summary = summarise(
+                  scored_rows,
+                  self_judged=self_judged,
+                  trajectory=summarise_trajectory(trajectory_rows),
+              )
               run.status = "completed"
               run.finished_at = func.now()
               await db.commit()
@@ -396,6 +426,50 @@ async def _run_one_question(
     )
     scored = (await score_samples([turn], judge_model=run.judge_model))[0]
 
+    # ------------------------------------------------------------------
+    # The second scoring pass: the trajectory.
+    # ------------------------------------------------------------------
+    # A SEPARATE pass over a separate dataset, not four more metrics on the one
+    # above, and that is structural rather than stylistic: ragas'
+    # `EvaluationDataset` is homogeneous and raises when a MultiTurnSample meets a
+    # SingleTurnSample. Keeping them apart has a second payoff -- `summarise()` is
+    # untouched, so every EVAL.md baseline stays comparable.
+    #
+    # Wrapped, because a trajectory failure must not cost the run the four RAG
+    # scores it already paid for. `_run_one_question`'s caller re-loads objects
+    # after a rollback; nothing here rolls back.
+    trajectory_row = None
+    if settings.eval_trajectory_enabled:
+        try:
+            sample = await build_trajectory(
+                db,
+                answer.query_id,
+                question=question.question,
+                answer=answer.answer,
+            )
+            events = (
+                await db.scalars(
+                    select(TraceEvent)
+                    .where(TraceEvent.query_id == answer.query_id)
+                    .order_by(TraceEvent.step_index)
+                )
+            ).all()
+            trajectory_row = await score_trajectory(
+                sample,
+                reference=question.reference_answer,
+                expected_tool_use=question.expected_tool_use,
+                events=events,
+            )
+        except Exception as exc:  # noqa: BLE001 - never costs the RAG scores
+            log.warning(
+                "Trajectory scoring failed for question %s: %s", question.id, exc
+            )
+            trajectory_row = {
+                "error": f"trajectory: {exc.__class__.__name__}: {exc}",
+                "tool_use_ok": None,
+                "goal_accuracy": None,
+            }
+
     db.add(
         EvalResult(
             id=uuid.uuid4(),
@@ -411,8 +485,15 @@ async def _run_one_question(
             context_recall=scored["context_recall"],
             behaviour_ok=scored["behaviour_ok"],
             error=scored["error"],
+            trajectory=trajectory_row,
         )
     )
+    # Carried on the returned row so `run_eval_job` can aggregate it without a
+    # second read. Under a `None` key rather than an absent one, so
+    # `summarise_trajectory` sees the turn in its denominator even when the pass
+    # was skipped -- "we did not measure this" is a fact the card must be able to
+    # state.
+    scored["trajectory"] = trajectory_row
     return scored
 
 

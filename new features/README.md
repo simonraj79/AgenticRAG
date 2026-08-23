@@ -1,6 +1,7 @@
 # new features
 
-Planning documents for three change sets: **agentic tools + Handouts** (`00`–`11`, flat),
+Planning documents for the change sets below — a count in prose goes stale, so this
+sentence names none: **agentic tools + Handouts** (`00`–`11`, flat),
 **[12 — robust handouts](12-robust-handouts/PLAN.md)** and
 **[13 — object storage](13-object-storage/PLAN.md)**. All three have shipped.
 
@@ -181,3 +182,28 @@ would notice if they went. That step is now `build.md` phase 6. The review also 
 new write modes borrowing a REAL user with `select(User).limit(1)` -- no `ORDER BY`, so which
 of 15 people got a fixture in their dashboard was whatever Postgres returned first. Harnesses
 own their subjects now, and CLAUDE.md carries the rule.
+
+**[16-agent-evaluation/](16-agent-evaluation/PLAN.md)** | shipped | Evaluating the AGENT and
+not just its answer -- PRD open item 23, which had sat open with "trajectory evaluation is
+Stage 4" and no statement of what Stage 4 was. **The audit deleted more than the plan added,
+and the deletion is the finding.** Ragas 0.4.3 ships five agent metrics; three are closed
+here, two of them by measurement rather than preference. `ToolCallAccuracy` and `ToolCallF1`
+compare tool ARGUMENTS byte-exactly, and `REWRITE_EVERY_TURN=true` rewrites the search query
+on every turn at temperature 1.0 -- so they score a correct agent **0.0**: 0.0 for a
+differently worded query, 0.0 for an empty reference arg dict (`_get_arg_score` reads
+`if not refs: return 0.0`, so the obvious escape hatch fails exactly where it would be used),
+and 0.0 for two calls against one reference, which is what this model normally emits. That is
+the `refusal_pass = 0/2` shape arriving in a new instrument, and CLAUDE.md's rule is that a
+metric which cannot discriminate is worse than none because the scorecard still renders.
+`AgentGoalAccuracyWithoutReference` is closed for a different reason -- it infers the goal AND
+the outcome from the same conversation, so it grades against something it wrote itself. What
+ships is one judged metric that scores OUTCOME rather than path, calibrated before it was
+trusted (known-good 1.0, known-bad 0.0, and **case 22 asserts the two differ**, because a
+metric returning a constant passes either case alone), plus a deterministic tool-use count
+that invents no score at all. Its sharpest use is the refusal question: "did it search, find
+nothing, and decline" is a proposition faithfulness structurally cannot express, and it is
+reached without the marker list that has been wrong five times. Two things fell out that were
+not the point: `eval_runs` now records the tool configuration a run was measured under -- a
+gap EVAL.md had already named -- and `calls_per_step` measured **2.00** on a real eval turn,
+which is the silent budget doubling CLAUDE.md predicted, finally a number rather than a
+warning in prose.

@@ -341,16 +341,45 @@ anyone comparing scorecards:
 - **`eval_runs` does not record it.** `judge_model` and `generation_model` are captured per
   run; `tools_enabled` is not, so a scorecard cannot currently tell you whether the agent had
   tools when it was scored. Toggling it between runs makes them incomparable and nothing in
-  the card will say so. That is a real gap, in the same family as PRD open item 23.
+  the card will say so. **Closed 2026-08-23**: `eval_runs` now records `tools_enabled` and
+  `max_tool_steps`, and the admin console renders them. `NULL` on both means the run
+  predates the columns, which is **not** the same fact as tools being off.
 
-**Tool use itself is unmeasured, deliberately.** Ragas scores whether an answer is faithful
-to its context; it has no opinion on whether the right tool was called, or whether calling
-none was correct. Inventing a faithfulness-shaped number for tool choice would be a new
-instrument of unknown validity — which is exactly the failure §11 and PRD items 15/16
-record, where a broken measurement still rendered a confident scorecard. Trajectory
-evaluation is Stage 4. Until then, read the trace: `TOOL_CALL`, `TOOL_RESULT` and
-`TOOL_ERROR` rows say what happened, and `GENERATE.payload.stopped_reason` says whether the
-answer was finished or forced.
+**Tool use is measured as of 2026-08-23 — as a JUDGED outcome and a COUNT, never as a
+score over the path.** The old wording deferred it to "Stage 4" and warned that inventing a
+faithfulness-shaped number for tool choice would be a new instrument of unknown validity.
+That warning is what shaped the answer rather than something the answer overrode:
+
+- **Judged: `goal_accuracy`.** `AgentGoalAccuracyWithReference` over the turn's real
+  trajectory, judged against `reference_answer`. It scores *outcome, not path*, which is the
+  property that makes it usable on an agent whose path legitimately varies. **It is BINARY
+  per turn**, so the aggregate is a pass rate — the console renders `7 / 9 achieved` and
+  deliberately never `0.78`, because a decimal invites a comparison with faithfulness that
+  is not meaningful. Validated before it was trusted: known-good `1.0`, known-bad `0.0`, and
+  `scripts/agent_metrics_check.py --live` case 22 asserts the two **differ**.
+- **Counted: `tool_use_ok`.** Read off `trace_events` against
+  `golden_questions.expected_tool_use` — a proposition (`search` / `none` / `python`), not
+  a reference call sequence. **`NULL` means no expectation was authored: the row is in
+  `total` and not in `measured`,** and the card says "not measured" rather than showing a
+  zero.
+- **Reported and NOT graded: `calls_per_step`.** `max_tool_steps` bounds *steps*, and this
+  model emits 1.50–2.00 calls per step — measured at **2.00** on a real eval turn. Nobody
+  has authored a threshold, and `score_threshold` is the standing precedent for what happens
+  when a number is graded against a band that overlaps, so this is a diagnostic rather than
+  a verdict.
+
+**Where to read it:** the admin console's **Trajectory** tab
+(`GET /api/admin/agent-trajectory`), and per turn on `eval_results.trajectory`. The raw
+trace is still the finest-grained view: `TOOL_CALL` now carries `assistant_text` and
+`TOOL_RESULT` carries `content` — the string the model actually read, not just its
+one-line summary — and `GENERATE.payload.stopped_reason` still says whether the answer was
+finished or forced.
+
+**Two of Ragas' own agent metrics are deliberately NOT used, and the reason is this
+system's rewriter rather than the metrics.** `ToolCallAccuracy` and `ToolCallF1` compare
+tool arguments byte-exactly; `REWRITE_EVERY_TURN=true` rewrites the search query every turn
+at temperature 1.0. Measured, they score a correct agent **0.0**. Full record in CLAUDE.md
+and PRD open item 49. A sixth way a scorecard misleads, avoided rather than shipped.
 
 Retrieval parameters differ *per persona* rather than being copied — a quiz generator draws
 on more of the corpus than a Socratic tutor.

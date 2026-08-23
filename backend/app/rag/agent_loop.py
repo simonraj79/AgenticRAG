@@ -66,6 +66,7 @@ from langchain_core.messages import (
 )
 from langchain_core.tools import BaseTool
 
+from app.config import settings
 from app.db.models import Agent
 from app.rag import events
 from app.rag.refusal import detect_gap
@@ -376,6 +377,26 @@ class ContextLedger:
 # --------------------------------------------------------------------------
 
 
+def clip_tool_content(value: Any) -> str:
+    """Truncate a tool's returned string at the loop boundary, once.
+
+    Applied HERE rather than at each reader, because the cap has two jobs and
+    only this position does both: it bounds the JSONB written to `trace_events`,
+    and it bounds the judge prompt, since `MultiTurnSample.pretty_repr()` renders
+    every ToolOutput in full. A reader-side clip would leave the write unbounded;
+    a write-side clip alone would leave a replayed trajectory unbounded.
+
+    The marker is deliberate and not decorative -- a judge reading a trajectory
+    needs to know it is looking at a fragment, and so does a human in the trace
+    panel.
+    """
+    text = "" if value is None else str(value)
+    limit = settings.trajectory_max_tool_content_chars
+    if limit <= 0 or len(text) <= limit:
+        return text
+    return text[:limit] + "\n... [truncated]"
+
+
 @dataclass
 class ToolInvocation:
     """One tool call, as the trace will record it.
@@ -402,6 +423,16 @@ class ToolInvocation:
     detail: dict[str, Any] = field(default_factory=dict)
     duration_ms: int = 0
     error: str | None = None
+    # The string the model actually READ back, truncated. `summary` is a one-line
+    # rendering FOR A HUMAN and is not the same input: a trajectory assembled from
+    # it would show a judge `3 results, 2 new for "q"` where the model saw a
+    # numbered block of retrieved snippets. That is not a smaller input, it is a
+    # different one, and a verdict reached on it would be a verdict about a
+    # conversation that never happened. See `new features/16-agent-evaluation/`.
+    content: str = ""
+    # The text the assistant emitted alongside the call, post-`_message_text`, so
+    # a model's own tool-call markup never reaches a judge prompt.
+    assistant_text: str = ""
 
 
 @dataclass
@@ -498,6 +529,10 @@ async def _execute(
             detail={},
             duration_ms=elapsed(),
             error=error,
+            # The failure path carries content too, and it is the case a reader
+            # most wants: a model handed its own traceback fixes its code on the
+            # next step, and this is the only durable copy of what it read.
+            content=clip_tool_content(error),
         )
         return invocation, ToolMessage(
             content=error, tool_call_id=call_id, status="error"
@@ -550,6 +585,7 @@ async def _execute(
         detail=dict(outcome.detail),
         duration_ms=elapsed(),
         error=outcome.error,
+        content=clip_tool_content(message.content),
     )
     return invocation, message
 
@@ -1047,6 +1083,11 @@ async def run_agent_loop(
                     # the model with a decision the code made.
                     invocation.args = {**invocation.args, "trigger": "gap_detected"}
                     invocation.detail = {**invocation.detail, "trigger": "gap_detected"}
+                    # The retracted draft, not the forced call's own preamble.
+                    # This is the text that ADMITTED the gap and is the reason the
+                    # search happened at all -- a trajectory that dropped it would
+                    # show a search with no motive.
+                    invocation.assistant_text = _message_text(ai)
                     tool_ms += invocation.duration_ms
                     invocations.append(invocation)
                     messages.append(message)
@@ -1085,6 +1126,11 @@ async def run_agent_loop(
         # in. Set before execution, never read after.
         ctx.step = step
 
+        # One call per STEP. See the note beside its use below: `_message_text`
+        # logs when it strips leaked markup, so calling it per tool call would
+        # emit N identical warnings for one event.
+        step_assistant_text = _message_text(ai)
+
         step_ok = 0
         # **Sequential, never `asyncio.gather`.** langchain-openai is not asking
         # for parallel calls at all (see `disabled_params` above), so a batch of
@@ -1117,6 +1163,17 @@ async def run_agent_loop(
             )
             if emit is not None:
                 await _emit_tool_outcome(emit, invocation)
+            # The assistant text that accompanied this call. A model that says
+            # "let me check the comms briefing" before searching is stating its
+            # intent, and that sentence is what a trajectory judge reads to
+            # decide whether the goal was pursued.
+            #
+            # Computed ONCE per step, above the loop, not once per call. It is
+            # the same message either way, and `_message_text` strips leaked
+            # tool-call markup and LOGS A WARNING when it finds any -- so calling
+            # it per call turned one real event into N identical log lines, which
+            # is how a log stops being read.
+            invocation.assistant_text = step_assistant_text
             tool_ms += invocation.duration_ms
             invocations.append(invocation)
             messages.append(message)

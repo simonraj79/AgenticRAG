@@ -1267,6 +1267,14 @@ async def _run_turn(
                 # raises, so a 4 KB Python program in `args["code"]` survives
                 # intact -- which is what the Trace view renders on its own.
                 "args": invocation.args,
+                # What the assistant said while deciding to call. A payload KEY,
+                # not a new event type: `event_type` is String(32) with no CHECK
+                # and `payload` is JSONB, so this needs no migration and no
+                # `TracePanel` map entry. Older rows simply lack it, and every
+                # reader uses `.get` with a default -- the same
+                # `.get`-as-migration `conversations.py` already applies to
+                # `tool_steps`.
+                "assistant_text": invocation.assistant_text,
             },
         )
         if invocation.ok:
@@ -1278,6 +1286,16 @@ async def _run_turn(
                     "call_id": invocation.call_id,
                     "ok": True,
                     "summary": invocation.summary,
+                    # The string the model READ, not the one-line rendering of it
+                    # for a human. Both are kept because they are different
+                    # facts: `summary` is what the trace panel shows at a glance,
+                    # `content` is what a replayed trajectory must contain to be
+                    # the conversation that actually happened. Already truncated
+                    # at the loop boundary -- see `clip_tool_content`.
+                    "content": invocation.content,
+                    # `detail` last, deliberately: a tool that ever emitted a
+                    # `content` or `summary` key of its own should win, because it
+                    # knows more about its own output than this call site does.
                     **invocation.detail,
                 },
                 duration_ms=invocation.duration_ms,
@@ -1291,6 +1309,11 @@ async def _run_turn(
                     "call_id": invocation.call_id,
                     "ok": False,
                     "error": invocation.error,
+                    # For a failed call this is the traceback the model read and
+                    # usually corrected from -- the single most interesting thing
+                    # an agentic system does, and until now the only copy of it
+                    # died with the loop's local message list.
+                    "content": invocation.content,
                     **invocation.detail,
                 },
                 duration_ms=invocation.duration_ms,

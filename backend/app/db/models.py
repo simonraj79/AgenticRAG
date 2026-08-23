@@ -567,6 +567,24 @@ class GoldenQuestion(Base):
         Integer, default=0, server_default="0", nullable=False
     )
 
+    # What this question expects of the agent's TOOL USE, beside what
+    # `expected_behaviour` already expects of its answer. One of
+    # `EXPECTED_TOOL_USE_VALUES` -- "search", "none", "python" -- or NULL.
+    #
+    # Deliberately a proposition and NOT a reference tool-call sequence. Ragas
+    # ships two metrics that read such a sequence and both compare arguments
+    # byte-exactly, while this system rewrites `search_corpus`'s query on every
+    # turn by design at temperature 1.0 -- so a stored reference would score a
+    # correct agent 0.0. Measured, and pinned by `agent_metrics_check.py` cases
+    # 1-7. A column nothing can score honestly is a column that invites someone
+    # to score it wrongly.
+    #
+    # NULL means no expectation was authored: the row is counted in the
+    # denominator and not graded. There is no backfill, because inventing
+    # expectations nobody stated would put fabricated ground truth into the
+    # measuring instrument -- the failure PRD open items 15 and 16 record.
+    expected_tool_use: Mapped[str | None] = mapped_column(String(16))
+
     # The editor reads exactly this: one agent's set, in display order. The
     # single-column index on `agent_id` finds the set; this one hands it back
     # already ordered, so opening a long golden set never sorts.
@@ -632,6 +650,23 @@ class EvalRun(Base):
     # What changed since the last run - the point of eval-driven development.
     notes: Mapped[str | None] = mapped_column(Text)
 
+    # The agent's TOOL CONFIGURATION at run time, kept for the same reason
+    # `judge_model` and `generation_model` are kept beside each other rather than
+    # read back from `agents`: the row can change after the run, and a scorecard
+    # whose provenance is re-derived at read time is a scorecard about a
+    # configuration that may no longer exist.
+    #
+    # EVAL.md named the absence of these two as a real gap. Toggle tools between
+    # two runs and every number moves for a reason the card cannot state -- the
+    # same class of defect as `self_judged`, which exists precisely so a reader
+    # can tell an independent measurement from a self-assessment.
+    #
+    # NULL means "this run predates the column", which is a DIFFERENT fact from
+    # `false`, and the console renders it as "not recorded" rather than "off".
+    # Collapsing the two has shipped wrong twice in this codebase's admin console.
+    tools_enabled: Mapped[bool | None] = mapped_column(Boolean)
+    max_tool_steps: Mapped[int | None] = mapped_column(Integer)
+
     # The history list reads exactly this: one agent's runs, newest first.
     # DESC in the index rather than at the call site so the newest-first read -
     # which is every read - is a forward scan.
@@ -671,6 +706,17 @@ class EvalResult(Base):
     # it the only place to put the failure is the run, where it voids the whole
     # scorecard for a single row.
     error: Mapped[str | None] = mapped_column(Text)
+
+    # The trajectory rubric for this turn: did the agent achieve the goal, and did
+    # it use its tools the way the golden question said it should. JSONB rather
+    # than columns because the counted half is a bag of diagnostics whose shape is
+    # still settling, and because it is written and read in one piece -- the same
+    # argument `eval_runs.summary` makes one table over.
+    #
+    # NULL means the second scoring pass did not run: this turn predates change
+    # set 16, or it ran under EVAL_TRAJECTORY_ENABLED=false. Not an empty dict,
+    # which would claim the pass ran and found nothing.
+    trajectory: Mapped[dict | None] = mapped_column(JSONB)
 
 
 # --------------------------------------------------------------------------

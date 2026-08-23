@@ -167,6 +167,13 @@ a harness case. [new features/loop.md](new%20features/loop.md) is the pattern fo
 **model** decides, which is a harder problem than it looks: binding a tool is twenty lines
 that work first time, and then the model declines to call it.
 
+Both assume [insights.md](insights.md), which is the shortest useful thing to read here.
+Its first rule is the one that generalises furthest — **trigger on the absence of the
+outcome you wanted, never on the presence of an error** — and its second is the reason this
+repo has the harnesses it does: a green suite here has been wrong eight times, in eight
+different modules, and every one was found by reading an answer or opening a page rather
+than by a passing assertion.
+
 ## Deploying
 
 **Pushing to `main` is the deploy.** `autoDeploy` is on for both Render services, so a merge
@@ -208,6 +215,7 @@ scripts/            Provisioning and end-to-end checks
 |---|---|
 | [PRD.md](PRD.md) | The specification: architecture, schema, deployment |
 | [EVAL.md](EVAL.md) | How to run an evaluation and read a scorecard |
+| [insights.md](insights.md) | **What this project learned that outlives it** — ~29 rules with the incident behind each. Trigger on the absence of the outcome, never the presence of an error; a green suite here has been wrong eight times; mutate, because a passing suite says nothing about what it would let through. Read before starting work, not after something breaks |
 | [new features/](new%20features/) | Design notes for each major change. **Un-numbered files are living references; numbered ones record a change that shipped** |
 | [new features/build.md](new%20features/build.md) | **Start here for a new feature bigger than one prompt** — audit, plan, one file per feature, harness-first, verify, ship |
 | [new features/loop.md](new%20features/loop.md) | The design pattern for anything the **model** decides — read before adding a tool, a retry or a detector |

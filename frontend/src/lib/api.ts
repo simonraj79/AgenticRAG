@@ -54,6 +54,7 @@ import type {
   AdminEvalRun,
   AdminOverview,
   AdminSpend,
+  AdminTrajectory,
   AdminTranscript,
   AdminUser,
 } from "./types.ts";
@@ -939,6 +940,8 @@ export const admin = {
 
   evalRuns: () => api<AdminEvalRun[]>("/api/admin/eval-runs"),
 
+  trajectory: (days = 30) =>
+    api<AdminTrajectory>(`/api/admin/agent-trajectory?days=${days}`),
   account: () => api<AdminAccount>("/api/admin/account"),
 
   audit: (limit = 100) => api<AdminAuditEntry[]>(`/api/admin/audit?limit=${limit}`),

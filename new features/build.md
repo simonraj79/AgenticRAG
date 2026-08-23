@@ -249,8 +249,8 @@ Then the step that is not a command:
 > ### Read one real output by eye. This is a phase, not advice.
 
 **"Do not stop until everything is implemented and tested" is the single most expensive
-sentence you can carry into this repo**, because a green suite here has been wrong **eight**
-separate times, in eight different modules:
+sentence you can carry into this repo**, because a green suite here has been wrong **nine**
+separate times, in nine different modules:
 
 | What was green | What was actually true |
 |---|---|
@@ -262,6 +262,9 @@ separate times, in eight different modules:
 | `sandbox_check` S3 + `agentic_check` S8 | A **zero-slide** deck and 28 bytes of junk both passed `PK` + `>= 10_000 bytes`. Nothing between `prs.save()` and a download had opened the file |
 | `metering_check.py`, all ten cases | `"goldenset"` was in `CALL_KINDS` with **no `meter_as` setting it** — the drafter's spend was logged and never written. Every case opened its *own* scope and asserted attribution survived, so the harness only tested call sites it wrote itself |
 | `admin_check.py`, every case | `GET /api/admin/spend` returned **500 on every request** — `date_trunc` with a bound parameter cannot satisfy `GROUP BY`. An offline harness reads source and introspects routes; it cannot execute SQL, so a query that COMPILES and does not RUN is invisible to it. In the browser it surfaced as a **CORS error**, naming the wrong subsystem entirely |
+| `agentic_check.py` S35, a LIVE scenario | The eval job wrote its new summary block with `{**run.summary, "trajectory": …}`. `eval_runs.summary` is JSONB, `RunSummary` is its only schema, and pydantic's default `extra="ignore"` **silently dropped the key when the API read it back** — stored in the column, absent from every response, no error at either end. S35 went green because a live scenario reads the COLUMN, which is the one place the defect is invisible. Found by reading the model definition |
+
+**The ninth is a variety the first eight did not cover, and it is worth naming: a WRITE and a READ that disagree about a schema, where the storage layer enforces nothing and both sides succeed.** JSONB has no shape, so the model class is the only schema there is — and a serialisation library whose default is to ignore unknown keys will discard yours without a word. The tell is that the data is provably in the database and provably absent from the API, with nothing in between raising. Anywhere a schemaless column is written through one model and read through another, the assertion has to be a ROUND TRIP; checking that the key is in the dict you just built proves nothing about what comes back.
 
 Every one of those was found by reading an answer, opening a page, or reordering a loop —
 never by a passing assertion. The seventh adds a rule the first six only implied: **a layer-1
@@ -404,7 +407,7 @@ feature in a numbered folder, each carrying acceptance criteria that **name a ha
 rather than describing one, plus the thing that must keep working. Write those cases and watch
 them fail before writing the feature. Build one feature per session, lowest layer first,
 handing model-decided features to [loop-prompt.md](loop-prompt.md). Verify low to high, and
-then — because a green suite in this repo has been wrong eight times in eight modules — open the
+then — because a green suite in this repo has been wrong nine times in nine modules — open the
 page and read one real answer. Ship with the migration already applied, then move the durable
 half into CLAUDE.md, PRD.md, EVAL.md and loop.md, so the folder you just wrote can safely
 become archive.

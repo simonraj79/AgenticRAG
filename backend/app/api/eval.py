@@ -83,6 +83,7 @@ from app.db.models import Query as QueryRow
 from app.db.session import SessionLocal
 from app.eval.jobs import run_eval_job
 from app.eval.metrics_guide import RunSummary
+from app.eval.trajectory_metrics import EXPECTED_TOOL_USE_VALUES
 from app.metering import store as metering_store
 from app.metering.context import collect_usage, meter_as
 
@@ -110,6 +111,17 @@ SOURCES: tuple[str, ...] = ("ai_suggested", "edited", "manual", "imported")
 # "answer" drags refusal rows into the metric means the whole design excludes
 # them from.
 BEHAVIOURS: tuple[str, ...] = ("answer", "refuse")
+
+# `expected_tool_use` is the same shape again, one axis over: `expected_behaviour`
+# is a claim about the ANSWER, this is a claim about the TRAJECTORY that produced
+# it. Imported from the module that scores it rather than retyped, so the API and
+# the rubric cannot drift -- the failure `SOURCES` above describes, where a value
+# is stored correctly and read as something else.
+#
+# None is a legal value and means "no expectation authored": the row is counted
+# in the denominator and not graded. That is why this is validated by a free
+# function rather than a `Literal`, which cannot express optional-but-checked.
+TOOL_USE: tuple[str, ...] = tuple(sorted(EXPECTED_TOOL_USE_VALUES))
 
 # Sanity bounds, not platform limits. `question` and `reference_answer` are Text
 # columns and would take anything; a 10,000-character "question" is a pasted
@@ -256,6 +268,9 @@ class GoldenQuestionOut(BaseModel):
     question: str
     reference_answer: str | None = None
     expected_behaviour: str
+    # None means no expectation was authored. Rendered as "not set", never as
+    # a failure -- an ungraded row is not a failed row.
+    expected_tool_use: str | None = None
     is_active: bool
     source: str
     order_index: int
@@ -288,6 +303,9 @@ class GoldenQuestionCreate(BaseModel):
     question: QuestionText
     reference_answer: ReferenceText | None = None
     expected_behaviour: BehaviourText = "answer"
+    # Optional on purpose: the drafter does not author it, and a default of
+    # "search" would be an expectation nobody stated arriving as ground truth.
+    expected_tool_use: str | None = None
     is_active: bool = True
     # Omitted means "append to the end of the set". Accepted because the editor
     # supports drag-to-reorder and has to be able to insert at a position.
@@ -307,6 +325,11 @@ class GoldenQuestionPatch(BaseModel):
     question: QuestionText | None = None
     reference_answer: ReferenceText | None = None
     expected_behaviour: BehaviourText | None = None
+    # Can legitimately be set back to null -- an author who decides a question
+    # should not assert anything about tool use must be able to say so -- which
+    # is why `exclude_unset` matters here exactly as it does for
+    # `reference_answer`.
+    expected_tool_use: str | None = None
     is_active: bool | None = None
     order_index: OrderIndex | None = None
 
@@ -358,6 +381,13 @@ class EvalRunOut(BaseModel):
     error: str | None = None
     progress: ProgressOut
     summary: ScoreSummary | None = None
+    # The tool configuration this run was measured under. None on both means
+    # the run predates the columns, which is a DIFFERENT fact from tools being
+    # off -- the card renders it as "not recorded". Read from `eval_runs`, never
+    # back from `agents`, for the same reason `generation_model` is: the agent
+    # can change after the run.
+    tools_enabled: bool | None = None
+    max_tool_steps: int | None = None
     # COMPUTED, never stored. When the judge and the generator are the same
     # model, faithfulness is self-assessment (CLAUDE.md, Ragas section) and the
     # scorecard has to say so. Derived here rather than read from
@@ -400,6 +430,11 @@ class EvalResultOut(BaseModel):
     answer_relevance: float | None = None
     context_precision: float | None = None
     context_recall: float | None = None
+    # The trajectory rubric for this turn. None means the second scoring pass
+    # did not run -- this row predates change set 16, or the run had
+    # EVAL_TRAJECTORY_ENABLED off. NOT an empty dict, which would claim the
+    # pass ran and found nothing.
+    trajectory: dict[str, Any] | None = None
     error: str | None = None
 
 
@@ -617,6 +652,8 @@ def _run_out(run: EvalRun) -> EvalRunOut:
         error=run.error,
         progress=ProgressOut(done=run.progress_done, total=run.progress_total),
         summary=_summary_of(run),
+        tools_enabled=run.tools_enabled,
+        max_tool_steps=run.max_tool_steps,
         # `bool(judge_model) and ...` rather than a bare equality. Both columns
         # are nullable, and `None == None` is True -- which would claim a run
         # with no models recorded at all had graded its own output.
@@ -711,6 +748,7 @@ async def create_golden_question(
         question=body.question,
         reference_answer=body.reference_answer or None,
         expected_behaviour=behaviour,
+        expected_tool_use=_validated_tool_use(body.expected_tool_use),
         is_active=body.is_active,
         source="manual",
         order_index=(
@@ -728,6 +766,32 @@ async def create_golden_question(
     await db.refresh(question)
 
     return GoldenQuestionOut.from_row(question)
+
+
+def _validated_tool_use(value: str | None) -> str | None:
+    """`expected_tool_use`, or a 422 naming what was sent. None passes through.
+
+    A free function for the same reason `_validated_behaviour` is one: the import
+    path reuses the rule and reports it per row rather than rejecting a whole
+    file. Validated against a set and never silently defaulted, the way
+    `/api/admin/spend` validates `group_by` -- a quietly-corrected value is a
+    measurement about something the author did not ask for.
+    """
+    if value is None:
+        return None
+    tool_use = (value or "").strip().lower()
+    if not tool_use:
+        # An empty string from a form field is "cleared", not "invalid".
+        return None
+    if tool_use not in EXPECTED_TOOL_USE_VALUES:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=(
+                f"expected_tool_use must be one of {', '.join(TOOL_USE)} "
+                f"or null -- got {value!r}."
+            ),
+        )
+    return tool_use
 
 
 def _validated_behaviour(value: str) -> str:
@@ -791,13 +855,15 @@ async def update_golden_question(
         # would otherwise validate here and fail at the driver as an
         # IntegrityError: a 500 for what is plainly a request error, with a
         # message naming a column instead of a field.
-        if value is None and field != "reference_answer":
+        if value is None and field not in ("reference_answer", "expected_tool_use"):
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail=f"{field} cannot be null. Omit it to leave it unchanged.",
             )
         if field == "expected_behaviour":
             changes[field] = _validated_behaviour(value)
+        if field == "expected_tool_use":
+            changes[field] = _validated_tool_use(value)
         if field == "reference_answer":
             # "" and NULL are the same fact here and must not become two. An
             # empty reference answer disables `context_recall` for the row just
@@ -807,7 +873,17 @@ async def update_golden_question(
 
     content_changed = False
     for field, value in changes.items():
-        if field in ("question", "reference_answer", "expected_behaviour"):
+        if field in (
+            "question",
+            "reference_answer",
+            "expected_behaviour",
+            # Authoring what the trajectory should look like is a human
+            # writing ground truth, which is exactly what `source` exists to
+            # record. It sits with `expected_behaviour` rather than with
+            # `is_active` for the same reason: neither is WORDING, and both
+            # change what the row asserts.
+            "expected_tool_use",
+        ):
             # Compared before assigning: a PATCH that re-sends identical wording
             # (the editor saving an untouched form) is not an edit, and marking it
             # as one would launder an unreviewed set into a reviewed-looking one.
@@ -1135,6 +1211,9 @@ async def export_golden_questions(agent: OwnedAgent, db: DbSession) -> Response:
                 "question": row.question,
                 "reference_answer": row.reference_answer,
                 "expected_behaviour": row.expected_behaviour,
+                # Exported even when null, so a round trip is lossless and an
+                # author can see the field exists to be filled in.
+                "expected_tool_use": row.expected_tool_use,
             }
             for row in rows
         ],
@@ -1218,6 +1297,22 @@ def _parse_import_rows(payload: Any) -> tuple[list[dict[str, Any]], list[str]]:
             continue
         behaviour = behaviour.strip().lower()
 
+        # ABSENT IS VALID. An export taken before change set 16 has no such
+        # key, and refusing it would make this route reject the files it was
+        # written to accept. `None` is also the value an author legitimately
+        # stores, so the two collapse here with no loss.
+        tool_use = item.get("expected_tool_use")
+        if tool_use is not None and (
+            not isinstance(tool_use, str)
+            or tool_use.strip().lower() not in EXPECTED_TOOL_USE_VALUES
+        ):
+            problems.append(
+                f"row {index}: skipped, 'expected_tool_use' must be one of "
+                f"{', '.join(TOOL_USE)} or null."
+            )
+            continue
+        tool_use = tool_use.strip().lower() if isinstance(tool_use, str) else None
+
         reference = item.get("reference_answer")
         if reference is not None and not isinstance(reference, str):
             problems.append(
@@ -1242,6 +1337,7 @@ def _parse_import_rows(payload: Any) -> tuple[list[dict[str, Any]], list[str]]:
                 "question": question,
                 "reference_answer": reference,
                 "expected_behaviour": behaviour,
+                "expected_tool_use": tool_use,
             }
         )
 
@@ -1320,6 +1416,7 @@ async def import_golden_questions(
             question=row["question"],
             reference_answer=row["reference_answer"],
             expected_behaviour=row["expected_behaviour"],
+            expected_tool_use=row.get("expected_tool_use"),
             is_active=True,
             # "imported" and not "manual". Both are human-authored, and the
             # distinction still earns its place: an imported set came from
@@ -1543,6 +1640,7 @@ async def get_eval_run(run: OwnedRun, db: DbSession) -> EvalRunDetail:
             answer_relevance=result.answer_relevance,
             context_precision=result.context_precision,
             context_recall=result.context_recall,
+            trajectory=result.trajectory,
             error=result.error,
         )
         for result, question, query in rows.all()
