@@ -612,6 +612,151 @@ check(
 )
 
 # ---------------------------------------------------------------------------
+print("\n-- 11-12. coverage: is every call site actually INSIDE a scope? --")
+# ---------------------------------------------------------------------------
+# R4 in `new features/14-admin-observability/PLAN.md` -- "rows written with
+# user_id = NULL because context was not set" -- whose mitigation was written as
+# "a case asserting every call site is covered by a meter_as", and was NOT built.
+# The gap it names had already happened by the time anyone looked: the golden-set
+# drafter reaches `build_chat_model` through a BackgroundTask that opens no
+# scope, so its spend landed as `user_id = NULL, call_kind = "unknown"` while
+# `"goldenset"` sat in CALL_KINDS with nothing setting it.
+#
+# WHY THE TEN CASES ABOVE COULD NOT SEE IT. Every one of them opens its own
+# `meter_as` and then asserts attribution survived -- so the harness only ever
+# tested call sites it wrote ITSELF, never the one the APPLICATION forgot. That
+# is the seventh-green-suite failure one layer up, and it generalises past this
+# repo: a harness cannot prove instrumentation is COMPLETE, only that the
+# instrumentation it was handed works. These two cases read the application's own
+# source instead of a shape this file invented.
+import ast  # noqa: E402
+
+from app.metering.context import CALL_KINDS  # noqa: E402
+
+_APP = ROOT / "backend" / "app"
+_TREES = {p: ast.parse(p.read_text(encoding="utf-8")) for p in sorted(_APP.rglob("*.py"))}
+
+
+def _rel(path: Path) -> str:
+    return path.relative_to(_APP).as_posix()
+
+
+def _kw_str(call: ast.Call, name: str) -> str | None:
+    """The value of `name=` on this call, but only when it is a plain string."""
+    for kw in call.keywords:
+        if kw.arg == name and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
+            return kw.value.value
+    return None
+
+
+# -- 11. every declared kind is reachable ----------------------------------
+# Derived from the source, never a second list beside CALL_KINDS -- a hardcoded
+# expectation here would be the "contract stated twice" that build.md forbids,
+# and the copy that drifted is never the one you are reading.
+#
+# `unknown` is exempt and the exemption is the point: it is the dataclass default
+# for a call made OUTSIDE any scope, so a call site passing it explicitly would
+# be asserting it does not know who it is working for. It must stay unreachable.
+_kinds_set: dict[str, list[str]] = {}
+for _path, _tree in _TREES.items():
+    for _node in ast.walk(_tree):
+        if isinstance(_node, ast.Call):
+            _k = _kw_str(_node, "call_kind")
+            if _k:
+                _kinds_set.setdefault(_k, []).append(f"{_rel(_path)}:{_node.lineno}")
+
+_declared = set(CALL_KINDS) - {"unknown"}
+_used = set(_kinds_set)
+
+check(
+    "11a. every kind in CALL_KINDS is set by some call site",
+    _declared <= _used,
+    f"declared but never set: {sorted(_declared - _used) or 'none'}",
+)
+check(
+    "11b. no call site sets a kind CALL_KINDS does not declare",
+    _used <= set(CALL_KINDS),
+    f"undeclared: {sorted(_used - set(CALL_KINDS)) or 'none'}",
+)
+
+# -- 12. no entry point reaches a model call outside a scope ---------------
+# The property, stated so it can be false: a function is UNMETERED when it can
+# reach `build_chat_model` along some path that passes through no `meter_as`.
+# Opening a scope covers everything below it, which is why `run_turn` clears its
+# routes -- the wrap is one frame under the handler, not in it.
+#
+# Names are resolved bare, ignoring the module. That is deliberate and it is the
+# conservative direction: two same-named functions merge into one node, so a call
+# graph edge may be invented but never lost, and this case can therefore report a
+# false ALARM but not a false all-clear.
+_defs: dict[str, list[tuple[Path, ast.AST]]] = {}
+for _path, _tree in _TREES.items():
+    for _node in ast.walk(_tree):
+        if isinstance(_node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            _defs.setdefault(_node.name, []).append((_path, _node))
+
+
+def _callee_names(node: ast.AST) -> set[str]:
+    out = set()
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Call):
+            fn = sub.func
+            if isinstance(fn, ast.Name):
+                out.add(fn.id)
+            elif isinstance(fn, ast.Attribute):
+                out.add(fn.attr)
+    return out
+
+
+_calls = {name: set().union(*(_callee_names(n) for _, n in ns)) for name, ns in _defs.items()}
+_scoped = {
+    name
+    for name, ns in _defs.items()
+    if any("meter_as" in _callee_names(n) for _, n in ns)
+}
+
+# Fixpoint. `build_chat_model` is the seed because it is the single chokepoint
+# every chat call passes through -- the same property that let one callback meter
+# eight call sites is what makes one seed enough here.
+_unmetered = {n for n in _defs if "build_chat_model" in _calls[n]} - _scoped
+while True:
+    grown = {
+        n
+        for n in _defs
+        if n not in _scoped and (_calls[n] & _unmetered)
+    } | _unmetered
+    if grown == _unmetered:
+        break
+    _unmetered = grown
+
+_ROUTE_DECORATORS = {"get", "post", "put", "patch", "delete"}
+
+
+def _is_entry(node: ast.AST) -> bool:
+    """A place a unit of work BEGINS: an HTTP handler or a background job."""
+    if node.name.endswith("_job"):
+        return True
+    for dec in getattr(node, "decorator_list", []):
+        fn = dec.func if isinstance(dec, ast.Call) else dec
+        if isinstance(fn, ast.Attribute) and fn.attr in _ROUTE_DECORATORS:
+            return True
+    return False
+
+
+_leaks = sorted(
+    f"{_rel(p)}:{n.lineno} {n.name}()"
+    for name, ns in _defs.items()
+    for p, n in ns
+    if _is_entry(n) and name in _unmetered
+)
+
+check(
+    "12. no entry point reaches build_chat_model outside a meter_as scope (R4)",
+    not _leaks,
+    f"unmetered: {_leaks}" if _leaks else f"{len(_scoped)} scoped functions cover the graph",
+)
+
+# ---------------------------------------------------------------------------
 # --live -- the other half, and the ONLY half that can fail for the real reason.
 #
 # Everything above builds synthetic LLMResults, so it asserts what the meter does

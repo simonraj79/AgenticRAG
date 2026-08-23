@@ -263,3 +263,95 @@ Straight from the audit, so the deleted work does not return.
   is nothing to look up. They render as *not measured*.
 - **Nothing model-decided**, so no [loop.md](../loop.md) session. An "AI summary of the
   admin dashboard" is T1 in advance — a tool nobody calls.
+
+---
+
+## 8. As built — where the plan was wrong
+
+Written after verification, per [build.md](../build.md) §9. Two entries, and the second is
+the one that generalises.
+
+### 8.1 The audit was wrong about embedding cost, and said so in time
+
+Recorded in [00-AUDIT.md](00-AUDIT.md) §3.5 and already visible in §4 above as the reason
+feature 05 exists. The audit concluded embedding spend would have to be **estimated** from a
+published rate. Measured, OpenRouter reports it exactly as it reports chat cost
+(`usage.cost = 1.4e-06`, `provider = "Google AI Studio"`) and the `openai` SDK preserves it.
+The cause of the mistake is the durable part: **the absence of a CALLBACK was mistaken for
+the absence of a SEAM.** LangChain has no `on_llm_end` for embeddings, so there was nothing
+to hook — but `self.client` sits one layer below the method and takes a wrapper.
+
+A plan that was right about the shape of a gap and wrong about its cause is the plan working.
+Cost of the error: one extra feature file, no rework.
+
+### 8.2 R4's mitigation was planned and never built — and the risk it named had already fired
+
+The register says:
+
+> **R4** · Rows written with `user_id = NULL` because context was not set · **the tell:**
+> spend that belongs to nobody · **mitigation:** `metering_check.py` case: every call site in
+> the eight is covered by a `meter_as`
+
+**That case was not written.** It was found missing by hand after the change set was
+committed and pushed, by asking why `"goldenset"` appeared in `CALL_KINDS` and in no
+`meter_as` call anywhere. `app/api/eval.py::_suggest_job` — the golden-set drafter's
+BackgroundTask — reached `build_chat_model` with both ids in scope as parameters and opened
+no scope at all.
+
+**Three things about it are worth more than the fix.**
+
+**The tell in the register was wrong, and wrong in the direction that hides the bug.** R4
+predicts `user_id = NULL` — a row you can find by querying for it. What actually happens is
+that `emit_record` returns `False` when no collection is active, so the record was **logged
+and never written to `api_usage` at all**. That is R5's tell, not R4's: not spend belonging
+to nobody, but *no row*, summing to `0.0`, reading as a quiet week. The two risks were
+written as separate lines and are the same line for an unwrapped call site — and the fix
+needs **both** context managers, `collect_usage()` as well as `meter_as()`, which is the half
+a reader of R4 alone would omit.
+
+**The ten cases that existed could not have caught it.** Every one of them opens its own
+`meter_as` and then asserts attribution survived. So the harness only ever tested call sites
+it wrote *itself*, never the one the application forgot. Stated generally, and this is the
+entry that belongs in [CLAUDE.md](../../CLAUDE.md):
+
+> **A harness cannot prove instrumentation is COMPLETE, only that the instrumentation it was
+> handed works.** Coverage is a property of the application's call graph, so a case that
+> asserts it has to read the application's source — not a shape the harness invented.
+
+It is the seventh-green-suite failure one storey up. The commit message's own rule was *a
+layer-1 harness cannot prove a query RUNS, only that it was WRITTEN*; this is the sibling —
+it cannot prove a call site was WRAPPED, only that wrapping works.
+
+**Fixed harness-first**, per [build.md](../build.md) §5, and the cases were watched failing
+before a line of `app/` changed:
+
+| Case | Asserts | Red before the fix |
+|---|---|---|
+| `11a` | every kind in `CALL_KINDS` is set by some call site | `declared but never set: ['goldenset']` |
+| `11b` | no call site sets a kind `CALL_KINDS` does not declare | (green — the reverse direction, free) |
+| `12` | no entry point reaches `build_chat_model` outside a `meter_as` | `unmetered: ['api/eval.py:949 _suggest_job()']` |
+
+`unknown` is exempt from 11a **and the exemption is the contract**: it is the default for a
+call made outside any scope, so a call site passing it explicitly would be asserting it does
+not know who it is working for. It must stay unreachable.
+
+Case 12 resolves callee names **bare, ignoring the module**, so two same-named functions
+merge into one graph node. That can invent an edge and never lose one — it can therefore
+report a false ALARM but not a false all-clear, which is the correct direction to be wrong in
+for a safety property, and the comment in the harness says so.
+
+### 8.3 Verification, as run
+
+Migration `f6b28d4c1a73` applied before the merge (`alembic current` → `f6b28d4c1a73 (head)`),
+per [build.md](../build.md) §8. `pywin32==312; sys_platform == "win32"` intact.
+
+| Harness | Assertions |
+|---|---|
+| `metering_check.py` | **28** offline (was 25 — cases 11a/11b/12 are new) + 7 `--live` |
+| `admin_check.py` | 18 offline + 19 `--live` |
+| `llm_check.py` | 32, including case 31's byte-identical request body |
+| `refusal_check.py` | 38 |
+| `ledger_check.py` | 10 |
+
+Case 12 reports **8 scoped functions cover the graph**, up from 7. The eighth is the one this
+section is about.

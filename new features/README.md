@@ -151,4 +151,12 @@ shim keys on `dev|<email>` precisely so it cannot collide with a real Google `su
 makes "grant admin to this email" ambiguous, and granting by `sub` would make the console
 reachable only by a human at a consent screen. And the **seventh** green-suite failure:
 `admin_check.py` passed every case while a route returned 500 on every request, because a
-layer-1 harness cannot prove a query *runs*, only that it was *written*
+layer-1 harness cannot prove a query *runs*, only that it was *written*. An **eighth** landed
+after that sentence was written and is the one that changes practice: `metering_check.py`'s
+ten cases were green while the golden-set drafter's spend was logged and never recorded,
+because every case opened its *own* scope and then asserted attribution survived — so the
+harness only ever tested call sites it wrote itself. **A harness cannot prove instrumentation
+is COMPLETE, only that the instrumentation it was handed works**, and `--live` does not fix it:
+a live case exercises what it invokes, and this was a call site nobody invoked. The answer is a
+case that reads the application's own source — case 12 walks the call graph with `ast` and
+fails on any entry point reaching `build_chat_model` outside a `meter_as`

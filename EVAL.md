@@ -30,7 +30,8 @@ summarise                          ──►  eval_runs.summary, weakest metric 
 
 An eval answer is a real turn, so it is traceable in the same Trace view as a human's.
 Each question costs one `conversations` row (archived), one `queries` row, its
-`query_chunks`, its `trace_events`, and one `eval_results` row.
+`query_chunks`, its `trace_events`, one `eval_results` row — and, since 2026-08-20, a
+handful of `api_usage` rows recording what it actually cost (§9.1).
 
 **Refusal questions are asked but not scored** — see §6.
 
@@ -527,6 +528,42 @@ ceiling, but a rate-limited call retried with backoff inside the budget dies rep
 `timed out after 180s` — the same string a hang produces, and the two need opposite fixes
 (wait vs. raise the ceiling). Widen that error before trusting either.
 
+### 9.1 What a run costs, and how to read it wrong
+
+Since 2026-08-20 every model call is metered — one `api_usage` row per **call**, carrying the
+cost OpenRouter reported for it. Nothing here is computed from a price table, and nothing
+should be: two identical requests have measured a 3.5x cost spread because they landed on
+different endpoints.
+
+**An eval run does not appear as one line item, and the obvious query undercounts it.**
+
+| `call_kind` | What it is | Carries a `query_id`? |
+|---|---|---|
+| `judge` | Ragas — the four metrics | **No.** Judged calls belong to no turn |
+| `goldenset` | The drafter, when you press **Suggest** | **No** |
+| `generation` | The ten real turns the run drives through `run_turn` | Yes |
+| `embedding`, `rerank` | Retrieval inside those turns | Yes |
+
+So `/api/admin/spend?group_by=call_kind` filtered to `judge` is the **judging** cost, not the
+run's. The run's true cost is that plus the ten turns it drove — and those are recorded as
+ordinary `generation` rows, indistinguishable from a human's questions except by timestamp.
+There is no join that expresses "this run's spend" (PRD open item 48).
+
+**Two things are missing from any dollar total, and both are silent.** Reranking is priced
+only if you opt in (`COHERE_SEARCH_UNIT_USD`, default off) because Cohere reports **units**
+and not cost — so three rerank calls per turn contribute measured units and zero dollars. And
+every query recorded before 2026-08-20 is **unbackfillable**: the OpenRouter generation id was
+never stored, so those rows are *not measured* rather than zero. Read a lifetime total as a
+**lower bound**. The console prints `n/m measured` beside every aggregate for this reason —
+the same discipline §8 applies to `scored_count`.
+
+**Golden-set drafting was invisible until it was fixed, which is the warning worth keeping.**
+The drafter reached the model through a background task that opened no metering scope, so its
+spend was written to a log and never to `api_usage` — not mis-attributed, *absent*. A sum over
+zero rows is `0.0`, and `0.0` reads as a quiet week rather than as a broken meter. If a spend
+figure looks implausibly low, check whether the call site is metered before concluding the
+model got cheaper.
+
 ---
 
 ## 10. Run history
@@ -551,6 +588,13 @@ Same agent (`Kestrel Feynman`), same corpus, same ten questions throughout.
 | context precision / recall | 1.000 / 1.000 | 1.000 / 1.000 | 1.000 / 1.000 |
 | `refusal_pass` | 0 / 2 | 0 / 2 | **1 / 2** |
 | Cost | — | — | **$0.056** |
+
+**Run 3's `$0.056` is not a metered figure and must not be trended against one.** All three
+runs predate 2026-08-20, so no `api_usage` row exists for any of them; that number came from
+token counts and a rate, which is precisely the arithmetic §9.1 says to stop doing. The first
+run recorded after that date is the first whose cost is *reported* rather than computed — and
+it will also be the first that includes the ten driven turns, so expect it to read **higher**
+than these without anything having got more expensive.
 
 Run 1's 7 errors were `strictness=3` (`Multiple candidates is not enabled for this model`);
 run 2's 2 were faithfulness timeouts at 165–196 s per call.

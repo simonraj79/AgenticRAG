@@ -83,6 +83,8 @@ from app.db.models import Query as QueryRow
 from app.db.session import SessionLocal
 from app.eval.jobs import run_eval_job
 from app.eval.metrics_guide import RunSummary
+from app.metering import store as metering_store
+from app.metering.context import collect_usage, meter_as
 
 log = logging.getLogger("uvicorn.error")
 
@@ -959,112 +961,142 @@ async def _suggest_job(
     returned to nobody -- the response went out seconds ago -- so at best it lands
     in a log and at worst the task machinery swallows it.
     """
-    # Imported here rather than at module scope. `app/eval/generate.py` pulls in
-    # LangChain and the Gemini client, and `app/eval/__init__.py` is deliberately
-    # empty of imports for the same reason: nothing that merely wants a response
-    # shape out of this module should pay for the model stack.
-    from app.eval.generate import (
-        EmptyCorpusError,
-        GoldenSetSuggestionError,
-        suggest_golden_questions,
-    )
+    # ------------------------------------------------------------------
+    # METERED, and it is the only background job that was not.
+    #
+    # `collect_usage` is half the fix and the half that is easy to omit:
+    # `emit_record` returns False when no collection is active, so without it
+    # the drafter's spend was LOGGED and never written to `api_usage` -- absent
+    # from the console rather than merely unattributed. `"goldenset"` sat in
+    # CALL_KINDS with nothing setting it for exactly as long.
+    #
+    # `inherit=False` for the same reason `app/eval/jobs.py` gives: a
+    # BackgroundTask may run inside a request's context, and this spend belongs
+    # to the drafting run, not to whatever turn happened to be in flight.
+    # ------------------------------------------------------------------
+    with collect_usage() as usage_records, meter_as(
+        user_id=user_id, agent_id=agent_id, call_kind="goldenset", inherit=False
+    ):
+        # Imported here rather than at module scope. `app/eval/generate.py` pulls in
+        # LangChain and the Gemini client, and `app/eval/__init__.py` is deliberately
+        # empty of imports for the same reason: nothing that merely wants a response
+        # shape out of this module should pay for the model stack.
+        from app.eval.generate import (
+            EmptyCorpusError,
+            GoldenSetSuggestionError,
+            suggest_golden_questions,
+        )
 
-    try:
-        async with SessionLocal() as db:
-            agent = await db.get(Agent, agent_id)
-            if agent is None:
-                # Deleted between the response and this task starting.
-                log.warning("Suggest job: agent %s no longer exists", agent_id)
-                return
+        try:
+            async with SessionLocal() as db:
+                agent = await db.get(Agent, agent_id)
+                if agent is None:
+                    # Deleted between the response and this task starting.
+                    log.warning("Suggest job: agent %s no longer exists", agent_id)
+                    return
 
-            try:
-                drafted = await suggest_golden_questions(
-                    db, agent, count=count, refusal_count=refusal_count
+                try:
+                    drafted = await suggest_golden_questions(
+                        db, agent, count=count, refusal_count=refusal_count
+                    )
+                except (EmptyCorpusError, GoldenSetSuggestionError) as exc:
+                    # THE EXISTING SET IS STILL INTACT, because nothing has been
+                    # retired yet -- see the ordering below. A failed suggestion
+                    # leaves the user exactly where they were.
+                    log.warning("Suggest job for agent %s failed: %s", agent_id, exc)
+                    _audit(
+                        db,
+                        user_id,
+                        "golden_questions.suggest_failed",
+                        "agent",
+                        agent_id,
+                        error=str(exc),
+                    )
+                    await db.commit()
+                    return
+
+                # --------------------------------------------------------------
+                # THE SWAP HAPPENS AFTER GENERATION SUCCEEDED, NEVER BEFORE.
+                # Clearing first and drafting second would leave a user with an
+                # empty golden set every time the model was rate limited.
+                #
+                # The predicate is POSITIVE -- `source == "ai_suggested"` -- and not
+                # the negative `source NOT IN ("edited", "manual")` it could have
+                # been. They are the same set today and they diverge the moment a
+                # provenance is added: a negative predicate would silently start
+                # deleting the new kind, and an imported, hand-written golden
+                # question destroyed by pressing Suggest is not a mistake anybody
+                # would forgive. Only rows this feature itself created are
+                # replaceable.
+                # --------------------------------------------------------------
+                superseded = list(
+                    await db.scalars(
+                        select(GoldenQuestion).where(
+                            GoldenQuestion.agent_id == agent_id,
+                            GoldenQuestion.source == "ai_suggested",
+                        )
+                    )
                 )
-            except (EmptyCorpusError, GoldenSetSuggestionError) as exc:
-                # THE EXISTING SET IS STILL INTACT, because nothing has been
-                # retired yet -- see the ordering below. A failed suggestion
-                # leaves the user exactly where they were.
-                log.warning("Suggest job for agent %s failed: %s", agent_id, exc)
+                deleted, deactivated = await _retire_questions(db, superseded)
+
+                base = await _next_order_index(db, agent_id)
+                for row in drafted:
+                    db.add(
+                        GoldenQuestion(
+                            id=uuid.uuid4(),
+                            agent_id=agent_id,
+                            question=row["question"],
+                            reference_answer=row["reference_answer"],
+                            expected_behaviour=row["expected_behaviour"],
+                            is_active=True,
+                            source=row["source"],
+                            # `suggest_golden_questions` numbers its output from 0
+                            # and says so; a caller appending to an existing set has
+                            # to offset it or the new rows interleave with whatever
+                            # survived the retirement.
+                            order_index=base + int(row["order_index"]),
+                        )
+                    )
+
                 _audit(
                     db,
                     user_id,
-                    "golden_questions.suggest_failed",
+                    "golden_questions.suggest",
                     "agent",
                     agent_id,
-                    error=str(exc),
+                    suggested=len(drafted),
+                    requested=count,
+                    refusal_count=refusal_count,
+                    replaced_deleted=deleted,
+                    replaced_deactivated=deactivated,
                 )
                 await db.commit()
-                return
 
-            # --------------------------------------------------------------
-            # THE SWAP HAPPENS AFTER GENERATION SUCCEEDED, NEVER BEFORE.
-            # Clearing first and drafting second would leave a user with an
-            # empty golden set every time the model was rate limited.
-            #
-            # The predicate is POSITIVE -- `source == "ai_suggested"` -- and not
-            # the negative `source NOT IN ("edited", "manual")` it could have
-            # been. They are the same set today and they diverge the moment a
-            # provenance is added: a negative predicate would silently start
-            # deleting the new kind, and an imported, hand-written golden
-            # question destroyed by pressing Suggest is not a mistake anybody
-            # would forgive. Only rows this feature itself created are
-            # replaceable.
-            # --------------------------------------------------------------
-            superseded = list(
-                await db.scalars(
-                    select(GoldenQuestion).where(
-                        GoldenQuestion.agent_id == agent_id,
-                        GoldenQuestion.source == "ai_suggested",
-                    )
-                )
-            )
-            deleted, deactivated = await _retire_questions(db, superseded)
-
-            base = await _next_order_index(db, agent_id)
-            for row in drafted:
-                db.add(
-                    GoldenQuestion(
-                        id=uuid.uuid4(),
-                        agent_id=agent_id,
-                        question=row["question"],
-                        reference_answer=row["reference_answer"],
-                        expected_behaviour=row["expected_behaviour"],
-                        is_active=True,
-                        source=row["source"],
-                        # `suggest_golden_questions` numbers its output from 0
-                        # and says so; a caller appending to an existing set has
-                        # to offset it or the new rows interleave with whatever
-                        # survived the retirement.
-                        order_index=base + int(row["order_index"]),
-                    )
+                log.info(
+                    "Suggest job for agent %s wrote %s questions (replaced %s, "
+                    "kept %s already scored)",
+                    agent_id,
+                    len(drafted),
+                    deleted,
+                    deactivated,
                 )
 
-            _audit(
-                db,
-                user_id,
-                "golden_questions.suggest",
-                "agent",
-                agent_id,
-                suggested=len(drafted),
-                requested=count,
-                refusal_count=refusal_count,
-                replaced_deleted=deleted,
-                replaced_deactivated=deactivated,
-            )
-            await db.commit()
-
-            log.info(
-                "Suggest job for agent %s wrote %s questions (replaced %s, "
-                "kept %s already scored)",
-                agent_id,
-                len(drafted),
-                deleted,
-                deactivated,
-            )
-
-    except Exception:  # noqa: BLE001 - nothing escapes a background task
-        log.exception("Suggest job for agent %s failed", agent_id)
+        except Exception:  # noqa: BLE001 - nothing escapes a background task
+            log.exception("Suggest job for agent %s failed", agent_id)
+        finally:
+            # Written whether the draft landed or failed. A run that called the
+            # model and then hit `EmptyCorpusError` still spent the money, and
+            # the swap-after-success ordering above means a FAILED suggestion is
+            # exactly the case where no other row records that anything ran.
+            if usage_records:
+                try:
+                    async with SessionLocal() as meter_db:
+                        metering_store.persist(meter_db, usage_records)
+                        await meter_db.commit()
+                except Exception:  # noqa: BLE001 -- accounting never breaks a job
+                    log.warning(
+                        "could not persist golden-set usage", exc_info=True
+                    )
 
 
 # --------------------------------------------------------------------------
