@@ -962,7 +962,11 @@ async def run_agent_loop(
             gap = detect_gap(_message_text(ai))
             if gap and not gap_search_used and not corpus_searched and step < max_steps:
                 gap_search_used = True
-                steps = step
+                # `steps` is NOT set here. It is set below, and only if the
+                # forced call actually produced a tool call -- see the comment
+                # on the `if forced_calls:` block. The field is documented as
+                # "steps in which at least one tool actually ran", and forcing a
+                # search is not the same as one having run.
                 ctx.step = step
                 messages.append(
                     HumanMessage(content=GAP_NUDGE.format(marker=gap))
@@ -1047,6 +1051,16 @@ async def run_agent_loop(
                     invocations.append(invocation)
                     messages.append(message)
                 if forced_calls:
+                    # Counted HERE, not when the trigger fired. A forced call
+                    # the model declines is a real state on this route --
+                    # CLAUDE.md records `tool_choice="any"` being silently
+                    # ignored and only a NAMED tool forcing a call -- and
+                    # crediting a step to it made a turn that searched nothing
+                    # indistinguishable from one that searched once, in the one
+                    # field that exists to tell those apart (`LoopResult.steps`,
+                    # and `tools_enabled` is the question it answers).
+                    # `scripts/agent_loop_check.py` cases 1 and 2 are the pair.
+                    steps = step
                     messages[1] = _human_turn(ledger, question)
                     continue
                 # The forced call produced nothing to execute. Fall through and

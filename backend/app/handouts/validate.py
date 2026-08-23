@@ -278,6 +278,10 @@ def _check_deck(data: bytes, name: str) -> str | None:
     untitled: list[int] = []
     placeholder: list[int] = []
     overlong: list[tuple[int, int]] = []
+    # Slides carrying a title and NOTHING else. Collected per slide, judged per
+    # DECK below -- one of these is a section divider, most of them is an empty
+    # deck, and only the deck-level count can tell those apart.
+    bodyless: list[int] = []
 
     for number, slide in enumerate(slides, start=1):
         title = _slide_title(slide)
@@ -291,6 +295,9 @@ def _check_deck(data: bytes, name: str) -> str | None:
         # body text at all and must not fire -- see the permissive rule above.
         if body and all(line.lower() in PLACEHOLDER_PROMPTS for line in body):
             placeholder.append(number)
+
+        if not body:
+            bodyless.append(number)
 
         longest = max((len(line) for line in _slide_paragraphs(slide)), default=0)
         if longest > limit:
@@ -320,6 +327,33 @@ def _check_deck(data: bytes, name: str) -> str | None:
         fixes.append(
             "Replace the placeholder text with real content from the MATERIAL."
         )
+    # **A deck can be a structurally perfect .pptx and say nothing.** Measured
+    # 2026-08-23 on python-pptx 1.0.2: six slides on `slide_layouts[1]` with
+    # `shapes.title.text` set and `placeholders[1]` never touched produced 32,425
+    # bytes starting `PK`, `check()` returned None, and `outline()` rendered a
+    # confident six-heading preview. None of the three findings above can see it
+    # -- `untitled` needs a missing title, `overlong` needs text to be long, and
+    # `placeholder` is guarded `if body`, so it is skipped exactly when the body
+    # is empty. This module exists because a ZERO-SLIDE deck once passed a
+    # `PK` + byte-count check; this is the same lesson one level in.
+    #
+    # **The test is per DECK, not per slide, and that is the whole design.** A
+    # title-only SECTION DIVIDER is legitimate and the comment above says so, so
+    # rejecting every body-less slide would destroy the thing it is supposed to
+    # protect -- `refusal_pass = 0/2`, where the measurement punished the
+    # behaviour the persona existed to produce. A majority is the line: one
+    # divider among five content slides is a deck, five dividers among six is
+    # not. `deck_check.py` cases 65 and 66 are that pair.
+    if bodyless and len(bodyless) * 2 > len(slides):
+        findings.append(
+            f"{_slide_list(bodyless)} {_verb(bodyless)} a title and no body text, "
+            f"which is {len(bodyless)} of {len(slides)} slides"
+        )
+        fixes.append(
+            "Give every content slide bullets drawn from the MATERIAL, using "
+            "`slide.placeholders[1].text_frame`."
+        )
+
     if overlong:
         worst = max(overlong, key=lambda item: item[1])
         findings.append(
@@ -717,13 +751,34 @@ def _slide_title(slide) -> str:
 
 
 def _slide_paragraphs(slide, *, include_title: bool = True) -> list[str]:
-    """Every non-empty paragraph of text on the slide."""
+    """Every non-empty paragraph of text on the slide.
+
+    **`include_title=False` is matched on `shape_id`, never on object identity,
+    and that is not a style preference -- `is` DOES NOT WORK HERE.** python-pptx
+    builds a fresh proxy object on every access, so `slide.shapes.title is
+    slide.shapes.title` is already False, and the shape yielded by iterating
+    `slide.shapes` is never the same object as `slide.shapes.title` even when
+    both wrap the identical `<p:sp>` element. Measured 2026-08-23 on python-pptx
+    1.0.2: `is` False, `_element is _element` True, `shape_id ==` True.
+
+    So the original `shape is title_shape` skipped nothing and
+    `include_title=False` silently returned the title along with the body. Two
+    things were wrong because of it and neither raised: a slide with a real title
+    and an empty body reported `body == [title]`, which is truthy, so nothing
+    could detect a content-free slide; and the `placeholder` finding, guarded
+    `if body and all(...)`, additionally required the TITLE to read as template
+    boilerplate, which no real deck does -- so it fired far less often than its
+    own comment claims. `deck_check.py` case 68 pins the identity trap directly,
+    because a future refactor writing `is` back would be invisible everywhere
+    else.
+    """
     title_shape = getattr(slide.shapes, "title", None)
+    title_id = getattr(title_shape, "shape_id", None)
     out: list[str] = []
     for shape in slide.shapes:
         if not getattr(shape, "has_text_frame", False):
             continue
-        if not include_title and title_shape is not None and shape is title_shape:
+        if not include_title and title_id is not None and shape.shape_id == title_id:
             continue
         for paragraph in shape.text_frame.paragraphs:
             line = paragraph.text.strip()

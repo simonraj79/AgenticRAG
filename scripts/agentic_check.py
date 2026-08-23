@@ -1708,6 +1708,23 @@ async def s26_critic_exempts_pedagogy(db, agent, user) -> Outcome:
     checks = payloads_of(events, "SELF_CHECK")
     acted = [c for c in checks if c.get("acted")]
     ungrounded = [c for c in checks if c.get("verdict") == VERDICT_UNGROUNDED]
+
+    # NOT MEASURED, not passing, when the critic never ran. The assertion below
+    # is `not resets and not acted and not ungrounded` -- three negatives, every
+    # one of them trivially true over an EMPTY list. And empty is the expected
+    # shape here: the pre-check returns None for any draft carrying a citation
+    # (`selfcheck.py:124-125`, `if used: return None`), and a cited answer is
+    # exactly what an @feynman turn produces. So the green this printed was the
+    # green of a check that could not fail -- `Outcome.unmeasured`'s own comment,
+    # ten lines up from its definition, is about this.
+    if not checks:
+        return unmeasured(
+            "S26 the critic exempts pedagogy",
+            "the pre-check never fired (the draft carried a citation), so the "
+            "carve-out was not exercised -- see route_specialist_check case 41, "
+            "which calls the critic directly",
+        )
+
     ok = bool(out.answer) and not resets and not acted and not ungrounded
     return Outcome(
         "S26 the critic exempts pedagogy", ok,

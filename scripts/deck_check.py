@@ -2176,6 +2176,96 @@ check(
     f"differs_on={sum(a != b for a, b in zip(off_rows, real_rows))}",
 )
 
+
+# ---------------------------------------------------------------------------
+print("\n-- the deck that is all headings and no content --")
+# ---------------------------------------------------------------------------
+# `validate.py` exists because a ZERO-SLIDE deck and 28 bytes of junk both cleared
+# a `PK` + `>= 10_000 bytes` check -- CLAUDE.md's rule is **assert the artefact,
+# never the byte count**. These three cases are that rule one level deeper: a deck
+# can be a structurally perfect .pptx, open cleanly, report six slides, render a
+# confident six-heading preview, and carry NOT ONE WORD of content.
+#
+# Measured before the fix (python-pptx 1.0.2, six slides on `slide_layouts[1]`
+# with `shapes.title.text` set and `placeholders[1]` never touched): 32,425 bytes,
+# `validate.check(...)` -> None, `validate.outline(...)` -> "6 slides / 1. Section
+# 1 / ...". The three findings `_check_deck` produces are `untitled`, `placeholder`
+# and `overlong`, and NONE of them requires a slide to say anything -- the one
+# branch that could is guarded `if body and ...`, so it is skipped exactly when
+# the body is empty.
+#
+# Case 66 is the pair and is not optional. A deliberate title-only SECTION
+# DIVIDER is legitimate deck design, and the comment at validate.py:288-290 says
+# so. A fix that rejected every body-less slide would pass 65 and destroy 66 --
+# the same shape as `refusal_pass = 0/2`, where the measurement punished the
+# behaviour the persona existed to produce.
+
+
+def _deck(bodies: list[str | None]) -> SandboxArtifact:
+    """One slide per entry. None means a title with no body at all."""
+    prs = Presentation()
+    for i, body in enumerate(bodies, start=1):
+        slide = prs.slides.add_slide(prs.slide_layouts[1])
+        slide.shapes.title.text = f"Section {i}"
+        if body is not None:
+            slide.placeholders[1].text_frame.text = body
+    buf = io.BytesIO()
+    prs.save(buf)
+    return SandboxArtifact(
+        filename="deck.pptx",
+        mime_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        content=buf.getvalue(),
+    )
+
+
+_empty_deck = _deck([None] * 6)
+_finding_65 = validate.check(RECIPES["deck"], _empty_deck)
+check(
+    "65. a deck whose slides carry NO body text is rejected, and the finding names them",
+    _finding_65 is not None and "2" in (_finding_65 or ""),
+    f"bytes={len(_empty_deck.content)} finding={(_finding_65 or 'None')[:110]!r}",
+)
+
+# The pair. Slide 3 is a title-only divider; every other slide has real bullets.
+_mixed = _deck([
+    "Kestrel orbits at 812 km, one revolution every 101 minutes",
+    "Permanent crew of eleven, nineteen during handover",
+    None,
+    "Four solar arrays, 214 kW at beginning of life",
+    "Nominal draw is 137 kW, leaving margin",
+])
+check(
+    "66. THE PAIR: one deliberate title-only section divider does NOT fire",
+    validate.check(RECIPES["deck"], _mixed) is None,
+    f"finding={(validate.check(RECIPES['deck'], _mixed) or 'None')[:110]!r}",
+)
+
+# The retry has to be able to act on it, or the finding is a message nobody reads.
+check(
+    "67. the empty deck reaches the retry path -- jobs._problem returns non-None",
+    handout_jobs._problem(RECIPES["deck"], ok_result(_empty_deck), _empty_deck) is not None,
+    f"problem={str(handout_jobs._problem(RECIPES['deck'], ok_result(_empty_deck), _empty_deck))[:100]!r}",
+)
+
+
+
+# The identity trap itself, pinned directly. Everything above would still pass if
+# a refactor wrote `shape is title_shape` back into `_slide_paragraphs` AND some
+# future python-pptx started returning cached proxies -- this asserts the
+# property the code actually depends on, which is that `shape_id` identifies a
+# shape and object identity does not.
+_id_deck = _deck([None])
+_id_slide = Presentation(io.BytesIO(_id_deck.content)).slides[0]
+check(
+    "68. python-pptx builds a NEW proxy per access, so title-skipping must match on shape_id",
+    _id_slide.shapes.title is not _id_slide.shapes.title
+    and validate._slide_paragraphs(_id_slide, include_title=False) == []
+    and validate._slide_paragraphs(_id_slide, include_title=True) != [],
+    f"identity_stable={_id_slide.shapes.title is _id_slide.shapes.title} "
+    f"body_without_title={validate._slide_paragraphs(_id_slide, include_title=False)} "
+    f"with_title={validate._slide_paragraphs(_id_slide, include_title=True)}",
+)
+
 # ---------------------------------------------------------------------------
 
 print()
