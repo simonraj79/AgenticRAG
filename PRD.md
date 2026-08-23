@@ -1513,6 +1513,30 @@ that is not Groundwork — measured 2026-08-20 at `total_usage: 66.61` account-w
 actually establishes is that **ours is not zero while theirs moves**, which is R5's tell, not
 an audit.
 
+**50. Nothing prevents the database from being AHEAD of the deployed code, and a health check
+cannot see it.** Surfaced 2026-08-23 by this change set's own merge. `f6b28d4c1a73` was applied
+to production during the build, per [build.md](new%20features/build.md) §8's
+migration-before-merge rule; for the three days until the merge, the deployed code did not
+contain that revision file, so the start command
+
+```
+alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port $PORT
+```
+
+exited non-zero with `Can't locate revision identified by 'f6b28d4c1a73'`. The backend failed
+**three consecutive deploys** — one Render initiated itself (`trigger: deployed_by_render`),
+two manual retries — and had last deployed successfully on 2026-08-17. Merging the branch fixed
+it on the first attempt, because the merge shipped the file.
+
+Two properties make this worth a numbered item rather than a note. **`/api/health` returned 200
+throughout**, because the old instance keeps serving while the new one crash-loops — so
+uptime monitoring, the frontend and every external signal read healthy while the service was
+undeployable. And **the failure is invisible until something restarts**, which is a schedule
+Render owns, not us. The rule that would prevent it (keep the window short) is discipline, not
+a guard; a real guard would be a start command that distinguishes "the DB is ahead" from "the
+DB is behind" and refuses only the second, or a pre-deploy check comparing
+`alembic heads` against `alembic current`. Neither exists.
+
 ---
 
 ## 11. Out of scope

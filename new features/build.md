@@ -291,9 +291,36 @@ rows as **unmeasured**, never as passing.
 
 **A push to `main` is the deploy.** Both Render services build from it.
 
-- **Apply the migration before the merge.** Then the start command's `alembic upgrade head`
-  is a no-op rather than a first run against production traffic. That is how
-  `bc307f5fc31f → d4e91c2a7b58` went out.
+- **Apply the migration before the merge — and then MERGE PROMPTLY, because applying it opens
+  a window in which the deployed service cannot start.** The no-op at start-up is the goal and
+  it is still right: that is how `bc307f5fc31f → d4e91c2a7b58` went out. The cost, unrecorded
+  until 2026-08-23, is that between the `alembic upgrade` and the merge the database claims a
+  revision the deployed code does not contain, so `alembic upgrade head` exits non-zero and the
+  start command dies:
+
+  ```
+  ==> Running 'alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port $PORT'
+  FAILED: Can't locate revision identified by 'f6b28d4c1a73'
+  ```
+
+  Nobody notices while the running instance is left alone. **Any restart inside that window
+  crash-loops the service** — and Render restarts on its own schedule, which is what happened:
+  `trigger: deployed_by_render` on 2026-08-22, then two manual retries that failed identically,
+  against a change set whose migration had been applied three days earlier.
+
+  **The tell is that there is no tell: `/api/health` returned 200 the entire time.** The old
+  instance keeps serving while the new one dies, so every external signal reads healthy while
+  the service is undeployable. That is §7's rule arriving in the deploy pipeline rather than in
+  a harness — an error-shaped check passing while the thing you wanted silently did not happen,
+  and a green health check is the most error-shaped check there is. **A deploy's status is the
+  only thing that reports it**, so read it rather than the health endpoint:
+
+  ```bash
+  curl -s -H "Authorization: Bearer $RENDER_API_KEY"     "https://api.render.com/v1/services/srv-d9vtuhpt0dsc738dmgsg/deploys?limit=5"
+  ```
+
+  Keep the window short, or hold the migration until the merge and accept one real run against
+  traffic. Do not leave it open across days.
 - **Re-check `pywin32` after any `pip freeze`.** The marker
   `pywin32==312; sys_platform == "win32"` has been flattened and restored **three times**,
   by three unrelated dependency additions. It is a property of `pip freeze`, not something to
