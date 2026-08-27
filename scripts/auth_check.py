@@ -347,6 +347,43 @@ check(
 check("31. better-auth is a dependency", '"better-auth"' in pkg)
 
 
+# ---------------------------------------------------------------------------
+# 32-33. The write that has to survive the request.
+#
+# `get_db` yields a session inside `async with` and never commits, so a route
+# that does not commit discards its writes. `user_from_claims` is reached from a
+# DEPENDENCY, and the route it serves (`GET /api/auth/me`) is read-only -- so a
+# flush without a commit means `better_auth_id` is written and rolled back on
+# every request, forever, while the user signs in perfectly and the page renders.
+#
+# Behaviour cannot be asserted here without a database, so this asserts the
+# SOURCE, the same way case 24 asserts an ordering it cannot execute.
+# ---------------------------------------------------------------------------
+print("")
+print("-- the identity link must persist --")
+
+identity = read("backend/app/auth/identity.py")
+check(
+    "32. user_from_claims commits, not merely flushes",
+    "await db.commit()" in identity,
+    "a flush alone is rolled back when the session closes",
+)
+check(
+    "33. the commit is guarded, so a read-only request stays a read",
+    ("db.new or db.dirty" in identity) or ("db.dirty or db.new" in identity),
+    "an unguarded commit writes on every authenticated request",
+)
+session_src = read("backend/app/db/session.py")
+check(
+    "34. get_db still does NOT commit (the premise of 32)",
+    ".commit()" not in session_src,
+    # NOT the bare substring "commit" -- `expire_on_commit=False` contains
+    # it, so matching that failed on a file with no commit in it at all.
+    # A marker carries the shape and nothing else.
+    "if this ever changes, 32 is redundant rather than wrong -- re-read both",
+)
+
+
 print("\n" + "=" * 74)
 if failures:
     print(f"{len(failures)} FAILED:")

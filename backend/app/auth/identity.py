@@ -47,7 +47,7 @@ read-only, and it happens once per user for the lifetime of the account.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import select, text
@@ -62,6 +62,13 @@ log = logging.getLogger("uvicorn.error")
 # service's config, so it is a literal here; there is no shared constant to
 # import across a language boundary.
 GOOGLE_PROVIDER_ID = "google"
+
+# `last_login_at` is refreshed at most this often. This function runs on EVERY
+# authenticated request, not once per login, so writing the timestamp each time
+# would mean an UPDATE per request -- and would quietly redefine the column as
+# "last request at". An hour keeps it meaningful and keeps the steady state a
+# pure read.
+LOGIN_TIMESTAMP_STALE_AFTER = timedelta(hours=1)
 
 # Better Auth's schema is camelCase, which Postgres folds to lowercase unless
 # quoted. Written out once, quoted, rather than assembled -- an unquoted
@@ -163,10 +170,9 @@ async def user_from_claims(
                 "Linked existing user %s to Better Auth identity.", user.email
             )
 
-    # Mutable display data, refreshed from the token on every request it is
-    # present in -- the same rule `_upsert_google_user` follows. Guarded so a
-    # payload that omits a field does not blank a column that currently holds a
-    # good value.
+    # Mutable display data, refreshed from the token -- the same rule
+    # `_upsert_google_user` follows. Guarded so a payload that omits a field does
+    # not blank a column that currently holds a good value.
     if claims.get("email"):
         user.email = claims["email"]
     if claims.get("name"):
@@ -175,6 +181,33 @@ async def user_from_claims(
     if image:
         user.avatar_url = image
 
-    user.last_login_at = datetime.now(timezone.utc)
-    await db.flush()
+    now = datetime.now(timezone.utc)
+    last = user.last_login_at
+    if last is None or (now - last) > LOGIN_TIMESTAMP_STALE_AFTER:
+        user.last_login_at = now
+
+    # THE COMMIT, AND WHY IT HAS TO BE HERE.
+    #
+    # `get_db` never commits -- it yields a session inside `async with`, so every
+    # route owns its own transaction and a route that does not commit discards
+    # its writes on the way out. `GET /api/auth/me` is read-only and commits
+    # nothing, and this function is reached from a DEPENDENCY rather than from a
+    # route body. So without this, `better_auth_id` was written, flushed, and
+    # rolled back on every single request.
+    #
+    # Nothing failed. The user signed in, the page rendered their three agents,
+    # every assertion in `auth_check.py` stayed green -- and the link the whole
+    # module exists to create never persisted, so the `account` lookup above ran
+    # again on the next request, forever. Found by reading the ROW after a
+    # successful login, never by watching the login succeed.
+    #
+    # Committing from a dependency is safe here specifically because it runs
+    # BEFORE the route body: nothing else in the request has written yet, so this
+    # commits the identity upsert and nothing else. It is also correct that a
+    # later failure in the route cannot roll it back -- that someone
+    # authenticated is a fact, not part of the route's work.
+    if db.new or db.dirty:
+        await db.flush()
+        await db.commit()
+
     return user
