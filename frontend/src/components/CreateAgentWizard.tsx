@@ -77,7 +77,7 @@ import {
   BTN_SECONDARY,
   BTN_SM,
   CARD,
-  CARD_INTERACTIVE,
+  CARD_INTERACTIVE_UNFILLED,
   EYEBROW,
   FIELD,
   FIELD_INVALID,
@@ -1035,6 +1035,7 @@ export default function CreateAgentWizard({
                       data-template-slug={template.slug}
                       data-selected={active}
                       // Selection is an accent border and an accent-soft fill --
+                      // and as of this change it actually is both. See below.
                       // the same pair `ROW_ACTIVE` uses for a selected
                       // conversation, so "this one is chosen" looks the same
                       // wherever it is said. No `focus-within:ring`: the real
@@ -1053,8 +1054,18 @@ export default function CreateAgentWizard({
                       // onto the element you can actually see, using the same
                       // token and offset as the global rule so a proxied ring
                       // and a real one are the same object to the eye.
-                      className={`${CARD_INTERACTIVE} ${FOCUS_PROXY} flex cursor-pointer flex-col p-4 ${
-                        active ? "border-accent bg-accent-soft" : ""
+                      // `CARD_INTERACTIVE_UNFILLED`, so this card supplies its
+                      // own background in BOTH states rather than layering one
+                      // over `CARD`'s `bg-surface`. Written the obvious way
+                      // (`${CARD_INTERACTIVE} ... bg-accent-soft`) the two
+                      // background utilities tie on specificity and Tailwind's
+                      // emitted order decides -- `.bg-surface` lands later, so
+                      // the selected fill never rendered, for as long as this
+                      // card has existed, under a comment saying it did.
+                      className={`${CARD_INTERACTIVE_UNFILLED} ${FOCUS_PROXY} flex cursor-pointer flex-col p-4 ${
+                        active
+                          ? "border-accent bg-accent-soft"
+                          : "border-line bg-surface"
                       }`}
                     >
                       {/*

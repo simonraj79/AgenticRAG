@@ -1160,6 +1160,66 @@ def evaluate_displacement(results: "Results", seen) -> None:
     )
 
 
+#: W14. The selected persona LOOKS selected.
+#:
+#: Only a real browser can answer this. jsdom has no stylesheet, so the unit
+#: suite cannot tell `bg-accent-soft` from nothing at all -- and neither can
+#: reading the class list, because the class was present and correct the whole
+#: time it was doing nothing.
+#:
+#: `${CARD} bg-accent-soft` ties on specificity with `CARD`'s own `bg-surface`,
+#: and Tailwind's emitted order decides: measured in `dist`, `.bg-accent-soft`
+#: at byte 18350 against `.bg-surface` at 19770, so the shared one wins. The
+#: selected card had carried that class since it was written, under a comment
+#: describing "an accent border and an accent-soft fill", and the fill had
+#: never rendered once.
+#:
+#: Asserts that the two backgrounds DIFFER, not what either colour is. The
+#: palette is themed and a value assertion would be a second place to keep the
+#: tokens in step; "selected looks different from unselected" is the thing a
+#: user needs and is true in both themes.
+SELECTION_JS = r"""
+() => {
+  const cards = [...document.querySelectorAll('[data-testid="template-card"]')];
+  if (cards.length < 2) return null;
+  const selected = cards.find((c) => c.dataset.selected === 'true');
+  const other = cards.find((c) => c.dataset.selected !== 'true');
+  if (!selected || !other) return null;
+  const bg = (el) => getComputedStyle(el).backgroundColor;
+  const border = (el) => getComputedStyle(el).borderTopColor;
+  return {
+    selectedBg: bg(selected),
+    otherBg: bg(other),
+    selectedBorder: border(selected),
+    otherBorder: border(other),
+  };
+}
+"""
+
+
+def evaluate_selection(results: "Results", seen) -> None:
+    """W14, whether choosing a persona is visible."""
+    print("\n== W14  the selected persona looks selected ==")
+    if not seen:
+        results.unmeasured(
+            "W14 the selected persona is filled differently",
+            "fewer than two persona cards, or none selected",
+        )
+        return
+
+    results.check(
+        "W14 the selected persona is filled differently",
+        seen["selectedBg"] != seen["otherBg"],
+        f"selected {seen['selectedBg']} vs unselected {seen['otherBg']}"
+        + ("  <- identical: the fill class is being overridden" if seen["selectedBg"] == seen["otherBg"] else ""),
+    )
+    results.check(
+        "W14 the selected persona is outlined differently",
+        seen["selectedBorder"] != seen["otherBorder"],
+        f"selected {seen['selectedBorder']} vs unselected {seen['otherBorder']}",
+    )
+
+
 def run(headed: bool, live: bool) -> int:
     results = Results()
     created_id: str | None = None
@@ -1234,6 +1294,11 @@ def run(headed: bool, live: bool) -> int:
 
             collected = drive(page)
             evaluate_geometry(results, collected)
+
+            # W14 asks step 2, where a persona has been chosen by the drive.
+            go_to_step(page, 2)
+            page.wait_for_timeout(200)
+            evaluate_selection(results, page.evaluate(SELECTION_JS))
 
             # W6 needs the TALLEST screen in the flow, which is step 3 with the
             # controls shown, so it runs before W7 puts the mode back.
