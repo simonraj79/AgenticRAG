@@ -90,6 +90,12 @@
  * a warning under a field being edited, a false negative costs a round trip and a
  * rejected save.
  *
+ * The second warning on this page, `rerank_top_n > retrieve_k`, is NOT that: the
+ * server accepts it, so there is no rejection to pre-empt and nothing duplicated.
+ * It says out loud that a number the user just raised cannot be honoured. Both
+ * sentences come from `lib/tunables.ts`, which is where the argument for keeping
+ * them apart is written.
+ *
  * **What is deliberately read-only.** `AgentUpdate` sets `extra="forbid"`, so an
  * unknown key is a 422 rather than an ignored field. `icon`, `persona_role`,
  * `pedagogy`, `category`, `status` and `visibility` are copied at creation and
@@ -113,7 +119,7 @@ import {
   errorMessage,
 } from "./ui.tsx";
 import Drawer from "./Drawer.tsx";
-import { GROUPS, TUNABLES } from "../lib/tunables.ts";
+import { GROUPS, overlapWarning, shortlistWarning, TUNABLES } from "../lib/tunables.ts";
 import type { TunableGroup } from "../lib/tunables.ts";
 import {
   BTN_PRIMARY,
@@ -347,21 +353,29 @@ export default function AgentSettingsSheet({
   const dirtyCount = Object.keys(patch).length;
 
   /**
-   * The one rule duplicated client-side -- see the file docstring. Judged on the
-   * DRAFT, which is the merged config the server will judge.
+   * Both warnings are judged on the DRAFT, which is the merged config the server
+   * will judge, and both sentences come from `tunables.ts` rather than from
+   * here -- see the note above the two predicates for why they are two.
    *
-   * The two labels are interpolated rather than retyped. This sentence read
-   * "Overlap must be smaller than chunk size" while the controls it points at
-   * now read *Passage overlap* and *Passage size* -- the drift `tunables.ts`
-   * exists to close, reappearing one line under the two controls it closed it
-   * for. Uncased on purpose: naming a control inside a warning only works if the
-   * words match the label character for character, so the reader can pair them
-   * by sight rather than by inference.
+   * The overlap rule is the one server rule this form duplicates and it is
+   * unchanged in kind: it warns, it does not block, and the file docstring's
+   * argument for that still holds. What changed is only where the sentence is
+   * written. It lived here as its own string and in the wizard as another, and
+   * the two had already drifted apart in wording while agreeing on the rule --
+   * which is the same drift `TUNABLES` was built to close, one tier up.
+   *
+   * The shortlist rule is new to this surface and that is the actual fix. The
+   * wizard has warned about `rerank_top_n > retrieve_k` since it was written
+   * and this sheet -- the surface where a user does their SECOND and every
+   * subsequent edit -- said nothing, so the same misconfiguration was explained
+   * once at creation and then silently accepted forever after.
    */
-  const overlapProblem =
-    draft.chunk_overlap >= draft.chunk_size
-      ? `${TUNABLES.chunk_overlap.label} must be smaller than ${TUNABLES.chunk_size.label}. The server will reject this.`
-      : null;
+  const overlapProblem = overlapWarning(draft.chunk_size, draft.chunk_overlap);
+  const shortlistProblem = shortlistWarning(
+    draft.retrieve_k,
+    draft.rerank_enabled,
+    draft.rerank_top_n,
+  );
 
   function set<K extends keyof Draft>(key: K, value: Draft[K]) {
     setDraft((current) => ({ ...current, [key]: value }));
@@ -488,6 +502,12 @@ export default function AgentSettingsSheet({
             band={SLIDER_BAND.rerank_top_n}
             bounds={API_BOUNDS.rerank_top_n}
             disabled={!draft.rerank_enabled}
+            // On this control rather than on `retrieve_k`, even though raising
+            // the shortlist is the likelier fix, because the warning has to sit
+            // under the slider whose value it is about: this is the number the
+            // user just moved past the shortlist, and the shortlist slider is
+            // two controls above it and may be off screen.
+            warning={shortlistProblem}
           />
 
           <Segmented

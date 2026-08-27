@@ -408,3 +408,90 @@ export const GROUPS: { id: TunableGroup; title: string; blurb: string }[] = [
       "Saved with the agent and printed in every turn's trace, and read by no code path in this build. Shown rather than hidden for exactly that reason: they appear in the trace, so a user who could not find them here would meet them there with no explanation at all.",
   },
 ];
+
+// --------------------------------------------------------------------------
+// The two warnings both tuning surfaces show
+// --------------------------------------------------------------------------
+
+/**
+ * The two rules a user can break with the sliders, as predicates rather than as
+ * strings written out in each form.
+ *
+ * They live here for the same reason the labels do, one step further on. The
+ * wizard and the settings sheet had each written their own copy of the overlap
+ * sentence and they had already drifted -- one carried the two values in
+ * parentheses and the other did not, one lower-cased the second label and the
+ * other did not -- and the shortlist rule existed in the wizard and nowhere
+ * else, so the *same mistake* was warned about in one surface and silent in the
+ * other. A rule that only one of two forms knows about is a rule the user
+ * learns by making the mistake twice.
+ *
+ * **Interpolating the labels is the point, not decoration.** A warning's entire
+ * job is to send the reader to a control, so it has to name a control that is
+ * on the screen. This sentence read "Overlap must be smaller than chunk size"
+ * after the relabel that made those controls read *Passage overlap* and
+ * *Passage size* -- the drift `TUNABLES` exists to close, reappearing one line
+ * underneath the two controls it had just closed it for. Reading the labels
+ * back out of the table means a future relabel moves the message with it.
+ *
+ * ## Why two functions and not one list of problems
+ *
+ * They differ in KIND, and a caller has to be able to tell them apart without
+ * reading the text.
+ *
+ * `overlapWarning` is the one server rule this form duplicates. The server
+ * judges `chunk_overlap < chunk_size` against the MERGED config rather than the
+ * request body, so a user can trip it by moving one slider while the other
+ * keeps its saved value, and without the duplicate the failure arrives as a 422
+ * after pressing Save. It BLOCKS: the wizard refuses to advance past the tuning
+ * step while it is non-null, because the value cannot be stored at all.
+ *
+ * `shortlistWarning` is advisory and must NOT block. The server accepts
+ * `rerank_top_n > retrieve_k` without complaint and the re-ranker simply hands
+ * back fewer passages than it was asked for -- a disappointing configuration,
+ * not an invalid one. Blocking on it would refuse a save the API would have
+ * accepted, which is the two-sources-of-truth failure the file docstrings of
+ * both surfaces are written against.
+ *
+ * Collapsing them into one `problems: string[]` would erase exactly that
+ * distinction and leave each caller to re-derive it by matching on the text.
+ */
+
+/**
+ * `chunk_overlap` must be strictly smaller than `chunk_size`. Blocking.
+ *
+ * The wording is the wizard's, values and all, because the numbers are what
+ * make it actionable: "Passage overlap must be smaller than passage size" is a
+ * rule, and "Passage overlap (800) must be smaller than passage size (800)"
+ * tells a reader which of the two they moved. The sheet's variant ended "The
+ * server will reject this", which is true there and would be a lie in the
+ * wizard -- it blocks, so the server never sees the value.
+ */
+export function overlapWarning(
+  chunkSize: number,
+  chunkOverlap: number,
+): string | null {
+  if (chunkOverlap < chunkSize) return null;
+  return `${TUNABLES.chunk_overlap.label} (${chunkOverlap}) must be smaller than ${TUNABLES.chunk_size.label.toLowerCase()} (${chunkSize}).`;
+}
+
+/**
+ * Asking the re-ranker for more passages than were shortlisted. Advisory.
+ *
+ * `rerankEnabled` is a precondition and not a control to go and fix: with
+ * re-ranking off nothing is being handed over, so the comparison describes
+ * nothing and the message would point at a slider that is disabled.
+ *
+ * Both controls are named from `TUNABLES` where the wizard's original wrote
+ * "passages" and "the re-ranker" by hand. "Re-ranker" stays as prose -- it is
+ * the mechanism this file's own `help` and `detail` strings already call by
+ * that name, not a control anyone can move.
+ */
+export function shortlistWarning(
+  retrieveK: number,
+  rerankEnabled: boolean,
+  rerankTopN: number,
+): string | null {
+  if (!rerankEnabled || rerankTopN <= retrieveK) return null;
+  return `${TUNABLES.rerank_top_n.label} (${rerankTopN}) is more than ${TUNABLES.retrieve_k.label.toLowerCase()} (${retrieveK}), so the re-ranker can only hand over ${retrieveK}.`;
+}

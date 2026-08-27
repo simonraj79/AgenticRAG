@@ -69,7 +69,12 @@ import {
   errorMessage,
 } from "../components/ui.tsx";
 import type { Tuning } from "../components/ui.tsx";
-import { GROUPS, TUNABLES } from "../lib/tunables.ts";
+import {
+  GROUPS,
+  TUNABLES,
+  overlapWarning,
+  shortlistWarning,
+} from "../lib/tunables.ts";
 import type { TunableGroup, TunableKey } from "../lib/tunables.ts";
 import {
   ACCENT_TONE,
@@ -452,11 +457,13 @@ function StepRail({
     // only way back to an earlier step, and it used to be the FIRST thing to
     // scroll away -- on a step measured at 2.5 screens.
     //
-    // Sticky rather than the drawer's `subheader` region, which would have
-    // meant lifting `step`, `furthest` and `goTo` out of this component and
-    // into the dashboard, so that a generic layout primitive could own a
-    // wizard's navigation state. The rail reads that state and nothing else
-    // does; keeping the two together is worth more than the region.
+    // Sticky rather than a fixed region of the drawer itself, which was built
+    // for this rail and then deleted for want of a caller: putting the rail
+    // there would have meant lifting `step`, `furthest` and `goTo` out of this
+    // component and into the dashboard, so that a generic layout primitive
+    // could own a wizard's navigation state. The rail reads that state and
+    // nothing else does; keeping the two together is worth more than the
+    // region was.
     <nav
       aria-label="Progress"
       data-testid="wizard-rail"
@@ -728,26 +735,29 @@ export default function CreateAgentWizard({
         ? `You already have an agent named "${trimmedName}".`
         : null;
 
-  // The server rejects equality too, and it 422s on the merged config, so this
-  // is the same rule stated one step earlier rather than a stricter one.
+  // Both rules are `tunables.ts`'s, and neither sentence is written out here.
+  // They sit beside the labels they interpolate because a warning's whole job
+  // is to send the reader to a control, so it has to name one that is on the
+  // screen -- and because this form and the agent settings sheet had already
+  // drifted: two spellings of the overlap rule, and the shortlist rule in this
+  // file and nowhere else, so the same mistake was explained on one surface
+  // and silent on the other.
   //
-  // Both labels are INTERPOLATED from `tunables.ts` rather than written out.
-  // This string named "Overlap" and "chunk size" after the relabel, so it was
-  // the last place in the frontend still using the old vocabulary -- and it is
-  // the worst possible place for it, because a message telling you which
-  // control to go and fix has to name a control you can actually see. Reading
-  // the labels means it cannot drift from them again.
-  const overlapProblem =
-    tuning.chunk_overlap >= tuning.chunk_size
-      ? `${TUNABLES.chunk_overlap.label} (${tuning.chunk_overlap}) must be smaller than ${TUNABLES.chunk_size.label.toLowerCase()} (${tuning.chunk_size}).`
-      : null;
-
-  // Not an error: the server accepts it, and the reranker simply gets fewer
-  // candidates than it was asked to return. Worth saying, not worth blocking.
-  const topNWarning =
-    tuning.rerank_enabled && tuning.rerank_top_n > tuning.retrieve_k
-      ? `Only ${tuning.retrieve_k} passages are shortlisted, so the re-ranker cannot hand over ${tuning.rerank_top_n}.`
-      : null;
+  // The two locals keep their old names, because the names carry the one thing
+  // the predicates deliberately do not encode. `overlapProblem` BLOCKS: the
+  // server rejects the merged config with a 422, so the value cannot be stored
+  // at all and `problemFor` refuses to advance past this step. `topNWarning`
+  // is rendered and nothing more -- the server accepts it and the re-ranker
+  // simply gets fewer candidates than it asked for, and blocking on it would
+  // refuse a save the API would have taken. Collapsing the pair into one list
+  // of problems would erase exactly that, and leave each caller to re-derive
+  // it by matching on the text.
+  const overlapProblem = overlapWarning(tuning.chunk_size, tuning.chunk_overlap);
+  const topNWarning = shortlistWarning(
+    tuning.retrieve_k,
+    tuning.rerank_enabled,
+    tuning.rerank_top_n,
+  );
 
   function problemFor(target: StepNumber): string | null {
     if (target === 1) return nameProblem;
@@ -868,6 +878,13 @@ export default function CreateAgentWizard({
   // flow cannot advance.
   const showNameProblem = Boolean(nameProblem && (nameTouched || trimmedName.length > 0));
 
+  // The reset notice is about the tuning, so it is shown on the tuning step and
+  // nowhere else -- unchanged from when it was rendered inside that step. What
+  // changed is that this is now a CONTENT decision rather than a mounting one:
+  // see the live region at the top of the form for why that distinction is the
+  // difference between a notice and a spoken one.
+  const liveNotice = step === SETTINGS_STEP ? resetNotice : null;
+
   return (
     <form
       onSubmit={submit}
@@ -888,6 +905,53 @@ export default function CreateAgentWizard({
       <StepRail current={step} furthest={furthest} onJump={goTo} />
 
       <div className="mt-5 flex-1 border-t border-line pt-5">
+        {/*
+          The wizard's one live region: mounted for the life of the form, empty
+          until there is something to say, and never unmounted between steps.
+
+          That is the entire point of it being out here rather than inside step
+          3 beside the notice it carries. An `aria-live` element only reports a
+          MUTATION, so a region that arrives already holding its sentence -- on
+          a node React created in the same commit -- announces nothing at all.
+          Written as `{resetNotice && <p role="status">...}` it did exactly
+          that on every occurrence, which means the sentence explaining that a
+          persona change discarded customised tuning has in all likelihood
+          never been spoken once. A notice whose whole purpose is to stop a
+          silent reset, silently. The node is now constant and only its text
+          moves, and the empty-to-full transition lands on arrival at step 3 --
+          the notice is written while step 2 is still on screen, so mounting it
+          with the step would have put the mutation and the mount in the same
+          frame again.
+
+          Two things are deliberately NOT routed through here. Step changes,
+          because the focus move to each step's heading already announces them
+          and a second region would talk over the first. And the overlap
+          warning, for the reason written beside it at the foot of this form:
+          that sentence is driven by a VALUE, so it re-renders on every step of
+          a drag, and a live region would interrupt for the whole gesture.
+
+          No styling while it is empty. `NOTICE` is a bordered box, and an
+          always-mounted one would draw an empty card on all four steps.
+        */}
+        <p
+          role="status"
+          // Redundant with `role="status"`, which carries an implicit polite
+          // live region, and kept because the two spellings are one promise
+          // and only one of them survives a refactor that reaches for a
+          // different role. Assertive would be wrong here: this reports
+          // something that has already happened, and interrupting for it buys
+          // nothing.
+          aria-live="polite"
+          data-testid="tuning-reset-notice"
+          // `ACCENT_TONE`, not `WARN_TONE`. This reports something that
+          // already happened and is recoverable by going back one step --
+          // it is information, and dressing it as caution would spend the
+          // warning tone on a non-problem and blunt it where it is real.
+          className={liveNotice ? `${NOTICE} ${ACCENT_TONE} mb-5` : undefined}
+        >
+          {liveNotice}
+        </p>
+
         {/* -------------------------------------------------- Step 1: Name */}
         {step === 1 && (
           <section aria-labelledby="wizard-heading">
@@ -1216,20 +1280,6 @@ export default function CreateAgentWizard({
               />
             </div>
 
-            {resetNotice && (
-              <p
-                role="status"
-                data-testid="tuning-reset-notice"
-                // `ACCENT_TONE`, not `WARN_TONE`. This reports something that
-                // already happened and is recoverable by going back one step --
-                // it is information, and dressing it as caution would spend the
-                // warning tone on a non-problem and blunt it where it is real.
-                className={`${NOTICE} ${ACCENT_TONE} mt-4`}
-              >
-                {resetNotice}
-              </p>
-            )}
-
             {/*
               Grouped by WHEN each setting takes effect, in both modes, using
               the same three headings the agent-settings sheet already uses.
@@ -1242,6 +1292,60 @@ export default function CreateAgentWizard({
             <div data-testid="tuning-groups" className="mt-6 space-y-6">
               {GROUPS.map((group) => {
                 const keys = keysInGroup(group.id);
+                // Built before the section rather than inline in it, because
+                // one of the three groups renders it inside a disclosure and
+                // the other two do not. Writing the ternary twice is how the
+                // facts branch and the controls branch drift apart.
+                const body = !customizing ? (
+                  <dl
+                    data-testid={`tuning-facts-${group.id}`}
+                    // `auto-fit` with a real minimum, not a fixed column
+                    // count. Every Fact now carries a sentence of
+                    // explanation as well as a value, so a four-column
+                    // grid at 101px -- which is what `sm:grid-cols-4`
+                    // resolved to inside the old panel -- has nowhere to
+                    // put it. The track decides how many fit; the box
+                    // decides the track.
+                    className="grid grid-cols-[repeat(auto-fit,minmax(min(14rem,100%),1fr))] gap-x-6 gap-y-4"
+                  >
+                    {keys.map((key) => (
+                      <Fact
+                        key={key}
+                        label={TUNABLES[key].label}
+                        tag={TUNABLES[key].tag}
+                        value={displayValue(key, tuning)}
+                        raw={tuning[key]}
+                        help={TUNABLES[key].help}
+                      />
+                    ))}
+                  </dl>
+                ) : (
+                  <div
+                    data-testid={`tuning-controls-${group.id}`}
+                    // Same `auto-fit` reasoning as the facts above, with a
+                    // wider floor: a slider needs room for its track, its
+                    // number field and a sentence, and 20rem is where that
+                    // stops being cramped. It also means the controls pair
+                    // up when the panel is wide and stack when it is not,
+                    // WITHOUT a breakpoint -- which is the bug this whole
+                    // change set is about. `sm:grid-cols-2` asked how wide
+                    // the WINDOW was and got the wrong answer inside a
+                    // 511px box.
+                    className="grid grid-cols-[repeat(auto-fit,minmax(min(20rem,100%),1fr))] gap-x-6 gap-y-6"
+                  >
+                    {keys.map((key) => (
+                      <TuningControl
+                        key={key}
+                        tunableKey={key}
+                        tuning={tuning}
+                        onEdit={editTuning}
+                        overlapProblem={overlapProblem}
+                        topNWarning={topNWarning}
+                        overlapRef={overlapRef}
+                      />
+                    ))}
+                  </div>
+                );
                 return (
                   <section
                     key={group.id}
@@ -1251,56 +1355,35 @@ export default function CreateAgentWizard({
                     <h3 className="text-sm font-semibold text-ink">{group.title}</h3>
                     <p className={`mt-1 max-w-prose ${HELP}`}>{group.blurb}</p>
 
-                    {!customizing ? (
-                      <dl
-                        data-testid={`tuning-facts-${group.id}`}
-                        // `auto-fit` with a real minimum, not a fixed column
-                        // count. Every Fact now carries a sentence of
-                        // explanation as well as a value, so a four-column
-                        // grid at 101px -- which is what `sm:grid-cols-4`
-                        // resolved to inside the old panel -- has nowhere to
-                        // put it. The track decides how many fit; the box
-                        // decides the track.
-                        className="mt-4 grid grid-cols-[repeat(auto-fit,minmax(min(14rem,100%),1fr))] gap-x-6 gap-y-4"
-                      >
-                        {keys.map((key) => (
-                          <Fact
-                            key={key}
-                            label={TUNABLES[key].label}
-                            tag={TUNABLES[key].tag}
-                            value={displayValue(key, tuning)}
-                            raw={tuning[key]}
-                            help={TUNABLES[key].help}
-                          />
-                        ))}
-                      </dl>
-                    ) : (
-                      <div
-                        data-testid={`tuning-controls-${group.id}`}
-                        // Same `auto-fit` reasoning as the facts above, with a
-                        // wider floor: a slider needs room for its track, its
-                        // number field and a sentence, and 20rem is where that
-                        // stops being cramped. It also means the controls pair
-                        // up when the panel is wide and stack when it is not,
-                        // WITHOUT a breakpoint -- which is the bug this whole
-                        // change set is about. `sm:grid-cols-2` asked how wide
-                        // the WINDOW was and got the wrong answer inside a
-                        // 511px box.
-                        className="mt-4 grid grid-cols-[repeat(auto-fit,minmax(min(20rem,100%),1fr))] gap-x-6 gap-y-6"
-                      >
-                        {keys.map((key) => (
-                          <TuningControl
-                            key={key}
-                            tunableKey={key}
-                            tuning={tuning}
-                            onEdit={editTuning}
-                            overlapProblem={overlapProblem}
-                            topNWarning={topNWarning}
-                            overlapRef={overlapRef}
-                          />
-                        ))}
-                      </div>
-                    )}
+                    {/*
+                      Nothing here is collapsed, and that is a REVERSAL worth
+                      recording rather than a thing that never happened.
+
+                      The inert group was briefly folded into a `Reveal`, on the
+                      reasoning that two controls no code path reads are the
+                      safest thing to tuck away and that the step runs to nearly
+                      three screens with the controls shown. The acceptance case
+                      that governs this screen said no, immediately and by name:
+                      `wizard_check.py` W7 asserts that every one of the ten
+                      parameters carries a visible explanation IN THE MODE THE
+                      USER LANDS IN, and it went red on `score_threshold` and
+                      `max_rewrites` -- because collapsing them is precisely the
+                      act of taking their explanations off the arrival screen,
+                      which is the defect this whole step was rebuilt to fix.
+
+                      `07-workspace-shell.md` had already ruled on these two
+                      specific controls for the settings sheet: "Hiding them
+                      would be tidier and worse: the trace panel prints
+                      score_threshold on every turn." A disclosure is a softer
+                      hiding in the same direction, and it was reversing a
+                      measured decision on the strength of a length I disliked.
+
+                      The length is real and is paid for elsewhere: the long
+                      measured prose already sits behind a per-parameter "Why
+                      this matters", and the mode people actually land in shows
+                      facts rather than controls.
+                    */}
+                    <div className="mt-4">{body}</div>
                   </section>
                 );
               })}
