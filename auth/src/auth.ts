@@ -103,11 +103,18 @@ export const auth = betterAuth({
     google: {
       clientId: required("GOOGLE_OAUTH_CLIENT_ID"),
       clientSecret: required("GOOGLE_OAUTH_CLIENT_SECRET"),
-      // Identity only -- no Gmail, no Calendar, nothing to authorise later.
-      // The tokens Google returns are never persisted for the same reason the
-      // Authlib callback dropped them: storing a credential buys a leak in
-      // exchange for a capability nothing uses.
-      scope: ["openid", "email", "profile"],
+      // NO `scope` HERE, DELIBERATELY. Better Auth's Google provider already
+      // requests exactly `email profile openid`, and adding the same three
+      // APPENDS rather than replaces -- the live authorize URL came back as
+      // `email profile openid openid email profile`. Google dedupes, so it
+      // never surfaces as an error; it was only visible by reading the URL the
+      // service actually built.
+      //
+      // `openid` being present is what matters and is not optional: it is what
+      // makes this an OIDC request that returns an id_token. Better Auth
+      // includes it by default, so the correct way to keep it is to not touch
+      // this field. Identity only -- no Gmail, no Calendar, and the tokens
+      // Google returns are never persisted.
     },
   },
 
