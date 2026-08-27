@@ -140,9 +140,75 @@ export function clearAuthToken(): void {
   inflight = null;
 }
 
-/** Start the Google flow. Returns to `callbackURL` on success. */
+/**
+ * Start the Google flow. Returns to `callbackURL` on success.
+ *
+ * THIS FUNCTION'S JOB IS TO FAIL LOUDLY, AND THAT IS NOT DEFENSIVE PADDING.
+ *
+ * `authClient.signIn.social` does NOT throw when sign-in fails. Better Auth's
+ * client resolves with `{ data, error }` -- so a `403 Invalid Origin`, a cold
+ * auth service, or a 200 from a host that has no auth service at all are all
+ * ORDINARY FULFILLED PROMISES. `await` returns, nothing navigates, and the
+ * caller's `.catch()` never runs. The button in `Login.tsx` then sits on
+ * "Redirecting to Google..." for ever with no message, which is what was
+ * actually shipped and what was measured in a browser on 2026-08-27.
+ *
+ * The specific failure was that the OLD static frontend is still live and
+ * still serving the CURRENT bundle. It has no `/api/auth/*`, so its SPA
+ * fallback answers the sign-in POST with a 200 and an empty body: no error
+ * exists anywhere in the system, and nothing happens. Every error-shaped check
+ * passed.
+ *
+ * So the guard below triggers on THE ABSENCE OF THE OUTCOME -- "did we get a
+ * URL to send the browser to" -- and never on the presence of an error. That
+ * is the standing rule for anything here whose failure mode is silence.
+ *
+ * The navigation is also performed HERE rather than left to Better Auth's
+ * built-in `redirect` fetch plugin. That plugin does the same assignment
+ * inside a bare `try {} catch {}` (client/fetch-plugins.mjs), so if it ever
+ * fails or is dropped from a future default set, the failure is again silent.
+ * Assigning a second time to the same URL is harmless -- the navigation is
+ * already in flight and the URL is identical -- and it makes the one thing
+ * this function exists to do visible in this file.
+ */
 export async function signInWithGoogle(callbackURL = "/"): Promise<void> {
-  await authClient.signIn.social({ provider: "google", callbackURL });
+  const result = (await authClient.signIn.social({ provider: "google", callbackURL })) as
+    | { data?: { url?: string } | null; error?: { message?: string; status?: number } | null }
+    | { url?: string }
+    | null;
+
+  const failure = (result as { error?: { message?: string; status?: number } | null })?.error;
+  if (failure) {
+    const status = failure.status ? ` (HTTP ${failure.status})` : "";
+    throw new Error(`${failure.message ?? "The auth service rejected the sign-in"}${status}`);
+  }
+
+  // Both shapes accepted, exactly as `fetchToken` above accepts both: the
+  // plugin has returned `{ data: { url } }` and a flat `{ url }` across
+  // versions, and tolerating either costs one line where guessing wrong costs
+  // a login that silently does nothing.
+  const url =
+    (result as { data?: { url?: string } })?.data?.url ??
+    (result as { url?: string })?.url ??
+    null;
+
+  if (!url) {
+    // Naming the origin IS the diagnosis. This request is same-origin by
+    // construction (see AUTH_URL above), so "no Google URL came back" means
+    // this page is not being served by the auth service -- a stale bookmark to
+    // a previous frontend host, most likely. A message that omitted the origin
+    // would send the reader to debug Google, which is working perfectly.
+    // `window.location.origin` rather than the module-level `AUTH_URL`: they
+    // are the same string by construction, but this one is read at the moment
+    // of failure and therefore cannot be stale.
+    throw new Error(
+      `${window.location.origin} did not return a Google sign-in URL. This page must be served by ` +
+        `the auth service itself; if you have followed an old link, open the app at ` +
+        `its current address and try again.`,
+    );
+  }
+
+  window.location.href = url;
 }
 
 /** Revoke the Better Auth session AND drop the cached bearer token. */

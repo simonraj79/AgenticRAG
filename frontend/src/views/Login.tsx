@@ -157,12 +157,22 @@ export default function Login({ onAuthenticated }: { onAuthenticated: (user: Use
                   // No `await`: this navigates away on success, so there is no
                   // "after" to run. The catch exists for the failure case, where
                   // the page stays put and the user is owed an explanation.
+                  //
+                  // THIS CATCH ONLY WORKS BECAUSE `signInWithGoogle` THROWS ON
+                  // A SILENT FAILURE. Better Auth's client resolves with
+                  // `{ data, error }` rather than throwing, so before that
+                  // guard existed this handler was unreachable for every real
+                  // failure -- `busy` stayed true and the button read
+                  // "Redirecting to Google..." for ever with nothing to read.
                   signInWithGoogle(window.location.pathname).catch((cause) => {
                     setBusy(false);
-                    setSignInError(
-                      `Sign-in could not be started (${String(cause)}). ` +
-                        `If this persists, the auth service may still be starting up.`,
-                    );
+                    // `errorMessage`, not `String(cause)`: the latter renders
+                    // "Error: ..." and the prefix is noise in front of a
+                    // sentence that already explains itself. No trailing guess
+                    // about a cold start either -- the thrown message names the
+                    // actual diagnosis, and a second speculative cause beside
+                    // it is what sends a reader off to debug the wrong thing.
+                    setSignInError(`Sign-in could not be started. ${errorMessage(cause)}`);
                   });
                 }}
                 className={`${BTN_PRIMARY} mt-5 w-full py-3`}
