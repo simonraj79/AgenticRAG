@@ -22,7 +22,7 @@
  * same rule `StatusPill` and `CategoryBadge` already follow.
  */
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { MouseEvent } from "react";
 import { handouts } from "../lib/api.ts";
 import type { Handout, HandoutDetail } from "../lib/types.ts";
@@ -141,6 +141,47 @@ export default function HandoutCard({
   // A thumbnail that 404s or 409s renders as the browser's broken-image glyph,
   // which looks like a bug in the panel rather than a file that is not there.
   const [thumbFailed, setThumbFailed] = useState(false);
+  const [downloading, setDownloading] = useState(false);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
+
+  // The chart thumbnail has to be RESOLVED now rather than pointed at.
+  //
+  // `<img src>` is a navigation, so it cannot carry the bearer token, and the
+  // two roads need different answers: a presigned R2 URL is usable directly
+  // (cross-origin, no credential, exactly what a no-CORS image load wants),
+  // while the Postgres road needs the bytes fetched and wrapped in a blob.
+  // `handouts.resolveSrc` picks, and hands back the matching cleanup.
+  const [thumbSrc, setThumbSrc] = useState<string | null>(null);
+  const isChart = handout.kind === "chart" && handout.status === "ready";
+
+  useEffect(() => {
+    if (!isChart) return;
+    let cancelled = false;
+    let revoke: (() => void) | null = null;
+
+    handouts
+      .resolveSrc(agentId, handout.id)
+      .then((resolved) => {
+        if (cancelled) {
+          // Unmounted while in flight. Revoke immediately or the blob outlives
+          // the component that would have released it.
+          resolved.revoke();
+          return;
+        }
+        revoke = resolved.revoke;
+        setThumbSrc(resolved.src);
+      })
+      .catch(() => {
+        // Same treatment a broken <img> already got. A thumbnail that will not
+        // load is not worth an error banner on a handout that downloads fine.
+        if (!cancelled) setThumbFailed(true);
+      });
+
+    return () => {
+      cancelled = true;
+      revoke?.();
+    };
+  }, [agentId, handout.id, isChart]);
   // "Has a request been sent", as a ref rather than state: it is read inside an
   // event handler to decide whether to fetch, and making it state would put a
   // render between the decision and the flag.
@@ -217,10 +258,10 @@ export default function HandoutCard({
           pending row and the `<img>` would render broken while the job is still
           doing exactly what it should.
         */}
-        {handout.kind === "chart" && handout.status === "ready" && !thumbFailed && (
+        {isChart && !thumbFailed && thumbSrc && (
           <img
             data-testid="handout-thumb"
-            src={handouts.downloadUrl(agentId, handout.id)}
+            src={thumbSrc}
             alt={handout.title}
             loading="lazy"
             onError={() => setThumbFailed(true)}
@@ -316,19 +357,32 @@ export default function HandoutCard({
             make a 44px box with the label sitting on its first text line
             instead of centred.
 
-            The bare `download` attribute is honest about doing nothing here --
-            browsers ignore it cross-origin -- and is kept because the server's
-            header is what actually forces the save, and a reader should not
-            have to wonder whether the attribute was forgotten.
+            A BUTTON rather than an anchor, and that is forced. A browser
+            NAVIGATION cannot carry an `Authorization` header, so once identity
+            moved to a bearer token an `<a href>` here authenticated nobody --
+            it worked only while the old session cookie was still live.
+
+            `downloadHandout` resolves the road first: a presigned R2 URL is
+            handed to the browser directly (its own
+            `ResponseContentDisposition` names the file), and the Postgres road
+            fetches the bytes with the token and saves a blob.
           */
-          <a
+          <button
+            type="button"
             data-testid="handout-download"
-            href={handouts.downloadUrl(agentId, handout.id)}
-            download
-            className="inline-flex min-h-11 items-center rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-300 transition hover:border-slate-600 hover:text-slate-100"
+            disabled={downloading}
+            onClick={() => {
+              setDownloading(true);
+              setDownloadError(null);
+              handouts
+                .downloadHandout(agentId, handout.id)
+                .catch((cause) => setDownloadError(errorMessage(cause)))
+                .finally(() => setDownloading(false));
+            }}
+            className="inline-flex min-h-11 items-center rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-300 transition hover:border-slate-600 hover:text-slate-100 disabled:cursor-not-allowed disabled:opacity-60"
           >
-            Download
-          </a>
+            {downloading ? "Preparing..." : "Download"}
+          </button>
         )}
 
         {handout.status === "failed" && (
@@ -357,6 +411,15 @@ export default function HandoutCard({
           />
         </div>
       </div>
+
+      {/*
+        A download that failed has to SAY so. The old anchor could not fail
+        visibly -- the browser owned the navigation, so a 401 became a blank
+        tab or a silently discarded click. Now that the fetch happens in this
+        component, swallowing the rejection would be strictly worse than what
+        it replaced: a button that does nothing, with no error anywhere.
+      */}
+      <ErrorBanner error={downloadError} />
 
       {/*
         A FAILED handout shows its code too, and that is the whole point of

@@ -599,6 +599,108 @@ async def get_handout(
 # --------------------------------------------------------------------------
 
 
+class HandoutDownloadTarget(BaseModel):
+    """WHERE the bytes are, resolved by an authenticated call. Not the bytes.
+
+    This exists because a browser NAVIGATION cannot carry an `Authorization`
+    header. `<a href>` and `<img src>` are navigations, so once identity moves
+    from a cookie to a bearer token they can no longer authenticate themselves,
+    and the obvious repair -- fetch into a blob -- was measured and does not
+    work either: on the R2 road `/download` answers 302 to a presigned URL on
+    another origin, and R2 serves no CORS headers for this app. From the page:
+
+        fetch(..., {headers:{Authorization}})   TypeError: Failed to fetch
+        fetch(..., {redirect:"manual"})         opaqueredirect, location null
+
+    The browser will neither follow the redirect nor reveal where it points.
+
+    So the credential and the target are separated. This route is authenticated
+    the same way every other route is, and what it returns is either a URL that
+    is ALREADY self-authenticating -- a presigned R2 URL, HMAC-signed and
+    expiring -- or the fact that there is no such URL and the caller should read
+    the bytes through the API instead. Neither answer requires the browser to
+    attach a credential to a navigation.
+    """
+
+    # None means "no self-authenticating URL exists for this row" -- the
+    # Postgres road, where the bytes come from this service. The caller then
+    # fetches /download with its bearer token, which works because that response
+    # is same-origin-to-the-API and CORS is already configured for it. It is NOT
+    # an error and must not be rendered as one.
+    url: str | None = None
+    filename: str
+    mime_type: str | None = None
+    # Seconds. Present only alongside a `url`, so a caller can decide whether a
+    # held URL is still worth using rather than discovering a 403 later.
+    expires_in: int | None = None
+
+
+@router.get(
+    "/{agent_id}/handouts/{handout_id}/download-url",
+    response_model=HandoutDownloadTarget,
+)
+async def handout_download_target(
+    agent: OwnedAgent, db: DbSession, handout_id: uuid.UUID
+) -> HandoutDownloadTarget:
+    """Resolve where a ready handout can be fetched from.
+
+    AUTHORISATION IS IDENTICAL TO `/download` AND THAT IS THE POINT. `OwnedAgent`
+    resolves tenancy structurally and `_load_owned` proves the row belongs to
+    this agent, exactly as the bytes route does -- the presigned URL is minted
+    only after both. Handing out a URL is not a weaker check than handing out
+    bytes; it is the same check with a different payload.
+
+    `with_content=False` unconditionally, unlike `/download`, because this route
+    never serves bytes on either road. The deferred `content` column stays
+    unloaded even on the Postgres road, where the caller's follow-up request to
+    `/download` will load it.
+    """
+    handout = await _load_owned(db, agent, handout_id, with_content=False)
+
+    # Same 409, same wording as `/download`. A row that is visibly sitting in the
+    # panel with a spinner on it has not been deleted, and 404 would say it had.
+    if handout.status != "ready":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"This handout is not ready yet (status: {handout.status})."
+                if handout.status != "failed"
+                else f"This handout failed: {handout.error or 'no reason recorded'}"
+            ),
+        )
+
+    if storage.enabled() and handout.storage_key:
+        try:
+            url = storage.presigned_get_url(
+                handout.storage_key,
+                filename=_safe(handout.filename),
+                mime_type=handout.mime_type,
+            )
+        except storage.StorageError as exc:
+            # 503 and it names the store -- the same reasoning as `/download`.
+            # An expired API token makes every download fail at once while the
+            # application is provably unchanged.
+            log.error("Could not sign a download URL for %s: %s", handout.id, exc)
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Object storage is unavailable, so this file cannot be served.",
+            ) from exc
+
+        return HandoutDownloadTarget(
+            url=url,
+            filename=handout.filename,
+            mime_type=handout.mime_type,
+            expires_in=settings.r2_presign_ttl_s,
+        )
+
+    # The Postgres road, and the blue/green case: a ready row on the R2 route
+    # that has no key yet. Both mean "there is no signed URL; read the bytes
+    # from this service".
+    return HandoutDownloadTarget(
+        url=None, filename=handout.filename, mime_type=handout.mime_type
+    )
+
+
 @router.get("/{agent_id}/handouts/{handout_id}/download")
 async def download_handout(
     agent: OwnedAgent, db: DbSession, handout_id: uuid.UUID

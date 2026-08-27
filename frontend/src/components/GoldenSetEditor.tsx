@@ -106,6 +106,7 @@ export default function GoldenSetEditor({
   const [adding, setAdding] = useState(false);
 
   const [suggesting, setSuggesting] = useState(false);
+  const [exporting, setExporting] = useState(false);
   const [importText, setImportText] = useState("");
   const [importing, setImporting] = useState(false);
 
@@ -364,24 +365,33 @@ export default function GoldenSetEditor({
           </button>
 
           {/*
-            A normal link, not a script-driven blob save. `<a download>` and
-            programmatic saves are inert inside the viewer sandbox, and the
-            endpoint already sets `Content-Disposition: attachment`, so the
-            browser does the saving. The session cookie rides along because it
-            is issued SameSite=None.
+            A BUTTON, not a link, and that is forced rather than stylistic. The
+            endpoint sets `Content-Disposition: attachment` and an `<a href>`
+            used to be enough -- the session cookie rode along because it was
+            issued `SameSite=None`. A browser NAVIGATION cannot carry an
+            `Authorization` header, so once identity moved to a bearer token
+            that anchor authenticated nobody and the export 401d for exactly
+            the third-party-cookie users the move was made for.
+
+            `exportGoldenSet` fetches with credentials and saves the blob,
+            which works under the bearer token AND the old cookie.
           */}
-          <a
+          <button
+            type="button"
             data-testid="golden-export"
-            href={evaluation.exportUrl(agentId)}
-            target="_blank"
-            rel="noreferrer noopener"
-            // `inline-flex items-center` alongside `min-h-11`: an anchor is not
-            // a flex container by default, so the minimum height would stretch
-            // the box and leave the text sitting at the top of it.
-            className="inline-flex min-h-11 items-center rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-sm text-slate-200 transition hover:border-slate-600"
+            disabled={exporting}
+            onClick={() => {
+              setExporting(true);
+              setError(null);
+              evaluation
+                .exportGoldenSet(agentId)
+                .catch((cause) => setError(errorMessage(cause)))
+                .finally(() => setExporting(false));
+            }}
+            className="inline-flex min-h-11 items-center rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-sm text-slate-200 transition hover:border-slate-600 disabled:cursor-not-allowed disabled:opacity-60"
           >
-            Export JSON
-          </a>
+            {exporting ? "Preparing..." : "Export JSON"}
+          </button>
         </div>
       </div>
 

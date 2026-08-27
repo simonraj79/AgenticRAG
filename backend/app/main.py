@@ -65,6 +65,18 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    # `Content-Disposition` is NOT a CORS-safelisted response header, so
+    # without this line JavaScript cannot read it even from our own API --
+    # `allow_headers` governs the REQUEST, `expose_headers` governs what the
+    # response will reveal, and only the first was ever set.
+    #
+    # It matters now because a browser NAVIGATION cannot carry an
+    # Authorization header, so `<a href>` downloads had to become
+    # authenticated fetches that build a blob -- and a blob has no filename
+    # unless the caller reads one out of this header. The golden-set export
+    # names itself from a server-side slug of the agent name, which is not
+    # something a client should try to reproduce.
+    expose_headers=["Content-Disposition"],
 )
 
 # DO NOT ADD GZipMiddleware HERE. `app/api/stream.py` serves SSE, and a

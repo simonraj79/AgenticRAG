@@ -299,6 +299,25 @@ export type Citation = {
  * bytes never cross this boundary as JSON. They are fetched by a plain link --
  * see `handouts.downloadUrl` in `api.ts`.
  */
+/**
+ * Where a ready handout can be fetched from. See `handouts.downloadTarget`.
+ *
+ * `url` non-null is a presigned, self-authenticating, expiring URL -- usable
+ * directly as an `<img src>` or `<a href>` with NO credential attached, which
+ * is the whole point: a browser navigation cannot carry an Authorization
+ * header, so the URL has to authenticate itself.
+ *
+ * `url === null` is NOT an error. It means this deployment keeps the bytes in
+ * Postgres, so they are fetched from the API with the bearer token instead.
+ */
+export type HandoutDownloadTarget = {
+  url: string | null;
+  filename: string;
+  mime_type: string | null;
+  /** Seconds. Present only alongside a `url`. */
+  expires_in: number | null;
+};
+
 export type Handout = {
   id: string;
   kind: string;

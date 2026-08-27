@@ -384,6 +384,90 @@ check(
 )
 
 
+
+# ---------------------------------------------------------------------------
+# 35-39. Navigations cannot carry a bearer token.
+#
+# `<a href>` and `<img src>` are navigations, not requests, so they cannot
+# attach an `Authorization` header. Two surfaces relied on that and worked only
+# while the Authlib cookie was live -- they would have broken on the day it was
+# removed, for exactly the third-party-cookie users the cutover was made for.
+#
+# The obvious repair -- fetch into a blob -- was MEASURED against production and
+# does not work on the R2 road: /download answers 302 to another origin and R2
+# serves no CORS for this app, so the browser will neither follow the redirect
+# nor reveal where it points. Hence a JSON route that hands back a target which
+# is already self-authenticating.
+#
+# These assert the ABSENCE of the old shape, because that is the thing that
+# silently comes back: re-adding a URL builder compiles, renders and works
+# under a cookie.
+# ---------------------------------------------------------------------------
+print("")
+print("-- no navigation authenticates itself --")
+
+api_ts = read("frontend/src/lib/api.ts")
+check(
+    "35. the URL builders are gone, not merely unused",
+    "exportUrl" not in api_ts and "downloadUrl:" not in api_ts,
+    "a builder left in place is a builder something will use again",
+)
+check(
+    "36. the authenticated replacements exist",
+    all(n in api_ts for n in ("exportGoldenSet", "downloadTarget", "downloadHandout", "resolveSrc")),
+)
+check(
+    "37. fetchFile sends the bearer token",
+    "async function fetchFile" in api_ts and "await authorize(new Headers())" in api_ts,
+    "a blob fetch that skips authorize() is the same bug one layer down",
+)
+
+# The real guard: no component may interpolate the API base into href or src.
+_offenders = []
+for _rel in ("frontend/src/components", "frontend/src/views"):
+    _dir = REPO / _rel
+    if not _dir.exists():
+        continue
+    for _f in _dir.rglob("*.tsx"):
+        _src = _f.read_text(encoding="utf-8", errors="replace")
+                    # To the end of the LINE, not to the first `}` -- a template literal
+            # closes `${API_URL}` before the path, so `[^}]*` captured only
+            # "`${API_URL" and the carve-out below could never see the path.
+        for _m in re.finditer(r"(href|src)=\{([^\n]*)", _src):
+            _expr = _m.group(2)
+            if "API_URL" not in _expr:
+                continue
+            # THE EDGE, STATED. A navigation to an endpoint that runs BEFORE
+            # authentication is not the bug -- /api/auth/google/login is where
+            # a user goes to ACQUIRE a credential, so it cannot be expected to
+            # present one. The defect is a navigation to a resource that
+            # requires a credential it structurally cannot attach.
+            #
+            # A carve-out rather than a narrower search: a rule broad enough to
+            # catch the two real offenders was always going to catch this one,
+            # and dropping the href scan to avoid it would delete the guard.
+            if "/api/auth/" in _expr:
+                continue
+            _offenders.append(f"{_f.name}:{_m.group(1)}")
+check(
+    "38. no href/src is built from API_URL",
+    not _offenders,
+    f"offenders={_offenders}" if _offenders else "",
+)
+
+handouts_py = read("backend/app/api/handouts.py")
+check(
+    "39. the download-url route exists and is agent-scoped",
+    "/{agent_id}/handouts/{handout_id}/download-url" in handouts_py
+    and "agent: OwnedAgent" in handouts_py,
+    "tenancy must stay structural -- same check as /download, different payload",
+)
+main_py = read("backend/app/main.py")
+check(
+    "40. Content-Disposition is exposed to JS",
+    'expose_headers=["Content-Disposition"]' in main_py,
+    "without it a saved blob has no filename",
+)
 print("\n" + "=" * 74)
 if failures:
     print(f"{len(failures)} FAILED:")

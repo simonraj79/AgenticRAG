@@ -42,6 +42,7 @@ import type {
   GoldenQuestionInput,
   GoldenSetFileQuestion,
   Handout,
+  HandoutDownloadTarget,
   HandoutDetail,
   HandoutRequest,
   TraceEvent,
@@ -96,6 +97,96 @@ const CONFIGURED_API_URL = import.meta.env.VITE_API_URL as string | undefined;
 // Trailing slash stripped so `${API_URL}/api/...` never produces a double slash;
 // Starlette treats `//api/agents` as a different path and 404s on it.
 export const API_URL = (CONFIGURED_API_URL ?? "http://localhost:8000").replace(/\/+$/, "");
+
+/**
+ * Fetch a file through the API with credentials, and hand back an object URL.
+ *
+ * WHY THIS EXISTS AT ALL. A browser NAVIGATION cannot carry an `Authorization`
+ * header. `<a href>` and `<img src>` are navigations, so the moment identity
+ * moved from a cookie to a bearer token they stopped being able to authenticate
+ * themselves. Everything else in this file goes through `api()` and was
+ * unaffected; these two were the only surfaces that were not requests.
+ *
+ * The filename comes from `Content-Disposition`, which the API now exposes via
+ * CORS. Without that header a blob has no name and the browser saves
+ * "download" -- the golden-set export in particular names itself from a
+ * server-side slug of the agent name, which a client should not try to guess.
+ */
+export interface FetchedFile {
+  /** An object URL. The caller MUST revoke it or the blob leaks for the tab. */
+  objectUrl: string;
+  filename: string | null;
+  revoke: () => void;
+}
+
+/** Parse `attachment; filename="x"` / `filename*=UTF-8''x`. Null when absent. */
+function filenameFrom(disposition: string | null): string | null {
+  if (!disposition) return null;
+  // RFC 5987 form first: it is the one that survives non-ASCII, so a server
+  // sending both means the plain `filename=` is the lossy fallback.
+  const star = /filename\*\s*=\s*UTF-8''([^;]+)/i.exec(disposition);
+  if (star?.[1]) {
+    try {
+      return decodeURIComponent(star[1].trim());
+    } catch {
+      /* fall through to the plain form */
+    }
+  }
+  const plain = /filename\s*=\s*"?([^";]+)"?/i.exec(disposition);
+  return plain?.[1]?.trim() || null;
+}
+
+export async function fetchFile(path: string): Promise<FetchedFile> {
+  const headers = await authorize(new Headers());
+
+  let response: Response;
+  try {
+    response = await fetch(`${API_URL}${path}`, { headers, credentials: "include" });
+  } catch (cause) {
+    throw new ApiError(0, `Cannot reach the API at ${API_URL} (${String(cause)})`);
+  }
+
+  if (!response.ok) {
+    // Reuse the same unwrapping every other call gets, so a 409 on a pending
+    // handout reads the same here as it does through `api()`.
+    let detail = "";
+    try {
+      detail = ((await response.json()) as { detail?: string }).detail ?? "";
+    } catch {
+      /* a non-JSON error body is not worth a second failure */
+    }
+    throw new ApiError(response.status, detail || `Request failed (${response.status})`);
+  }
+
+  const blob = await response.blob();
+  const objectUrl = URL.createObjectURL(blob);
+  return {
+    objectUrl,
+    filename: filenameFrom(response.headers.get("content-disposition")),
+    revoke: () => URL.revokeObjectURL(objectUrl),
+  };
+}
+
+/**
+ * Save a URL to disk as `filename`, then clean up.
+ *
+ * A synthesised anchor rather than `window.location`, because a navigation
+ * would discard the SPA state for a download, and because `download` is what
+ * names the file when the URL itself is a blob. On a cross-origin presigned
+ * URL the attribute is ignored and the server's own
+ * `ResponseContentDisposition` does the naming -- which is why the R2 road
+ * still saves correctly with the right name.
+ */
+export function saveUrlAs(url: string, filename: string | null): void {
+  const a = document.createElement("a");
+  a.href = url;
+  if (filename) a.download = filename;
+  a.rel = "noreferrer noopener";
+  // Must be in the document for Firefox to honour the click.
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
 
 /** An error carrying the HTTP status, so callers can branch on 404 vs 409 vs 413. */
 export class ApiError extends Error {
@@ -775,28 +866,31 @@ export const evaluation = {
     }),
 
   /**
-   * A URL, not a request.
+   * Download the golden set. A REQUEST now, not a URL.
    *
-   * Export is a plain `<a href>` to the endpoint, whose `Content-Disposition:
-   * attachment` header does the saving. The alternative -- fetch the JSON,
-   * wrap it in a Blob, click a synthetic `<a download>` -- is inert inside the
-   * viewer sandbox, which blocks downloads a page starts itself. A normal link
-   * is a navigation the browser owns, and it carries the session cookie because
-   * that cookie is `SameSite=None; Secure` (PRD section 6.5).
-   * COOKIE-DEPENDENT, AND THE ONLY SURFACE LEFT THAT IS. This is a URL handed
-   * to the browser, not a fetch -- a navigation or an <img src>. A browser
-   * navigation cannot carry an `Authorization` header, so the bearer token that
-   * authenticates every other call in this file cannot authenticate this one.
-   * It works today because the Authlib cookie is still live.
+   * It used to be a plain `<a href>` whose `Content-Disposition` header did
+   * the saving, carried by the session cookie. That stopped being viable when
+   * identity moved to a bearer token: a browser NAVIGATION cannot attach an
+   * `Authorization` header, so the anchor authenticated nobody. This fetches
+   * with credentials and saves the blob, which works under the bearer token
+   * AND under the old cookie, so it is correct on both sides of the cutover.
    *
-   * REMOVING AUTHLIB BREAKS THIS, for exactly the users the cutover was for:
-   * anyone whose browser blocks third-party cookies. Fix before that removal by
-   * fetching the bytes through `api()` and handing the user a blob URL, or by
-   * having the route accept a short-lived token as a query parameter. Do not
-   * discover it by deleting the cookie path first.
+   * The name comes from the response header rather than being rebuilt here --
+   * the server slugs the agent name, and a second implementation of that would
+   * drift. The fallback only fires if the header is missing.
    */
-  exportUrl: (agentId: string) =>
-    `${API_URL}/api/agents/${encodeURIComponent(agentId)}/golden-questions/export`,
+  exportGoldenSet: async (agentId: string): Promise<void> => {
+    const file = await fetchFile(
+      `/api/agents/${encodeURIComponent(agentId)}/golden-questions/export`,
+    );
+    try {
+      saveUrlAs(file.objectUrl, file.filename ?? "golden-set.json");
+    } finally {
+      // In `finally` so a throw between creating and clicking cannot leak the
+      // blob for the lifetime of the tab.
+      file.revoke();
+    }
+  },
 
   /** Edit any field. Saving a suggested question is what flips its `source` to
    *  "edited" -- server-side, so the response is the authority on the badge. */
@@ -922,33 +1016,72 @@ export const handouts = {
     ),
 
   /**
-   * A URL, not a request -- exactly like `evaluation.exportUrl` above.
+   * WHERE this handout can be fetched from. Authenticated; returns a target.
    *
-   * The download is a plain `<a href download>`, a navigation the browser owns,
-   * whose `Content-Disposition: attachment` header does the saving. The
-   * alternative -- fetch the bytes, wrap them in a Blob, click a synthetic
-   * link -- is inert inside the viewer sandbox, which blocks downloads a page
-   * starts itself, and it would also pull megabytes of image data through JS
-   * for no gain. The route is a cookie-authenticated GET and the session cookie
-   * is `SameSite=None; Secure` (PRD section 6.5), so the link carries it.
+   * The indirection is forced by measurement, not taste. On the R2 road
+   * `/download` answers 302 to a presigned URL on another origin, and R2 serves
+   * no CORS headers for this app -- so an authenticated `fetch` cannot follow
+   * it (`TypeError: Failed to fetch`) and cannot read where it points either
+   * (`redirect: "manual"` yields an opaqueredirect with a null Location).
+   * Both were tried against production before this shape was chosen.
    *
-   * The same URL is the `src` of a chart's thumbnail. **Only once `status` is
-   * "ready"**: pointed at a pending row it answers 409 and the `<img>` renders
-   * broken.
-   * COOKIE-DEPENDENT, AND THE ONLY SURFACE LEFT THAT IS. This is a URL handed
-   * to the browser, not a fetch -- a navigation or an <img src>. A browser
-   * navigation cannot carry an `Authorization` header, so the bearer token that
-   * authenticates every other call in this file cannot authenticate this one.
-   * It works today because the Authlib cookie is still live.
-   *
-   * REMOVING AUTHLIB BREAKS THIS, for exactly the users the cutover was for:
-   * anyone whose browser blocks third-party cookies. Fix before that removal by
-   * fetching the bytes through `api()` and handing the user a blob URL, or by
-   * having the route accept a short-lived token as a query parameter. Do not
-   * discover it by deleting the cookie path first.
+   * `url` non-null means it is ALREADY self-authenticating -- HMAC-signed,
+   * expiring -- so it can be used as an `<img src>` or an `<a href>` with no
+   * credential attached. `url === null` means the Postgres road, where the
+   * bytes come from this API and `downloadHandout` fetches them.
    */
-  downloadUrl: (agentId: string, handoutId: string) =>
-    `${API_URL}/api/agents/${encodeURIComponent(agentId)}/handouts/${encodeURIComponent(handoutId)}/download`,
+  downloadTarget: (agentId: string, handoutId: string) =>
+    api<HandoutDownloadTarget>(
+      `/api/agents/${encodeURIComponent(agentId)}/handouts/${encodeURIComponent(handoutId)}/download-url`,
+    ),
+
+  /**
+   * A usable `src` for a ready handout, plus its cleanup.
+   *
+   * Same two roads as `downloadHandout`, because an `<img>` has the identical
+   * problem an `<a>` does -- it is a navigation and cannot carry a bearer
+   * token. A presigned URL is handed back as-is (the browser loads it
+   * cross-origin with no credential, which is exactly what a no-CORS image
+   * request wants); otherwise the bytes come through the API as a blob.
+   *
+   * ALWAYS call `revoke` when the consumer unmounts. On the presigned road it
+   * is a no-op, so a caller does not have to know which road it got -- and a
+   * caller that skips it leaks a blob for the lifetime of the tab on the other.
+   */
+  resolveSrc: async (
+    agentId: string,
+    handoutId: string,
+  ): Promise<{ src: string; revoke: () => void }> => {
+    const target = await handouts.downloadTarget(agentId, handoutId);
+    if (target.url) return { src: target.url, revoke: () => {} };
+
+    const file = await fetchFile(
+      `/api/agents/${encodeURIComponent(agentId)}/handouts/${encodeURIComponent(handoutId)}/download`,
+    );
+    return { src: file.objectUrl, revoke: file.revoke };
+  },
+  /** Save a ready handout to disk, by whichever road this deployment uses. */
+  downloadHandout: async (agentId: string, handoutId: string): Promise<void> => {
+    const target = await handouts.downloadTarget(agentId, handoutId);
+
+    if (target.url) {
+      // Presigned. No blob, no memory: the browser streams it straight from
+      // R2, and the URL carries its own `ResponseContentDisposition` so the
+      // file lands with the right name despite `download` being ignored
+      // cross-origin.
+      saveUrlAs(target.url, target.filename);
+      return;
+    }
+
+    const file = await fetchFile(
+      `/api/agents/${encodeURIComponent(agentId)}/handouts/${encodeURIComponent(handoutId)}/download`,
+    );
+    try {
+      saveUrlAs(file.objectUrl, file.filename ?? target.filename);
+    } finally {
+      file.revoke();
+    }
+  },
 };
 
 
