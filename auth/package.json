@@ -1,0 +1,25 @@
+{
+  "name": "groundwork-auth",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "migrate": "npx @better-auth/cli@latest migrate --config src/auth.ts",
+    "generate": "npx @better-auth/cli@latest generate --config src/auth.ts"
+  },
+  "dependencies": {
+    "@hono/node-server": "^2.1.1",
+    "better-auth": "^1.7.2",
+    "hono": "^4.13.5",
+    "pg": "^8.23.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.4.0",
+    "@types/pg": "^8.23.1",
+    "tsx": "^4.23.12",
+    "typescript": "^7.0.2"
+  }
+}

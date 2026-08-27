@@ -67,6 +67,9 @@ from app import storage as storage_mod  # noqa: E402
 from app.config import settings  # noqa: E402
 from app.db.models import (  # noqa: E402
     Agent,
+    EvalResult,
+    EvalRun,
+    GoldenQuestion,
     Chunk,
     Conversation,
     Document,
@@ -78,6 +81,7 @@ from app.db.models import (  # noqa: E402
     User,
 )
 from app.db.session import SessionLocal, engine  # noqa: E402
+from app.eval.jobs import run_eval_job  # noqa: E402
 from app.rag.ingest import ingest_file  # noqa: E402
 from app.rag.retriever import aretrieve, get_vector_store  # noqa: E402
 
@@ -1708,6 +1712,23 @@ async def s26_critic_exempts_pedagogy(db, agent, user) -> Outcome:
     checks = payloads_of(events, "SELF_CHECK")
     acted = [c for c in checks if c.get("acted")]
     ungrounded = [c for c in checks if c.get("verdict") == VERDICT_UNGROUNDED]
+
+    # NOT MEASURED, not passing, when the critic never ran. The assertion below
+    # is `not resets and not acted and not ungrounded` -- three negatives, every
+    # one of them trivially true over an EMPTY list. And empty is the expected
+    # shape here: the pre-check returns None for any draft carrying a citation
+    # (`selfcheck.py:124-125`, `if used: return None`), and a cited answer is
+    # exactly what an @feynman turn produces. So the green this printed was the
+    # green of a check that could not fail -- `Outcome.unmeasured`'s own comment,
+    # ten lines up from its definition, is about this.
+    if not checks:
+        return unmeasured(
+            "S26 the critic exempts pedagogy",
+            "the pre-check never fired (the draft carried a citation), so the "
+            "carve-out was not exercised -- see route_specialist_check case 41, "
+            "which calls the critic directly",
+        )
+
     ok = bool(out.answer) and not resets and not acted and not ungrounded
     return Outcome(
         "S26 the critic exempts pedagogy", ok,
@@ -2924,6 +2945,157 @@ async def http_scenarios(db, agent: Agent, user: User, only: str | None) -> list
 # Runner
 # --------------------------------------------------------------------------
 
+
+# --------------------------------------------------------------------------
+# S34/S35 -- change set 16, the trajectory rubric
+# --------------------------------------------------------------------------
+
+TRAJECTORY_ASK = (
+    "How many battery modules does the platform carry, and separately, "
+    "how much onboard storage do the science instruments have?"
+)
+
+
+async def s34_tool_result_carries_content(db, agent, user) -> Outcome:
+    """A REAL tool call records the string the model actually read.
+
+    Layer 1 proves the key is WRITTEN; it cannot prove a real tool run FILLS it.
+    `agent_loop_check` case 10 drives a stub tool returning a fixed string, so it
+    would pass identically if `search_corpus` returned nothing at all -- and the
+    whole point of `TOOL_RESULT.payload.content` is that a trajectory reassembled
+    months later is the conversation that actually happened.
+
+    It also asserts the content is NOT the summary. Those two strings are close
+    enough that a wiring mistake -- passing `invocation.summary` where
+    `invocation.content` was meant -- would look right in the trace panel and
+    silently turn every future trajectory into a plausible fiction.
+
+    Starves retrieval the way S3 does, so the question CANNOT be answered from
+    the first pass and a search actually happens. Restored in a `finally`.
+    """
+    prior_k, prior_n = agent.retrieve_k, agent.rerank_top_n
+    agent.retrieve_k, agent.rerank_top_n = 1, 1
+    await db.commit()
+    try:
+        out, events, _ = await ask(db, agent, user, TRAJECTORY_ASK)
+    finally:
+        agent.retrieve_k, agent.rerank_top_n = prior_k, prior_n
+        await db.commit()
+
+    results = payloads_of(events, "TOOL_RESULT")
+    if not results:
+        # The model declined to search. Not a failure of THIS assertion -- S15
+        # owns whether the model initiates -- and emphatically not a pass.
+        return unmeasured(
+            "S34 a real TOOL_RESULT carries the content the model read",
+            "no tool call this turn, so nothing was recorded to inspect",
+        )
+
+    content = results[0].get("content") or ""
+    summary = results[0].get("summary") or ""
+    return Outcome(
+        "S34 a real TOOL_RESULT carries the content the model read",
+        bool(content) and content != summary and len(content) > len(summary),
+        f"content={len(content)} chars summary={len(summary)} chars "
+        f"head={content[:56]!r}",
+    )
+
+
+async def s35_eval_run_records_the_trajectory(db, agent, user) -> Outcome:
+    """One real eval run writes `eval_results.trajectory` and the run's tool config.
+
+    **A layer-1 harness cannot prove a query runs, only that it was written** --
+    `admin_check.py` learned that when `/api/admin/spend` returned 500 on every
+    request under a fully green offline suite. The second scoring pass adds a
+    column write, a JSONB read and a judged call inside a background job, and
+    none of those is reachable from a stub.
+
+    OWNS ITS CONDITIONS. It authors ONE golden question and deactivates the rest
+    rather than running the agent's whole set: an eval run is 23-25 minutes at
+    ten questions, and a scenario nobody can afford to run is a scenario that
+    stops being run.
+
+    `expected_tool_use="search"` is set deliberately, so `tool_use_ok` comes back
+    as a real boolean rather than the None an unauthored question produces --
+    without it this scenario would pass while grading nothing, which is the S3
+    defect in a new place.
+    """
+    question = GoldenQuestion(
+        id=uuid.uuid4(),
+        agent_id=agent.id,
+        question=TRAJECTORY_ASK,
+        reference_answer=(
+            "The agent reports the number of battery modules and the science "
+            "instrument storage from the corpus."
+        ),
+        expected_behaviour="answer",
+        expected_tool_use="search",
+        is_active=True,
+        source="manual",
+        order_index=9_000,
+    )
+    run = EvalRun(
+        id=uuid.uuid4(),
+        agent_id=agent.id,
+        user_id=user.id,
+        status="pending",
+    )
+    db.add(question)
+    db.add(run)
+    await db.commit()
+
+    others = (await db.scalars(
+        select(GoldenQuestion).where(
+            GoldenQuestion.agent_id == agent.id,
+            GoldenQuestion.id != question.id,
+            GoldenQuestion.is_active.is_(True),
+        )
+    )).all()
+    try:
+        for other in others:
+            other.is_active = False
+        await db.commit()
+
+        await run_eval_job(agent.id, run.id, user.id)
+
+        await db.refresh(run)
+        rows = (await db.scalars(
+            select(EvalResult).where(EvalResult.eval_run_id == run.id)
+        )).all()
+
+        if not rows:
+            return unmeasured(
+                "S35 an eval run records the trajectory and the tool config",
+                f"the run produced no result rows (status={run.status})",
+            )
+
+        trajectory = rows[0].trajectory or {}
+        summary = run.summary or {}
+        return Outcome(
+            "S35 an eval run records the trajectory and the tool config",
+            bool(trajectory)
+            and "tool_use_ok" in trajectory
+            and run.tools_enabled is not None
+            and "trajectory" in summary,
+            f"status={run.status} tools_enabled={run.tools_enabled} "
+            f"max_tool_steps={run.max_tool_steps} "
+            f"tool_use_ok={trajectory.get('tool_use_ok')} "
+            f"goal_accuracy={trajectory.get('goal_accuracy')} "
+            f"searched={trajectory.get('searched')} "
+            f"calls_per_step={trajectory.get('calls_per_step')} "
+            f"summary_block={'yes' if 'trajectory' in summary else 'NO'}",
+        )
+    finally:
+        # A scenario owns the conditions it needs AND gives them back. Without
+        # this the fixture agent keeps a stray golden question and a stray run,
+        # and the next --run scores a set nobody authored.
+        for other in others:
+            other.is_active = True
+        await db.execute(delete(EvalResult).where(EvalResult.eval_run_id == run.id))
+        await db.delete(run)
+        await db.delete(question)
+        await db.commit()
+
 SCENARIOS = [
     s1_classic_path,
     s2_no_reflex_tools,
@@ -2972,6 +3144,10 @@ SCENARIOS = [
     # turn, so a red S33 means the classic path moved and explains S32 without
     # anyone reading a sandbox trace.
     s33_tools_off_makes_no_handout,
+    # Change set 16, last: S34 inspects a turn shaped like S3's, and S35
+    # costs a real (one-question) eval run.
+    s34_tool_result_carries_content,
+    s35_eval_run_records_the_trajectory,
     s32_tool_deck_is_rejected,
 ]
 

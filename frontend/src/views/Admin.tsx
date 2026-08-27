@@ -31,6 +31,7 @@ import type {
   AdminEvalRun,
   AdminOverview,
   AdminSpend,
+  AdminTrajectory,
   AdminTranscript,
   AdminUser,
   Measured,
@@ -38,7 +39,15 @@ import type {
 } from "../lib/types.ts";
 import { ErrorBanner, Spinner, errorMessage } from "../components/ui.tsx";
 
-type Tab = "overview" | "users" | "agents" | "conversations" | "spend" | "evals" | "audit";
+type Tab =
+  | "overview"
+  | "users"
+  | "agents"
+  | "conversations"
+  | "spend"
+  | "evals"
+  | "trajectory"
+  | "audit";
 
 const TABS: { id: Tab; label: string }[] = [
   { id: "overview", label: "Overview" },
@@ -47,6 +56,7 @@ const TABS: { id: Tab; label: string }[] = [
   { id: "conversations", label: "Conversations" },
   { id: "spend", label: "Spend" },
   { id: "evals", label: "Evaluations" },
+  { id: "trajectory", label: "Trajectory" },
   { id: "audit", label: "Audit" },
 ];
 
@@ -656,6 +666,179 @@ function Evals() {
   );
 }
 
+/**
+ * The trajectory rubric -- change set 16, PRD open item 23.
+ *
+ * The sibling of the Evaluations tab rather than a replacement: that one reports
+ * whether an ANSWER was faithful to its context, this one reports whether the
+ * agent did the right thing to produce it.
+ *
+ * Three rendering rules, each of which has shipped wrong in this file before and
+ * each of which `Admin.trajectory.test.tsx` asserts in BOTH directions:
+ *
+ *  1. **"not measured" is not 0.** A pass rate over zero authored references is
+ *     absent, not bad.
+ *  2. **A binary is not a mean.** `goal_accuracy` is 1 or 0 per turn, so it
+ *     renders "7 / 9". Showing `0.78` beside a faithfulness mean invites a
+ *     comparison between two numbers that are not commensurable.
+ *  3. **"not recorded" is not "off".** A run predating `eval_runs.tools_enabled`
+ *     cannot say what tools were doing, and cannot-say is a third state.
+ */
+function Trajectory() {
+  const { data, error, loading } = useLoad<AdminTrajectory>(
+    () => admin.trajectory(30),
+    [],
+  );
+
+  if (loading) return <Spinner label="Loading trajectory" />;
+  if (error) return <ErrorBanner error={error} />;
+  if (!data) return null;
+
+  // Deliberately NOT `value * 100`. The underlying metric is binary per turn, so
+  // the fraction it actually is remains the honest rendering.
+  const rate = (ok: number, of: number) =>
+    of === 0 ? "not measured" : `${num(ok)} / ${num(of)}`;
+
+  // `value` is the mean of a set of 1s and 0s, so multiplying it back by the
+  // denominator recovers the numerator. Rounded because floating-point division
+  // has already happened server-side.
+  const passed = (m: Measured) => Math.round((m.value ?? 0) * m.measured);
+
+  return (
+    <div className="space-y-4" data-testid="trajectory-panel">
+      <p className="rounded border border-slate-800 bg-slate-900/60 px-3 py-2 text-xs text-slate-400">
+        Whether agents achieved what they were asked, and whether they used their
+        tools the way the golden set says they should. Goal accuracy is judged by{" "}
+        <span className="text-slate-300">AgentGoalAccuracyWithReference</span> and
+        is binary per turn, so it is a pass rate rather than a mean -- it is not
+        comparable with faithfulness. Everything else here is counted from the
+        trace, not scored by a model.
+      </p>
+
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        <div
+          className="rounded-lg border border-slate-800 bg-slate-900 p-4"
+          data-testid="trajectory-metric-card"
+          data-metric="goal_accuracy"
+        >
+          <div className="text-xs font-medium uppercase tracking-wide text-slate-400">
+            Goal achieved
+          </div>
+          <div className="mt-1 text-2xl font-semibold tabular-nums text-slate-100">
+            {data.goal_accuracy.measured === 0 ? (
+              <span data-testid="trajectory-unmeasured">not measured</span>
+            ) : (
+              rate(passed(data.goal_accuracy), data.goal_accuracy.measured)
+            )}
+          </div>
+          <div className="mt-1 text-xs text-slate-400">
+            {data.goal_accuracy.measured === 0
+              ? "no turn carried a reference answer to judge against"
+              : `${num(data.goal_accuracy.measured)} of ${num(data.goal_accuracy.total)} turns judged`}
+          </div>
+        </div>
+
+        <div
+          className="rounded-lg border border-slate-800 bg-slate-900 p-4"
+          data-testid="trajectory-metric-card"
+          data-metric="tool_use_ok"
+        >
+          <div className="text-xs font-medium uppercase tracking-wide text-slate-400">
+            Tool use as expected
+          </div>
+          <div className="mt-1 text-2xl font-semibold tabular-nums text-slate-100">
+            {data.tool_use_ok.measured === 0
+              ? "not measured"
+              : rate(passed(data.tool_use_ok), data.tool_use_ok.measured)}
+          </div>
+          <div className="mt-1 text-xs text-slate-400">
+            {data.tool_use_ok.measured === 0
+              ? "no golden question set expected_tool_use"
+              : `${num(data.tool_use_ok.measured)} of ${num(data.tool_use_ok.total)} turns graded`}
+          </div>
+        </div>
+
+        <MeasuredTile
+          label="Calls per step"
+          m={data.calls_per_step}
+          format={(v) => (v === null ? "--" : v.toFixed(2))}
+        />
+
+        <Tile
+          label="Forced by gap trigger"
+          value={num(data.gap_forced)}
+          hint={`${num(data.searched)} turns searched, ${num(data.budget_exhausted)} hit the step budget`}
+        />
+      </div>
+
+      <section className="rounded-lg border border-slate-800 bg-slate-900 p-4">
+        <h3 className="text-sm font-semibold text-slate-100">
+          Runs by tool configuration
+        </h3>
+        <p className="mt-1 text-xs text-slate-400">
+          Two runs with tools toggled between them are not comparable, and until
+          change set 16 nothing recorded which was which.{" "}
+          <span className="text-slate-300">Not recorded</span> means the run
+          predates the column; it does not mean tools were off.
+        </p>
+        <div className="mt-3 flex flex-wrap gap-2 text-sm">
+          <span className="rounded bg-emerald-900/40 px-2 py-0.5 text-emerald-300">
+            tools on: {num(data.run_config.tools_on)}
+          </span>
+          <span className="rounded bg-slate-800 px-2 py-0.5 text-slate-300">
+            tools off: {num(data.run_config.tools_off)}
+          </span>
+          <span
+            className="rounded bg-amber-950/40 px-2 py-0.5 text-amber-200"
+            data-testid="trajectory-not-recorded"
+          >
+            not recorded: {num(data.run_config.not_recorded)}
+          </span>
+        </div>
+      </section>
+
+      {data.agents.length === 0 ? (
+        <p className="text-sm text-slate-400">
+          Nothing recorded yet in this window. Run an evaluation on an agent that
+          has tools enabled.
+        </p>
+      ) : (
+        <Table
+          head={[
+            "Agent",
+            "Owner",
+            "Turns",
+            "Goal achieved",
+            "Tool use",
+            "Searched",
+            "Gap-forced",
+          ]}
+        >
+          {data.agents.map((a) => (
+            <tr key={a.agent_name} data-testid="trajectory-row">
+              <td className="px-3 py-2 text-slate-100">{a.agent_name}</td>
+              <td className="px-3 py-2 text-xs text-slate-400">{a.owner_email}</td>
+              <td className="px-3 py-2 tabular-nums text-slate-300">{num(a.turns)}</td>
+              <td className="px-3 py-2 tabular-nums text-slate-300">
+                {rate(a.goal_ok, a.goal_measured)}
+              </td>
+              <td className="px-3 py-2 tabular-nums text-slate-300">
+                {rate(a.tool_ok, a.tool_measured)}
+              </td>
+              <td className="px-3 py-2 tabular-nums text-slate-300">
+                {num(a.searched)}
+              </td>
+              <td className="px-3 py-2 tabular-nums text-slate-300">
+                {num(a.gap_forced)}
+              </td>
+            </tr>
+          ))}
+        </Table>
+      )}
+    </div>
+  );
+}
+
 function Audit() {
   const { data, error, loading } = useLoad<AdminAuditEntry[]>(() => admin.audit(200), []);
   if (loading) return <Spinner label="Loading audit log" />;
@@ -739,6 +922,7 @@ export default function Admin({ onBack }: { onBack: () => void }) {
       {tab === "conversations" ? <Conversations /> : null}
       {tab === "spend" ? <SpendTab /> : null}
       {tab === "evals" ? <Evals /> : null}
+      {tab === "trajectory" ? <Trajectory /> : null}
       {tab === "audit" ? <Audit /> : null}
     </div>
   );

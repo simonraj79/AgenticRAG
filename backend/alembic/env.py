@@ -11,6 +11,9 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from app.config import settings
+# Without this, --autogenerate emits DROP TABLE for all five Better Auth
+# tables and the migration reviews cleanly. See the module docstring there.
+from app.db.migration_filter import include_object
 from app.db.models import Base
 
 config = context.config
@@ -32,6 +35,7 @@ def run_migrations_offline() -> None:
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
         compare_type=True,
+        include_object=include_object,
     )
     with context.begin_transaction():
         context.run_migrations()
@@ -42,6 +46,7 @@ def do_run_migrations(connection: Connection) -> None:
         connection=connection,
         target_metadata=target_metadata,
         compare_type=True,
+        include_object=include_object,
     )
     with context.begin_transaction():
         context.run_migrations()

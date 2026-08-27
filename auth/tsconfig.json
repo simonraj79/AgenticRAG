@@ -1,0 +1,22 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2023"],
+    // NodeNext for BOTH, because the output is run directly by `node
+    // dist/index.js` under "type": "module". That is what makes the explicit
+    // `.js` extensions in this project's relative imports correct rather than
+    // odd -- they are the specifier Node resolves at runtime, not the file
+    // TypeScript reads at build time.
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "outDir": "dist",
+    "rootDir": "src",
+    "sourceMap": true,
+    "types": ["node"]
+  },
+  "include": ["src"]
+}

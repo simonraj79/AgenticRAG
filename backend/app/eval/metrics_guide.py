@@ -99,6 +99,25 @@ class RunSummary(BaseModel):
     # golden set, or every row failed. Rendered instead of the numbers.
     note: str | None = Field(default=None)
 
+    # The trajectory rubric (change set 16): whether the agent DID the right
+    # thing, beside the four metrics above on whether its ANSWER was faithful.
+    # None means the second scoring pass did not run -- this run predates it, or
+    # `EVAL_TRAJECTORY_ENABLED` was off.
+    #
+    # **DECLARED HERE RATHER THAN MERGED INTO THE DICT, and the docstring above
+    # is why.** `eval_runs.summary` is JSONB with no enforced shape, so this
+    # model IS the schema: the runner writes through it and the API reads back
+    # through it. Pydantic's default is `extra="ignore"`, so a key written by a
+    # hand-built dict is stored happily and then **silently dropped on the way
+    # out** -- the column holds it, the API never returns it, and nothing raises
+    # at either end. That is exactly the failure this docstring warns about, and
+    # it was live for the length of one commit: the job wrote
+    # `{**run.summary, "trajectory": ...}`, S35 read the column directly and went
+    # green, and `GET /api/eval-runs/{id}` returned a summary with the block
+    # missing. Found by reading the model, not by a failing assertion.
+    # `agent_metrics_check.py` case 38 is the round-trip that now guards it.
+    trajectory: dict[str, Any] | None = None
+
 
 # --------------------------------------------------------------------------
 # The mapping. This is the deliverable.
@@ -250,6 +269,7 @@ def summarise(
     results: Iterable[Mapping[str, Any]],
     *,
     self_judged: bool = False,
+    trajectory: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Roll per-question results up into `eval_runs.summary`.
 
@@ -356,5 +376,11 @@ def summarise(
         self_judged=self_judged,
         investment=investment_for(weakest_metric) if weakest_metric else None,
         note=note,
+        # Passed IN rather than merged on afterwards. `RunSummary` is the
+        # schema for a JSONB column with no enforced shape, and pydantic's
+        # default `extra="ignore"` means a key added to the returned dict is
+        # stored and then silently dropped when the API reads it back. One
+        # writer, through the model.
+        trajectory=trajectory,
     )
     return summary.model_dump()

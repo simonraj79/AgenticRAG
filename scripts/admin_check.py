@@ -255,6 +255,43 @@ check(
 )
 
 # ---------------------------------------------------------------------------
+print()
+print("-- 6. the trajectory rubric --")
+# ---------------------------------------------------------------------------
+# Change set 16. The route itself is covered by case 1 for free -- router
+# introspection finds anything decorated with @router -- so these assert the
+# things introspection cannot see: that its rates carry denominators, and that
+# a BINARY metric is not quietly presented as a continuous one.
+
+from app.api.admin import Measured, TrajectoryOut  # noqa: E402
+
+check(
+    "6. every trajectory rate is Measured, so the denominator travels with it",
+    all(
+        TrajectoryOut.model_fields[name].annotation is Measured
+        for name in ("goal_accuracy", "tool_use_ok", "calls_per_step")
+    ),
+    "goal_accuracy, tool_use_ok, calls_per_step",
+)
+
+check(
+    "6b. run_config keeps not_recorded distinct from tools_off",
+    '"not_recorded"' in admin_api and '"tools_off"' in admin_api,
+    "a run predating the column cannot say, and cannot-say is not off",
+)
+
+# The judged half is BINARY (1 or 0 per turn), so the aggregate is a pass rate.
+# This asserts the route's own docstring says so, because the failure it guards
+# against is a reader comparing it with faithfulness -- which it is not
+# commensurable with. A docstring is the only place that fact can live on the
+# server side; the UI half is asserted by Admin.trajectory.test.tsx.
+check(
+    "6c. the route states that goal_accuracy is a pass rate, not a mean",
+    "PASS RATE" in admin_api,
+    "binary metric, rendered as 7 / 9 rather than 0.78",
+)
+
+# ---------------------------------------------------------------------------
 # --live -- execute every route against the real database.
 #
 # WHY THIS SECTION EXISTS, written the day it was needed. Everything above went
@@ -320,6 +357,16 @@ if "--live" in sys.argv:
                     "/api/admin/conversations",
                     "/api/admin/eval-runs",
                     "/api/admin/audit",
+                    # Change set 16. Added HERE as well as to R6 below,
+                    # deliberately and by hand: this list is the only thing
+                    # that EXECUTES a route, and a route absent from it ships
+                    # with exactly the defect this section was written for --
+                    # a query that compiles and does not run.
+                    "/api/admin/agent-trajectory?days=30",
+                    # Pre-existing gap, fixed while here: /account was in the
+                    # R6 403 sweep and missing from this one, so nothing ever
+                    # asserted it answers 200.
+                    "/api/admin/account",
                 ] + [
                     "/api/admin/spend?group_by=" + g + "&days=30"
                     for g in ("call_kind", "model", "user", "agent", "provider")
@@ -401,6 +448,11 @@ if "--live" in sys.argv:
                     "/api/admin/spend",
                     "/api/admin/eval-runs",
                     "/api/admin/account",
+                    # Change set 16. This is the SECOND hardcoded list a new route
+                    # has to join; neither is discovered from the router, so a
+                    # route added to one and not the other is half-covered while
+                    # both look green.
+                    "/api/admin/agent-trajectory",
                 ):
                     codes[path] = (await c.get(path)).status_code
             check(

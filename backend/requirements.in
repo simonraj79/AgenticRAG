@@ -24,6 +24,18 @@ authlib
 itsdangerous
 httpx
 
+# JWT verification for the Better Auth cutover. `pyjwt` and `cryptography`
+# were BOTH already resolved transitively, and that is exactly why they are
+# listed -- the same argument that promoted python-multipart, langchain-openai
+# and pandas/numpy above. `app/auth/jwt.py` imports them BY NAME to verify
+# every request's identity, so a future dependency bump that drops either one
+# would not fail the build; it would 401 every signed-in user in production,
+# nowhere near the change that caused it. The [crypto] extra is not optional:
+# Better Auth signs with EdDSA (Ed25519), which pyjwt cannot verify without
+# `cryptography` and which it reports as an unsupported ALGORITHM rather than
+# as a missing package.
+pyjwt[crypto]
+
 # RAG: chains, splitters, and the three provider integrations.
 #
 # langchain-text-splitters is listed explicitly on purpose. Under langchain 0.x

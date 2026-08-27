@@ -55,6 +55,7 @@ from app.db.models import (
     AuditLog,
     Conversation,
     Document,
+    EvalResult,
     EvalRun,
     Handout,
     Query as QueryRow,
@@ -166,6 +167,61 @@ class TranscriptOut(BaseModel):
     created_at: datetime
     turns: list[TurnOut]
     spend: SpendOut
+
+
+class TrajectoryAgentOut(BaseModel):
+    """One agent's trajectory record. Counts, never rates.
+
+    Rates are computed in the UI from these, so a reader can always see the
+    numerator and the denominator side by side -- `3 / 4` and `0.75` are the same
+    number and only one of them survives being read quickly.
+    """
+
+    agent_name: str
+    owner_email: str
+    turns: int
+    goal_ok: int
+    goal_measured: int
+    tool_ok: int
+    tool_measured: int
+    searched: int
+    gap_forced: int
+
+
+class TrajectoryOut(BaseModel):
+    """The trajectory rubric, aggregated across every agent.
+
+    Every rate is `Measured`, so the denominator travels with it -- this module's
+    standing rule, and the reason it exists: `0.0` over `measured=0` and `0.0`
+    over `measured=400` are completely different facts and render identically
+    once the denominator is dropped.
+    """
+
+    days: int
+    # Every scored eval turn in the window, including turns whose trajectory pass
+    # did not run. It is the denominator of everything below.
+    turns: int
+    # JUDGED: `AgentGoalAccuracyWithReference`, binary per turn, so this is a PASS
+    # RATE. Never render it in the same grammar as a faithfulness mean.
+    goal_accuracy: Measured
+    # COUNTED: did the agent use tools the way the golden question said it should.
+    # Ungraded rows (no `expected_tool_use` authored) are in `total`, not in
+    # `measured`.
+    tool_use_ok: Measured
+    # REPORTED, never graded. `max_tool_steps` bounds STEPS while this model emits
+    # 1.50-2.00 calls per step, so the retrieval budget can double with nothing
+    # raising. Nobody has authored a threshold and this is deliberately not
+    # branched on -- `score_threshold` is the standing precedent for what happens
+    # when a number is graded against a band that overlaps.
+    calls_per_step: Measured
+    searched: int
+    gap_forced: int
+    budget_exhausted: int
+    # tools_on / tools_off / not_recorded. The third is a real state: a run from
+    # before `eval_runs.tools_enabled` existed cannot say, and "cannot say" is not
+    # "off".
+    run_config: dict[str, int]
+    agents: list[TrajectoryAgentOut]
 
 
 class OverviewOut(BaseModel):
@@ -735,6 +791,122 @@ async def eval_runs(admin: AdminUser, db: DbSession) -> list[dict]:
         }
         for run, agent_name, email in rows
     ]
+
+
+# --------------------------------------------------------------------------
+# GET /api/admin/agent-trajectory
+# --------------------------------------------------------------------------
+
+@router.get("/agent-trajectory")
+async def agent_trajectory(
+    admin: AdminUser,
+    db: DbSession,
+    days: Annotated[int, Query(ge=1, le=365)] = 30,
+) -> TrajectoryOut:
+    """Whether agents DID the right thing, across every agent and every owner.
+
+    The sibling of the four Ragas metrics rather than a replacement: those score
+    the ANSWER against its context, this scores the TRAJECTORY that produced it.
+    PRD open item 23 asked for it and warned in the same sentence against
+    inventing a faithfulness-shaped score for tool choice, so the split here is
+    deliberate and visible in the response -- `goal_accuracy` is a judged metric
+    ragas ships and this repo calibrated (`agent_metrics_check.py --live` cases
+    20-23); everything else is arithmetic over `trace_events` rows.
+
+    **`goal_accuracy` is a PASS RATE, not a mean.** The underlying metric returns
+    1 or 0 per turn. It carries its denominator for that reason and the console
+    renders "7 / 9 achieved" rather than "0.78", because rendering a binary in a
+    continuous grammar invites a reader to compare it with faithfulness, which it
+    is not commensurable with.
+
+    No `_audit` row. This reads aggregates, and `admin.py`'s rule is that reading
+    a TRANSCRIPT writes an audit row while aggregates do not -- `admin_check.py`
+    case 1e asserts exactly that, so auditing here would go red.
+    """
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+
+    rows = (
+        await db.execute(
+            select(EvalResult.trajectory, Agent.name, User.email, EvalRun.id)
+            .join(EvalRun, EvalRun.id == EvalResult.eval_run_id)
+            .join(Agent, Agent.id == EvalRun.agent_id)
+            .join(User, User.id == Agent.owner_user_id)
+            .where(EvalRun.created_at >= since)
+            .order_by(EvalRun.created_at.desc())
+        )
+    ).all()
+
+    scored = [r for r in rows if r[0]]
+    total = len(rows)
+
+    def measured(values: list[float]) -> Measured:
+        return Measured(
+            value=(sum(values) / len(values)) if values else None,
+            measured=len(values),
+            total=total,
+        )
+
+    goal = [float(r[0]["goal_accuracy"]) for r in scored
+            if r[0].get("goal_accuracy") is not None]
+    tool_ok = [1.0 if r[0]["tool_use_ok"] else 0.0 for r in scored
+               if r[0].get("tool_use_ok") is not None]
+    per_step = [float(r[0]["calls_per_step"]) for r in scored
+                if r[0].get("calls_per_step") is not None]
+
+    # Per agent, so a console reader can see WHICH agent is failing rather than
+    # only that something is. Keyed on the name the owner sees.
+    by_agent: dict[str, dict[str, Any]] = {}
+    for trajectory, agent_name, email, _run_id in scored:
+        bucket = by_agent.setdefault(
+            agent_name,
+            {"agent_name": agent_name, "owner_email": email, "turns": 0,
+             "goal_ok": 0, "goal_measured": 0, "tool_ok": 0, "tool_measured": 0,
+             "searched": 0, "gap_forced": 0},
+        )
+        bucket["turns"] += 1
+        if trajectory.get("goal_accuracy") is not None:
+            bucket["goal_measured"] += 1
+            bucket["goal_ok"] += 1 if float(trajectory["goal_accuracy"]) >= 1.0 else 0
+        if trajectory.get("tool_use_ok") is not None:
+            bucket["tool_measured"] += 1
+            bucket["tool_ok"] += 1 if trajectory["tool_use_ok"] else 0
+        bucket["searched"] += 1 if trajectory.get("searched") else 0
+        bucket["gap_forced"] += 1 if trajectory.get("gap_forced") else 0
+
+    # The tool configuration runs were measured under. NULL is a third state and
+    # is counted as one: a run that predates the columns is "not recorded", which
+    # is not the same fact as tools being off, and collapsing them has shipped
+    # wrong twice in this file's own history.
+    config_rows = (
+        await db.execute(
+            select(EvalRun.tools_enabled, func.count())
+            .where(EvalRun.created_at >= since)
+            .group_by(EvalRun.tools_enabled)
+        )
+    ).all()
+    config = {"tools_on": 0, "tools_off": 0, "not_recorded": 0}
+    for enabled, count in config_rows:
+        if enabled is None:
+            config["not_recorded"] += count
+        elif enabled:
+            config["tools_on"] += count
+        else:
+            config["tools_off"] += count
+
+    return TrajectoryOut(
+        days=days,
+        turns=total,
+        goal_accuracy=measured(goal),
+        tool_use_ok=measured(tool_ok),
+        calls_per_step=measured(per_step),
+        searched=sum(1 for r in scored if r[0].get("searched")),
+        gap_forced=sum(1 for r in scored if r[0].get("gap_forced")),
+        budget_exhausted=sum(
+            1 for r in scored if r[0].get("stopped_reason") == "max_steps"
+        ),
+        run_config=config,
+        agents=sorted(by_agent.values(), key=lambda a: -a["turns"]),
+    )
 
 
 # --------------------------------------------------------------------------

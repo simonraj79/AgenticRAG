@@ -1186,6 +1186,46 @@ export type AdminEvalRun = {
   summary: Record<string, unknown> | null;
 };
 
+/**
+ * One agent's trajectory record -- COUNTS, never rates.
+ *
+ * Rates are computed here from the numerator and the denominator so both stay on
+ * screen. `3 / 4` and `0.75` are the same number and only one of them survives
+ * being read quickly.
+ */
+export type AdminTrajectoryAgent = {
+  agent_name: string;
+  owner_email: string;
+  turns: number;
+  goal_ok: number;
+  goal_measured: number;
+  tool_ok: number;
+  tool_measured: number;
+  searched: number;
+  gap_forced: number;
+};
+
+/**
+ * The trajectory rubric across every agent -- change set 16, PRD open item 23.
+ *
+ * `goal_accuracy` is a PASS RATE over a binary metric, not a mean of a
+ * continuous score, and the panel renders it as "7 / 9 achieved" for that
+ * reason. Rendering it as `0.78` beside faithfulness would invite a comparison
+ * between two numbers that are not commensurable.
+ */
+export type AdminTrajectory = {
+  days: number;
+  turns: number;
+  goal_accuracy: Measured;
+  tool_use_ok: Measured;
+  calls_per_step: Measured;
+  searched: number;
+  gap_forced: number;
+  budget_exhausted: number;
+  run_config: { tools_on: number; tools_off: number; not_recorded: number };
+  agents: AdminTrajectoryAgent[];
+};
+
 export type AdminAuditEntry = {
   id: string;
   created_at: string;
