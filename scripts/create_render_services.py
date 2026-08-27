@@ -1,4 +1,5 @@
-"""Provision the Render web service and static site.
+"""Provision the two Render web services: the API, and the app that serves
+the SPA together with Better Auth at /api/auth/*.
 
 Idempotent: existing services with the target names are reported, not recreated.
 
@@ -30,7 +31,20 @@ BRANCH = "main"
 REGION = "singapore"      # MUST be explicit - the API defaults to "oregon"
 
 BACKEND_NAME = "agentic-rag-api"
-FRONTEND_NAME = "agentic-rag-web"
+
+# The service that serves the SPA is a WEB SERVICE, not a static site, and the
+# name changed with it. `agentic-rag-web` was a static site and was deleted on
+# 2026-08-27, because it could not run Node and therefore could not host Better
+# Auth at /api/auth/*. Sign-in from it did not error: the static host answered
+# the sign-in POST with a bare 200 and an empty body, Better Auth read the 200
+# as success, no redirect URL came back, and the button spun for ever.
+#
+# Serving the SPA from the SAME process that owns /api/auth/* is what makes the
+# session cookie first-party -- onrender.com is on the Public Suffix List, so
+# two Render subdomains are different SITES and a cookie set by one is
+# third-party to the other. A topology, not a preference, and Render offers no
+# static-site -> web-service conversion.
+FRONTEND_NAME = "agentic-rag-app"
 
 # Secrets forwarded to the backend. RENDER_API_KEY is intentionally absent.
 #
@@ -152,20 +166,61 @@ def wire(token: str) -> int:
     backend_url = backend["serviceDetails"].get("url", "")
     frontend_url = frontend["serviceDetails"].get("url", "")
     redirect_uri = f"{backend_url}/api/auth/google/callback"
+    better_auth_redirect = f"{frontend_url}/api/auth/callback/google"
 
     print(f"backend  {backend_url}")
     print(f"frontend {frontend_url}\n")
 
+    # BETTER_AUTH_URL is the origin the app service answers on, which is ALSO
+    # the origin serving the SPA -- they are the same string on purpose, and
+    # `frontend_url` is that string. Both services read it and neither can be
+    # left out:
+    #
+    #   the API   derives the JWKS URL, the expected `iss` and a CORS origin
+    #             from it. Unset, every signed-in user gets a 401 and the
+    #             traceback names JSON parsing, not configuration.
+    #   the app   uses it as Better Auth's own baseURL and trustedOrigin.
+    #             Unset, the service refuses to boot -- which is the good case.
+    #
+    # It was missing here until 2026-08-27, in exactly the way this file already
+    # warns about above: a required variable has three homes and only the two
+    # exercised by running the app locally were kept in step.
+    set_env_var(token, backend["id"], "BETTER_AUTH_URL", frontend_url)
+    set_env_var(token, frontend["id"], "BETTER_AUTH_URL", frontend_url)
+
     set_env_var(token, backend["id"], "FRONTEND_URL", frontend_url)
     set_env_var(token, backend["id"], "OAUTH_REDIRECT_URI", redirect_uri)
     set_env_var(token, frontend["id"], "VITE_API_URL", backend_url)
-    print("Set FRONTEND_URL and OAUTH_REDIRECT_URI on the backend, "
-          "VITE_API_URL on the frontend.")
+    print("Set BETTER_AUTH_URL, FRONTEND_URL and OAUTH_REDIRECT_URI on the "
+          "backend, BETTER_AUTH_URL and VITE_API_URL on the app service.")
 
-    print("\n*** MANUAL STEP ***")
-    print("Add this EXACT string to the Google OAuth client's authorized")
-    print("redirect URIs (console.cloud.google.com/auth/clients):")
-    print(f"\n    {redirect_uri}\n")
+    # An env-var PUT returns 200 and does NOT restart anything. The process
+    # keeps the environment it booted with, so the API can report a value the
+    # running worker has never seen -- measured on 2026-08-27, when every
+    # request from the new frontend failed CORS while the env-var listing read
+    # correctly. Presence in the API is not presence in the PROCESS.
+    print("")
+    print("Now trigger a deploy of BOTH services, or none of the above reaches")
+    print("the running processes:")
+    print("")
+    print("  curl -s -X POST -d '{}'" )
+    print("       -H 'Content-Type: application/json'")
+    print("       -H 'Authorization: Bearer <RENDER_API_KEY>'")
+    print("       https://api.render.com/v1/services/<id>/deploys")
+
+    print("")
+    print("*** MANUAL STEP ***")
+    print("Add BOTH of these EXACT strings to the Google OAuth client's")
+    print("authorized redirect URIs (console.cloud.google.com/auth/clients).")
+    print("Google exposes no API for this:")
+    print("")
+    print(f"    {better_auth_redirect}   <- Better Auth, the live path")
+    print(f"    {redirect_uri}   <- Authlib, the legacy path")
+    print("")
+    print("The shapes differ and that is not a typo: Better Auth's is")
+    print("/api/auth/callback/{provider} on the APP service, Authlib's is")
+    print("/api/auth/google/callback on the API service. Both entries coexist")
+    print("until Authlib is removed.")
     print("Matching is exact - scheme, case and trailing slash all count.")
     return 0
 
@@ -250,31 +305,44 @@ def main() -> int:
 
     frontend = find_service(token, FRONTEND_NAME)
     if frontend:
-        print(f"\nStatic site '{FRONTEND_NAME}' already exists ({frontend['id']}).")
+        print(f"\nApp service '{FRONTEND_NAME}' already exists ({frontend['id']}).")
     else:
-        payload = {
-            "type": "static_site",
-            "name": FRONTEND_NAME,
-            "ownerId": owner_id,
-            "repo": REPO,
-            "branch": BRANCH,
-            "rootDir": "frontend",
-            "autoDeploy": "yes",
-            # The ONLY config the browser bundle receives. Never a secret.
-            "envVars": [{"key": "VITE_API_URL", "value": api_url}],
-            "serviceDetails": {
-                "buildCommand": "npm ci && npm run build",
-                "publishPath": "dist",
-            },
-        }
-        print(f"\nCreating static site '{FRONTEND_NAME}' (rootDir=frontend, "
-              f"VITE_API_URL={api_url})")
-        if dry_run:
-            print("  --dry-run; not created")
-        else:
-            created = call("POST", "/services", token, payload)
-            frontend = created.get("service", created)
-            print(f"  created: {frontend['id']}")
+        # REFUSED, DELIBERATELY, AND NOT BECAUSE IT IS HARD TO AUTOMATE.
+        #
+        # What used to be here created a STATIC SITE. That is now a broken
+        # deployment rather than a lesser one: a static site cannot run Node, so
+        # it cannot serve /api/auth/*, and the SPA it publishes looks for Better
+        # Auth on its own origin. The failure is SILENT -- Render's static host
+        # answers the sign-in POST with a bare 200 and an empty body, Better
+        # Auth reads the 200 as success, no redirect URL comes back, and the
+        # sign-in button spins for ever with no error anywhere to find. That
+        # shipped once and cost a browser session to diagnose.
+        #
+        # The replacement is a web service whose build produces BOTH halves and
+        # whose start command runs the Node process, and it holds secrets a
+        # static site never did -- BETTER_AUTH_SECRET, the Google client secret,
+        # DATABASE_URL. So it is not a two-line edit to the old payload, and
+        # provisioning it blind is not attempted. Refusing beats guessing.
+        print("")
+        print(f"ERROR: no service named '{FRONTEND_NAME}' exists, and this script")
+        print("will NOT create one. It must be a WEB SERVICE serving the SPA and")
+        print("Better Auth from ONE origin -- a static site cannot, and the")
+        print("resulting sign-in failure is silent. Create it in the dashboard:")
+        print("")
+        print("  type     web_service (Node), rootDir = repo root")
+        print("  build    cd frontend && npm ci --include=dev && npm run build &&")
+        print("           cd ../auth && npm ci --include=dev && npm run build &&")
+        print("           rm -rf public && cp -r ../frontend/dist public")
+        print("  start    cd auth && node dist/index.js")
+        print("  env      NODE_ENV=production, BETTER_AUTH_URL, BETTER_AUTH_SECRET,")
+        print("           DATABASE_URL, GOOGLE_OAUTH_CLIENT_ID, ")
+        print(f"           GOOGLE_OAUTH_CLIENT_SECRET, VITE_API_URL={api_url}")
+        print("")
+        print("`--include=dev` is not optional: NODE_ENV=production makes npm omit")
+        print("devDependencies, and `tsc -b` then cannot find its types.")
+        print("")
+        print("Then re-run with --wire. See auth/.env.example.")
+        return 1
 
     if dry_run:
         return 0

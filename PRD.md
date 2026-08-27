@@ -877,20 +877,39 @@ the first place to look if answer latency disappoints.
 
 Both Render services deploy from https://github.com/simonraj79/AgenticRAG.
 
-| | Backend (Web Service) | Frontend (Static Site) |
+| | API (Web Service) | App (Web Service) |
 |---|---|---|
-| Service name | `agentic-rag-api` | `agentic-rag-web` |
-| Hostname | `agentic-rag-api-6x6b.onrender.com` | `agentic-rag-web-e9e9.onrender.com` |
-| Root directory | `backend` | `frontend` |
+| Service name | `agentic-rag-api` | `agentic-rag-app` |
+| Service id | `srv-d9vtuhpt0dsc738dmgsg` | `srv-da7op6s9v7es73f6ivg0` |
+| Hostname | `agentic-rag-api-6x6b.onrender.com` | `agentic-rag-app-cvhu.onrender.com` |
+| Root directory | `backend` | repo root |
 | Runtime | Python 3.12.10 | Node |
-| Plan / region | `starter` / `singapore` | free / CDN |
-| Build command | `pip install -r requirements.txt` | `npm ci && npm run build` |
-| Start / publish | `alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port $PORT` | Publish `dist` |
-| Health check path | `/api/health` | — |
+| Plan / region | `starter` / `singapore` | `starter` / `singapore` |
+| Serves | every application route | the built SPA **and** Better Auth at `/api/auth/*` |
+| Build command | `pip install -r requirements.txt` | `cd frontend && npm ci --include=dev && npm run build && cd ../auth && npm ci --include=dev && npm run build && rm -rf public && cp -r ../frontend/dist public` |
+| Start command | `alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port $PORT` | `cd auth && node dist/index.js` |
+| Health check path | `/api/health` | `/healthz` (not configured on the service) |
 
-The frontend was last verified live on 2026-08-16 at commit `1874950` (`Improve empty-agent
-and creation UX`). Render published the static site from that commit. The backend skipped the
-frontend-only rebuild as intended and continued returning 200 from health/config checks.
+**The app service is a Web Service and has to be.** It replaced a Static Site,
+`agentic-rag-web` (`agentic-rag-web-e9e9.onrender.com`), which was **deleted on
+2026-08-27**. A static site cannot run Node, so it could not host Better Auth at
+`/api/auth/*` -- and because both services auto-deployed the same `frontend/`
+bundle from `main`, it kept serving a SPA that looked for an auth service it did
+not have. The failure was silent: Render's static host answered the sign-in POST
+with a bare **200 and an empty body**, Better Auth read the 200 as success, no
+redirect URL came back, and the button sat on *Redirecting to Google...* for ever.
+
+Serving the SPA from the same process that owns `/api/auth/*` is what makes the
+session cookie **first-party** -- `onrender.com` is on the Public Suffix List, so
+two Render subdomains are different SITES. Render offers no static-site to
+web-service conversion, so the `-e9e9` hostname was not recoverable.
+
+The frontend was last verified live on **2026-08-27** on the app service: `POST
+/api/auth/sign-in/social` returns a Google authorize URL whose `redirect_uri` is
+`https://agentic-rag-app-cvhu.onrender.com/api/auth/callback/google` and whose
+`scope` is exactly `email profile openid`. That probe is the one worth repeating,
+because it distinguishes a working auth service from a host that merely answers
+200 -- which is precisely how the deleted static site failed.
 
 **Binding.** The backend must bind Render's injected `$PORT` on `0.0.0.0`. Binding
 localhost passes local testing and fails Render's health check.
@@ -1015,11 +1034,12 @@ test harnesses have the setup/cleanup contracts documented in
 | Google OAuth client | ✅ **Live** | `Agentic RAG Web` · Web application · `dsai-mod-2-group-project` · **In production** · External · consent brand `Groundwork`, **shared with the `Bedtime Story Web` client in the same project** and unverified, so the screen shows the redirect host rather than either name |
 | GitHub repo | ✅ **Live** | https://github.com/simonraj79/AgenticRAG (public) · `main` synced at `1874950` |
 | Render web service | ✅ **Live** | `agentic-rag-api` · `srv-d9vtuhpt0dsc738dmgsg` · `starter` · **singapore** · https://agentic-rag-api-6x6b.onrender.com |
-| Render static site | ✅ **Live** | `agentic-rag-web` · `srv-d9vtuj61egvs73fdfang` · free · https://agentic-rag-web-e9e9.onrender.com · commit `1874950` verified |
+| Render app service | ✅ **Live** | `agentic-rag-app` · `srv-da7op6s9v7es73f6ivg0` · `starter` · **singapore** · https://agentic-rag-app-cvhu.onrender.com · serves the SPA **and** Better Auth |
+| ~~Render static site~~ | ❌ **Deleted 2026-08-27** | `agentic-rag-web` · `srv-d9vtuj61egvs73fdfang` · was https://agentic-rag-web-e9e9.onrender.com · a static site cannot run Node, so it could not host Better Auth; sign-in from it hung silently. Hostname not recoverable |
 
 **All six resources are provisioned.** Verified end to end: `/api/health` returns
 `{"status":"ok","database":"ok"}` from Singapore against the private-network Postgres, and
-the static site serves.
+the app service serves both the SPA and `/api/auth/*`.
 
 Pinecone host: `agentic-rag-ntu-o3j2ojr.svc.aps-d9bb-582b.pinecone.io`
 Pinecone tags: `embedding_model=gemini-embedding-2`, `dimension=768`, `project=agentic-rag-ntu`
