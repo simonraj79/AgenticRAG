@@ -69,6 +69,8 @@ import {
   errorMessage,
 } from "../components/ui.tsx";
 import type { Tuning } from "../components/ui.tsx";
+import { GROUPS, TUNABLES } from "../lib/tunables.ts";
+import type { TunableGroup, TunableKey } from "../lib/tunables.ts";
 import {
   ACCENT_TONE,
   BTN_PRIMARY,
@@ -79,6 +81,7 @@ import {
   EYEBROW,
   FIELD,
   FIELD_INVALID,
+  FOCUS_PROXY,
   HELP,
   LABEL,
   NOTICE,
@@ -138,6 +141,26 @@ function tuningFrom(template: Template | null): Tuning {
   };
 }
 
+/**
+ * What choosing this persona does to the settings, in one sentence.
+ *
+ * Read off the template row, so it cannot disagree with what the agent is
+ * actually created with. The two numbers are the pair that matters and the pair
+ * the labels are written to make legible together: how many passages reach the
+ * answer, and how large a pool they were chosen from. `chunk_size` is third
+ * because it is the one that only takes effect on upload.
+ *
+ * Deliberately not a rendering of all eight columns -- that already exists, on
+ * the next step, grouped and explained. This is the sentence that lets someone
+ * choose a card without going there.
+ */
+function personaSummary(template: Template): string {
+  const passages = template.rerank_enabled
+    ? `Answers from ${template.rerank_top_n} of ${template.retrieve_k} passages found`
+    : `Answers from the top ${template.rerank_top_n} of ${template.retrieve_k} passages found`;
+  return `${passages}, each about ${template.chunk_size} tokens.`;
+}
+
 function sameTuning(a: Tuning, b: Tuning): boolean {
   return (Object.keys(a) as (keyof Tuning)[]).every((key) => a[key] === b[key]);
 }
@@ -149,11 +172,255 @@ function sameTuning(a: Tuning, b: Tuning): boolean {
 const STEPS = [
   { n: 1, title: "Name", blurb: "What this agent is called" },
   { n: 2, title: "Persona", blurb: "How it answers" },
-  { n: 3, title: "Tuning", blurb: "How it retrieves" },
+  // "Settings", not "Tuning", and "how it searches and answers" rather than
+  // "how it retrieves". Four of the ten controls on this step are not
+  // retrieval at all, and one of them -- whether the agent may look something
+  // up in the middle of writing -- changes what the agent DOES rather than
+  // what it fetches. Filing that under "retrieval tuning" is the same category
+  // error as the old labels: it describes the subsystem the code lives in
+  // rather than the thing the user is deciding.
+  { n: 3, title: "Settings", blurb: "How it searches and answers" },
   { n: 4, title: "Review", blurb: "Check and create" },
 ] as const;
 
 type StepNumber = 1 | 2 | 3 | 4;
+
+/** The step whose reset notice must be cleared on the way OUT.
+ *
+ *  Derived rather than written as the literal `3` at the two places that need
+ *  it. The notice explains that changing persona has discarded customised
+ *  tuning, and it was once wiped by the same Next click that carried the user
+ *  to the only step that renders it -- a silent reset with its explanation
+ *  deleted. A later reordering of STEPS would restore exactly that bug, and
+ *  silently, because nothing about the literal says which step it meant. */
+const SETTINGS_STEP: StepNumber = 3;
+
+// --------------------------------------------------------------------------
+// Rendering the ten settings
+// --------------------------------------------------------------------------
+
+/**
+ * The ten keys in declaration order, and the members of one group.
+ *
+ * DERIVED from `TUNABLES` rather than written out as three lists. A hand-kept
+ * list of "which settings are in the upload group" is a second statement of
+ * something `tunables.ts` already says on every entry, and the copy that
+ * drifts is never the one you are reading. Adding a parameter there puts it on
+ * this screen automatically; putting it in the wrong group is then visible in
+ * one place instead of two.
+ */
+const ORDERED_KEYS = Object.keys(TUNABLES) as TunableKey[];
+
+function keysInGroup(group: TunableGroup): TunableKey[] {
+  return ORDERED_KEYS.filter((key) => TUNABLES[key].group === group);
+}
+
+/**
+ * A stored value as the user should read it.
+ *
+ * `format` is display-only and the stored value never changes: the column still
+ * holds `"markdown"`, and the wire still carries `"markdown"`. What the reader
+ * sees is *At headings*, because `recursive` and `markdown` describe the
+ * library that does the splitting rather than what will happen to their file.
+ *
+ * The `?? String(value)` is not defensive padding -- `format` is optional in
+ * the contract, and most parameters are plain numbers that need nothing.
+ */
+function displayValue(key: TunableKey, tuning: Tuning): string {
+  const raw = tuning[key];
+  return TUNABLES[key].format?.(raw) ?? String(raw);
+}
+
+/**
+ * One editable setting, chosen by key.
+ *
+ * A switch rather than ten call sites, because the alternative was ten
+ * near-identical blocks whose labels and help strings had already drifted from
+ * the ones on the settings sheet. What varies between these parameters is the
+ * CONTROL (a slider, or a two-option switch) and the guard rail; the words are
+ * `tunables.ts`'s job now, and neither surface restates them.
+ *
+ * `splitter`, `rerank_enabled` and `tools_enabled` are the three that are not
+ * numbers. Everything else is a `ParamSlider` reading its band from
+ * `SLIDER_BAND` and its bounds from `API_BOUNDS` -- the split that lets
+ * dragging stay inside the useful range while typing can still reach anything
+ * the server accepts.
+ */
+function TuningControl({
+  tunableKey,
+  tuning,
+  onEdit,
+  overlapProblem,
+  topNWarning,
+  overlapRef,
+}: {
+  tunableKey: TunableKey;
+  tuning: Tuning;
+  onEdit: (patch: Partial<Tuning>) => void;
+  overlapProblem: string | null;
+  topNWarning: string | null;
+  overlapRef: RefObject<HTMLInputElement | null>;
+}) {
+  const copy = TUNABLES[tunableKey];
+
+  switch (tunableKey) {
+    case "splitter":
+      return (
+        <Segmented
+          testId="tuning-splitter"
+          legend={copy.label}
+          tag={copy.tag}
+          name="tuning-splitter"
+          value={tuning.splitter}
+          onChange={(next) => onEdit({ splitter: next })}
+          // `value` is what is stored, `label` is what is read. They differ
+          // here on purpose and the stored side must not follow the label.
+          options={[
+            { value: "markdown", label: "At headings" },
+            { value: "recursive", label: "At paragraphs" },
+          ]}
+          help={copy.help}
+          detail={copy.detail}
+        />
+      );
+
+    case "rerank_enabled":
+      return (
+        <Segmented
+          testId="tuning-rerank"
+          legend={copy.label}
+          tag={copy.tag}
+          name="tuning-rerank"
+          value={tuning.rerank_enabled ? "on" : "off"}
+          onChange={(next) => onEdit({ rerank_enabled: next === "on" })}
+          options={[
+            { value: "on", label: "On" },
+            { value: "off", label: "Off" },
+          ]}
+          help={copy.help}
+          detail={copy.detail}
+        />
+      );
+
+    case "tools_enabled":
+      return (
+        <Segmented
+          testId="tuning-tools"
+          legend={copy.label}
+          tag={copy.tag}
+          name="tuning-tools"
+          value={tuning.tools_enabled ? "on" : "off"}
+          onChange={(next) => onEdit({ tools_enabled: next === "on" })}
+          options={[
+            { value: "on", label: "On" },
+            { value: "off", label: "Off" },
+          ]}
+          help={copy.help}
+          detail={copy.detail}
+        />
+      );
+
+    case "score_threshold":
+      return (
+        <ParamSlider
+          id="score-threshold"
+          label={copy.label}
+          tag={copy.tag}
+          value={tuning.score_threshold}
+          onChange={(next) =>
+            onEdit({
+              // Two decimals: 0.01 steps accumulate float error and the server
+              // takes a float, so 0.6100000000000001 would be stored and then
+              // shown.
+              score_threshold: Math.round(next * 100) / 100,
+            })
+          }
+          band={SLIDER_BAND.score_threshold}
+          bounds={API_BOUNDS.score_threshold}
+          decimals={2}
+          help={copy.help}
+          detail={copy.detail}
+        />
+      );
+
+    case "chunk_overlap":
+      return (
+        <ParamSlider
+          id="chunk-overlap"
+          label={copy.label}
+          tag={copy.tag}
+          value={tuning.chunk_overlap}
+          onChange={(next) => onEdit({ chunk_overlap: next })}
+          band={SLIDER_BAND.chunk_overlap}
+          bounds={API_BOUNDS.chunk_overlap}
+          // The one server rule this form duplicates, and the only one. A
+          // blocked Next sends focus here.
+          warning={overlapProblem}
+          numberRef={overlapRef}
+          help={copy.help}
+          detail={copy.detail}
+        />
+      );
+
+    case "rerank_top_n":
+      return (
+        <ParamSlider
+          id="rerank-top-n"
+          label={copy.label}
+          tag={copy.tag}
+          value={tuning.rerank_top_n}
+          onChange={(next) => onEdit({ rerank_top_n: next })}
+          band={SLIDER_BAND.rerank_top_n}
+          bounds={API_BOUNDS.rerank_top_n}
+          disabled={!tuning.rerank_enabled}
+          warning={topNWarning}
+          help={copy.help}
+          detail={copy.detail}
+        />
+      );
+
+    case "max_tool_steps":
+      return (
+        <ParamSlider
+          id="max-tool-steps"
+          label={copy.label}
+          tag={copy.tag}
+          value={tuning.max_tool_steps}
+          onChange={(next) => onEdit({ max_tool_steps: next })}
+          band={SLIDER_BAND.max_tool_steps}
+          bounds={API_BOUNDS.max_tool_steps}
+          disabled={!tuning.tools_enabled}
+          help={copy.help}
+          detail={copy.detail}
+        />
+      );
+
+    // The three remaining plain numbers. Grouped rather than repeated, because
+    // the only thing that differs is which band and which key.
+    case "chunk_size":
+    case "retrieve_k":
+    case "max_rewrites": {
+      const ids = {
+        chunk_size: "chunk-size",
+        retrieve_k: "retrieve-k",
+        max_rewrites: "max-rewrites",
+      } as const;
+      return (
+        <ParamSlider
+          id={ids[tunableKey]}
+          label={copy.label}
+          tag={copy.tag}
+          value={tuning[tunableKey]}
+          onChange={(next) => onEdit({ [tunableKey]: next } as Partial<Tuning>)}
+          band={SLIDER_BAND[tunableKey]}
+          bounds={API_BOUNDS[tunableKey]}
+          help={copy.help}
+          detail={copy.detail}
+        />
+      );
+    }
+  }
+}
 
 /**
  * The progress rail.
@@ -178,12 +445,32 @@ function StepRail({
   onJump: (step: StepNumber) => void;
 }) {
   return (
-    <nav aria-label="Progress" data-testid="wizard-rail">
+    // `sticky top-0` inside the drawer's scrolling body, with an opaque
+    // background and the panel's own horizontal padding restored by
+    // `-mx-4 px-4`. This is the direct answer to "difficult to view the entire
+    // process": the rail is the only thing that says where you are and the
+    // only way back to an earlier step, and it used to be the FIRST thing to
+    // scroll away -- on a step measured at 2.5 screens.
+    //
+    // Sticky rather than the drawer's `subheader` region, which would have
+    // meant lifting `step`, `furthest` and `goTo` out of this component and
+    // into the dashboard, so that a generic layout primitive could own a
+    // wizard's navigation state. The rail reads that state and nothing else
+    // does; keeping the two together is worth more than the region.
+    <nav
+      aria-label="Progress"
+      data-testid="wizard-rail"
+      className="sticky top-0 z-10 -mx-4 bg-surface px-4 pb-3"
+    >
       <p className={EYEBROW}>
         Step {current} of {STEPS.length} · {STEPS[current - 1].blurb}
       </p>
 
-      <ol className="mt-3 flex items-center gap-1.5 sm:gap-2">
+      {/* `flex-wrap` with `gap-y-2`: the rail's intrinsic width computes to
+          roughly 492px, which fitted the old 511px box within 1%. It is not a
+          layout that should be one word away from overflowing, and a wrapped
+          rail is legible where a clipped one is not. */}
+      <ol className="mt-3 flex flex-wrap items-center gap-x-1.5 gap-y-2 @md:gap-x-2">
         {STEPS.map((step, index) => {
           const done = step.n < current;
           const active = step.n === current;
@@ -214,14 +501,14 @@ function StepRail({
             <span
               className={`text-xs font-medium whitespace-nowrap ${
                 active ? "text-ink" : done ? "text-muted" : "text-faint"
-              } ${active ? "" : "hidden sm:inline"}`}
+              } ${active ? "" : "hidden @md:inline"}`}
             >
               {step.title}
             </span>
           );
 
           return (
-            <li key={step.n} className="flex min-w-0 items-center gap-1.5 sm:gap-2">
+            <li key={step.n} className="flex min-w-0 items-center gap-1.5 @md:gap-2">
               {reachable && !active ? (
                 <button
                   type="button"
@@ -241,7 +528,7 @@ function StepRail({
                   // carried: fading a control is the disabled affordance in
                   // this design, so using it for hover said the opposite of
                   // what was meant.
-                  className="flex min-h-11 items-center gap-2 rounded-md px-1 transition hover:bg-sunken"
+                  className="flex min-h-11 min-w-11 items-center justify-center gap-2 rounded-md px-1 transition hover:bg-sunken"
                 >
                   {circle}
                   {label}
@@ -250,7 +537,7 @@ function StepRail({
                 <span
                   data-testid={`wizard-step-${step.n}`}
                   aria-current={active ? "step" : undefined}
-                  className="flex min-h-11 items-center gap-2 px-1"
+                  className="flex min-h-11 min-w-11 items-center justify-center gap-2 px-1"
                 >
                   {circle}
                   {label}
@@ -260,7 +547,7 @@ function StepRail({
               {index < STEPS.length - 1 && (
                 <span
                   aria-hidden="true"
-                  className={`h-px w-3 shrink-0 sm:w-8 ${done ? "bg-accent" : "bg-line"}`}
+                  className={`h-px w-3 shrink-0 @md:w-8 ${done ? "bg-accent" : "bg-line"}`}
                 />
               )}
             </li>
@@ -443,16 +730,23 @@ export default function CreateAgentWizard({
 
   // The server rejects equality too, and it 422s on the merged config, so this
   // is the same rule stated one step earlier rather than a stricter one.
+  //
+  // Both labels are INTERPOLATED from `tunables.ts` rather than written out.
+  // This string named "Overlap" and "chunk size" after the relabel, so it was
+  // the last place in the frontend still using the old vocabulary -- and it is
+  // the worst possible place for it, because a message telling you which
+  // control to go and fix has to name a control you can actually see. Reading
+  // the labels means it cannot drift from them again.
   const overlapProblem =
     tuning.chunk_overlap >= tuning.chunk_size
-      ? `Overlap (${tuning.chunk_overlap}) must be smaller than chunk size (${tuning.chunk_size}).`
+      ? `${TUNABLES.chunk_overlap.label} (${tuning.chunk_overlap}) must be smaller than ${TUNABLES.chunk_size.label.toLowerCase()} (${tuning.chunk_size}).`
       : null;
 
   // Not an error: the server accepts it, and the reranker simply gets fewer
   // candidates than it was asked to return. Worth saying, not worth blocking.
   const topNWarning =
     tuning.rerank_enabled && tuning.rerank_top_n > tuning.retrieve_k
-      ? `Only ${tuning.retrieve_k} chunks are retrieved, so the reranker cannot return ${tuning.rerank_top_n}.`
+      ? `Only ${tuning.retrieve_k} passages are shortlisted, so the re-ranker cannot hand over ${tuning.rerank_top_n}.`
       : null;
 
   function problemFor(target: StepNumber): string | null {
@@ -468,7 +762,7 @@ export default function CreateAgentWizard({
     // step 3 -- the only step that renders it -- was wiping it in the same
     // click. The visible result was a silent reset, which is the exact thing the
     // notice exists to prevent.
-    if (step === 3 && target !== 3) setResetNotice(null);
+    if (step === SETTINGS_STEP && target !== SETTINGS_STEP) setResetNotice(null);
     // A failed create describes the attempt, not the form. Leaving step 4 with
     // it still set means it is waiting, unchanged, when the user comes back
     // having fixed the very thing it complains about.
@@ -605,12 +899,12 @@ export default function CreateAgentWizard({
             >
               Name this agent
             </h2>
-            <p className="mt-1.5 max-w-2xl text-sm text-muted">
+            <p className="mt-1.5 max-w-prose text-sm text-muted">
               One agent is one corpus, one persona and one isolated vector namespace. The
               name is how you will tell this one apart from the others on the dashboard.
             </p>
 
-            <div className="mt-6 max-w-xl">
+            <div className="mt-6 max-w-prose">
               <div className="flex items-baseline justify-between gap-3">
                 <label className={LABEL} htmlFor="agent-name">
                   Name{" "}
@@ -693,19 +987,45 @@ export default function CreateAgentWizard({
             >
               Choose a teaching persona
             </h2>
-            <p className="mt-1.5 max-w-2xl text-sm text-muted">
+            <p className="mt-1.5 max-w-prose text-sm text-muted">
               The persona decides how the agent answers -- what it asks back, what it
               withholds, how it refuses. It never changes what the agent may answer{" "}
               <em>from</em>: every persona is bound to this agent&rsquo;s documents alone.
             </p>
 
             {templates.length === 0 ? (
-              <p className="mt-6 text-sm text-muted">
-                No templates loaded. The agent will be created with the server&rsquo;s
-                default parameters.
+              // The one string a user only ever sees when something has already
+              // gone wrong, and it was the one place the internal word
+              // "templates" leaked into the product. It now says what happened
+              // and what will happen instead, in the words the rest of the flow
+              // uses.
+              <p className="mt-6 max-w-prose text-sm text-muted">
+                The personas could not be loaded just now. You can still create the
+                agent &mdash; it will use Groundwork&rsquo;s standard settings, and you can
+                choose a persona later in its settings.
               </p>
             ) : (
-              <div className="mt-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+              <div
+                // Keyed to the CONTAINER, not the window. `lg:grid-cols-3`
+                // asked "is the viewport at least 1024px" -- got yes on any
+                // desktop -- and laid three cards into a 511px panel at 159px
+                // each, with six of nine descriptions clamped and the category
+                // badge pushed outside the card border. The panel is what
+                // decides how many cards fit, and now it is the panel that is
+                // asked. Tailwind v4's container scale is its own set of
+                // numbers, so these are not the `sm`/`lg` names renamed:
+                // @2xl is 42rem and @4xl is 56rem, chosen so no card track
+                // falls below 260px at any panel width.
+                className="mt-6 grid gap-3 @2xl:grid-cols-2 @4xl:grid-cols-3"
+                // The only radio group in the app that had no group semantics,
+                // while `Segmented` -- a two-option control of far less
+                // consequence -- gets it right. Without it these are nine
+                // unrelated radios rather than one choice with nine options,
+                // so nothing announces "1 of 9" and nothing carries the
+                // question being asked.
+                role="radiogroup"
+                aria-labelledby="wizard-heading"
+              >
                 {templates.map((template) => {
                   const active = template.id === templateId;
                   return (
@@ -722,7 +1042,18 @@ export default function CreateAgentWizard({
                       // `:focus-visible` rule in `index.css` draws its ring with
                       // `!important`, so a second ring here would only be a
                       // second thing to keep in step.
-                      className={`${CARD_INTERACTIVE} flex cursor-pointer flex-col p-4 ${
+                      // `FOCUS_PROXY` is not decoration and the comment that
+                      // used to sit here was wrong. The real radio below is
+                      // `sr-only` -- absolutely positioned, 1px,
+                      // `clip: rect(0,0,0,0)` -- so the global
+                      // `:focus-visible` outline in `index.css` was being
+                      // painted on a clipped 1px box and was invisible. A
+                      // keyboard user had no way to tell which of nine personas
+                      // they were on. `has-[:focus-visible]` moves the ring
+                      // onto the element you can actually see, using the same
+                      // token and offset as the global rule so a proxied ring
+                      // and a real one are the same object to the eye.
+                      className={`${CARD_INTERACTIVE} ${FOCUS_PROXY} flex cursor-pointer flex-col p-4 ${
                         active ? "border-accent bg-accent-soft" : ""
                       }`}
                     >
@@ -739,6 +1070,15 @@ export default function CreateAgentWizard({
                         value={template.id}
                         checked={active}
                         onChange={() => setTemplateId(template.id)}
+                        // Without this the accessible name of each radio is
+                        // everything the <label> wraps: the name, the category
+                        // badge, the role, the description AND the whole
+                        // pedagogy paragraph. Nine radios each announcing a
+                        // paragraph is not a choice a screen-reader user can
+                        // move through. The description is still reachable --
+                        // it is text inside the group -- it is just no longer
+                        // the option's name.
+                        aria-label={template.name}
                       />
 
                       <div className="flex items-start gap-3">
@@ -762,13 +1102,26 @@ export default function CreateAgentWizard({
                         <p className="mt-3 text-sm text-muted">{template.description}</p>
                       )}
 
+                      {/* Derived from this template's own row, never a second
+                          table. It is the answer to "what does choosing this
+                          persona actually DO to the settings" -- which the
+                          wizard previously answered one step later, in a
+                          four-column grid of column names. Derived means it
+                          cannot drift from what the agent is created with. */}
+                      <p
+                        data-testid="template-summary"
+                        className={`mt-3 ${HELP}`}
+                      >
+                        {personaSummary(template)}
+                      </p>
+
                       {template.pedagogy && (
                         <p
                           className={`mt-3 border-t border-line pt-3 ${HELP} ${
                             active ? "" : "line-clamp-3"
                           }`}
                         >
-                          <span className="font-medium text-ink">Rests on: </span>
+                          <span className="font-medium text-ink">Teaching approach: </span>
                           {template.pedagogy}
                         </p>
                       )}
@@ -780,7 +1133,7 @@ export default function CreateAgentWizard({
           </section>
         )}
 
-        {/* ------------------------------------------------ Step 3: Tuning */}
+        {/* ---------------------------------------------- Step 3: Settings */}
         {step === 3 && (
           <section aria-labelledby="wizard-heading">
             <h2
@@ -789,18 +1142,30 @@ export default function CreateAgentWizard({
               tabIndex={-1}
               className="text-lg font-semibold tracking-tight text-ink outline-none"
             >
-              Retrieval tuning
+              Search and answer settings
             </h2>
-            <p className="mt-1.5 max-w-2xl text-sm text-muted">
+            <p className="mt-1.5 max-w-prose text-sm text-muted">
               These values are <em>copied</em> onto the agent when it is created. Editing
               the persona later will not re-tune an agent you already built, and neither
-              will editing these afterwards re-chunk documents you have already uploaded.
+              will editing these afterwards re-split documents you have already uploaded.
+            </p>
+            {/* The single most useful sentence on the step, and it was missing.
+                The reason to open Customize is usually not that the defaults
+                are wrong -- it is the fear of being locked into them. Saying
+                plainly that nothing here is permanent removes the pressure to
+                get it right now, which is the whole job of a creation flow. */}
+            <p className={`mt-2 ${HELP}`}>
+              Every setting here can be changed later, in the agent&rsquo;s own settings.
             </p>
 
             <div className="mt-5">
               <Segmented
                 testId="tuning-mode"
-                legend="Parameters"
+                // "Parameters" named the data structure. This names the
+                // decision -- and the options name the two things the user is
+                // actually choosing between, rather than one of them being a
+                // persona name that looks like it belongs on the previous step.
+                legend="Settings for this agent"
                 name="tuning-mode"
                 value={customizing ? "custom" : "template"}
                 onChange={(next) => {
@@ -822,15 +1187,20 @@ export default function CreateAgentWizard({
                   }
                 }}
                 options={[
-                  { value: "template", label: selected ? `Use ${selected.name}` : "Use defaults" },
-                  { value: "custom", label: "Customize" },
+                  {
+                    value: "template",
+                    label: selected
+                      ? `Use ${selected.name}'s settings`
+                      : "Use the standard settings",
+                  },
+                  { value: "custom", label: "Set them myself" },
                 ]}
                 help={
                   customizing
-                    ? "Your values are sent with the create request. The persona's system prompt is unaffected."
+                    ? "Your values are used instead of the persona's. The persona's own instructions are unaffected."
                     : selected
-                      ? `The agent is created with ${selected.name}'s values, shown below.`
-                      : "The agent is created with the server's default parameters."
+                      ? `${selected.name} comes with the settings below. This is the recommended choice.`
+                      : "The agent is created with Groundwork's standard settings, shown below."
                 }
               />
             </div>
@@ -849,195 +1219,90 @@ export default function CreateAgentWizard({
               </p>
             )}
 
-            {!customizing ? (
-              <dl
-                data-testid="template-parameters"
-                className={`${WELL} mt-5 grid grid-cols-2 gap-x-6 gap-y-3 p-4 text-xs sm:grid-cols-4`}
-              >
-                <Fact label="Chunk size" value={tuning.chunk_size} />
-                <Fact label="Overlap" value={tuning.chunk_overlap} />
-                <Fact label="Splitter" value={tuning.splitter} />
-                <Fact label="Retrieve k" value={tuning.retrieve_k} />
-                <Fact label="Rerank" value={tuning.rerank_enabled ? "on" : "off"} />
-                <Fact label="Rerank top n" value={tuning.rerank_top_n} />
-                <Fact label="Score threshold" value={tuning.score_threshold} />
-                <Fact label="Max rewrites" value={tuning.max_rewrites} />
-                <Fact label="Tools" value={tuning.tools_enabled ? "on" : "off"} />
-                <Fact label="Max tool steps" value={tuning.max_tool_steps} />
-              </dl>
-            ) : (
-              <div data-testid="tuning-sliders" className="mt-5 space-y-6">
-                <div className="grid gap-6 sm:grid-cols-2">
-                  <ParamSlider
-                    id="chunk-size"
-                    label="Chunk size"
-                    value={tuning.chunk_size}
-                    onChange={(next) => editTuning({ chunk_size: next })}
-                    band={SLIDER_BAND.chunk_size}
-                    bounds={API_BOUNDS.chunk_size}
-                    help={
-                      <>
-                        Tokens per chunk, not characters. Big enough to hold a whole idea,
-                        small enough that retrieval stays precise. 800 uses a tenth of{" "}
-                        <span className="font-mono">gemini-embedding-2</span>&rsquo;s
-                        8,192-token ceiling; past that ceiling the tail of a chunk is
-                        truncated at embed time and lost silently. Applies to new uploads.
-                      </>
-                    }
-                  />
+            {/*
+              Grouped by WHEN each setting takes effect, in both modes, using
+              the same three headings the agent-settings sheet already uses.
+              Ten controls in one flat column say that all ten are the same kind
+              of thing, and they are not: three of them do nothing until you
+              upload a document, two of them do nothing at all, and the rest are
+              read on the next question. That distinction is the most useful
+              thing anyone learns on this step, and the old layout hid it.
+            */}
+            <div data-testid="tuning-groups" className="mt-6 space-y-6">
+              {GROUPS.map((group) => {
+                const keys = keysInGroup(group.id);
+                return (
+                  <section
+                    key={group.id}
+                    data-testid={`tuning-group-${group.id}`}
+                    className={`${WELL} p-4`}
+                  >
+                    <h3 className="text-sm font-semibold text-ink">{group.title}</h3>
+                    <p className={`mt-1 max-w-prose ${HELP}`}>{group.blurb}</p>
 
-                  <ParamSlider
-                    id="chunk-overlap"
-                    label="Overlap"
-                    value={tuning.chunk_overlap}
-                    onChange={(next) => editTuning({ chunk_overlap: next })}
-                    band={SLIDER_BAND.chunk_overlap}
-                    bounds={API_BOUNDS.chunk_overlap}
-                    warning={overlapProblem}
-                    numberRef={overlapRef}
-                    help={
-                      <>
-                        Tokens repeated between neighbouring chunks, so a fact that straddles
-                        a boundary is still retrievable from one side. Every persona uses 15%
-                        of its chunk size. Applies to new uploads.
-                      </>
-                    }
-                  />
-                </div>
-
-                <Segmented
-                  testId="tuning-splitter"
-                  legend="Splitter"
-                  name="tuning-splitter"
-                  value={tuning.splitter}
-                  onChange={(next) => editTuning({ splitter: next })}
-                  options={[
-                    { value: "markdown", label: "markdown" },
-                    { value: "recursive", label: "recursive" },
-                  ]}
-                  help="markdown keeps a heading attached to the body beneath it, which is what stops a slide's title being cut away from its content. recursive splits on blank lines and sentences and ignores structure."
-                />
-
-                <div className="grid gap-6 sm:grid-cols-2">
-                  <ParamSlider
-                    id="retrieve-k"
-                    label="Retrieve k"
-                    value={tuning.retrieve_k}
-                    onChange={(next) => editTuning({ retrieve_k: next })}
-                    band={SLIDER_BAND.retrieve_k}
-                    bounds={API_BOUNDS.retrieve_k}
-                    help="How many chunks Pinecone returns for the reranker to choose from. A bigger pool is the one thing that genuinely fixes poor recall; it also costs rerank latency, measured at about 830 ms."
-                  />
-
-                  <ParamSlider
-                    id="rerank-top-n"
-                    label="Rerank top n"
-                    value={tuning.rerank_top_n}
-                    onChange={(next) => editTuning({ rerank_top_n: next })}
-                    band={SLIDER_BAND.rerank_top_n}
-                    bounds={API_BOUNDS.rerank_top_n}
-                    disabled={!tuning.rerank_enabled}
-                    warning={topNWarning}
-                    help="How many chunks actually reach the prompt. This is the operative number: it bounds how many separate places in the corpus can contribute to one answer."
-                  />
-                </div>
-
-                <Segmented
-                  testId="tuning-rerank"
-                  legend="Rerank"
-                  name="tuning-rerank"
-                  value={tuning.rerank_enabled ? "on" : "off"}
-                  onChange={(next) =>
-                    editTuning({ rerank_enabled: next === "on" })
-                  }
-                  options={[
-                    { value: "on", label: "On" },
-                    { value: "off", label: "Off" },
-                  ]}
-                  help="Cohere rerank-v3.5 reorders the retrieved candidates by relevance to the question. Precision is what reranking buys; without it the top-n is whatever the embedding happened to put there."
-                />
-
-                <div className="grid gap-6 sm:grid-cols-2">
-                  <ParamSlider
-                    id="score-threshold"
-                    label="Score threshold"
-                    value={tuning.score_threshold}
-                    onChange={(next) =>
-                      editTuning({
-                        // Two decimals: 0.01 steps accumulate float error and the
-                        // server takes a float, so 0.6100000000000001 would be
-                        // stored and then shown.
-                        score_threshold: Math.round(next * 100) / 100,
-                      })
-                    }
-                    band={SLIDER_BAND.score_threshold}
-                    bounds={API_BOUNDS.score_threshold}
-                    decimals={2}
-                    help={
-                      <>
-                        Below this top similarity score the question becomes a candidate for
-                        rewriting. It governs <em>rewriting</em>, not refusing -- refusal
-                        comes from the system prompt. Measured on one corpus, on-topic
-                        questions scored 0.61-0.67 and off-topic ones 0.49-0.58, so 0.5 sits
-                        inside the noise rather than above it.
-                      </>
-                    }
-                  />
-
-                  <ParamSlider
-                    id="max-rewrites"
-                    label="Max rewrites"
-                    value={tuning.max_rewrites}
-                    onChange={(next) => editTuning({ max_rewrites: next })}
-                    band={SLIDER_BAND.max_rewrites}
-                    bounds={API_BOUNDS.max_rewrites}
-                    help="Ceiling on the rewrite loop. Cost blowout is one of the four named agentic failure modes, and an unbounded rewrite loop is precisely how it happens. 0 turns rewriting off."
-                  />
-                </div>
-
-                <Segmented
-                  testId="tuning-tools"
-                  legend="Tools"
-                  name="tuning-tools"
-                  value={tuning.tools_enabled ? "on" : "off"}
-                  onChange={(next) => editTuning({ tools_enabled: next === "on" })}
-                  options={[
-                    { value: "on", label: "On" },
-                    { value: "off", label: "Off" },
-                  ]}
-                  // The honest cost, in one line, beside the switch that buys
-                  // it. Every other parameter on this step changes what the
-                  // agent retrieves; this one changes what it DOES, and the
-                  // thing a user notices is the wait. Generation is 89% of a
-                  // turn, so a turn that calls a tool and then generates again
-                  // is close to two turns -- but only on the turns that need it,
-                  // which is the half of the sentence that stops this reading as
-                  // a warning against switching it on.
-                  help="Lets the agent search the corpus again or write and run Python in the middle of answering, instead of working from one pass of retrieval. It adds a few seconds to the turns where it does that, and nothing to the turns where it does not."
-                />
-
-                <div className="grid gap-6 sm:grid-cols-2">
-                  <ParamSlider
-                    id="max-tool-steps"
-                    label="Max tool steps"
-                    value={tuning.max_tool_steps}
-                    onChange={(next) => editTuning({ max_tool_steps: next })}
-                    band={SLIDER_BAND.max_tool_steps}
-                    bounds={API_BOUNDS.max_tool_steps}
-                    disabled={!tuning.tools_enabled}
-                    help="Tool round-trips allowed in one turn before the loop is closed and an answer is forced. The same reasoning as max rewrites, applied to the same failure mode: a loop with no ceiling is how cost blowout actually happens. 0 leaves tools bound but unreachable, which is a slower way of saying off."
-                  />
-                </div>
-              </div>
-            )}
+                    {!customizing ? (
+                      <dl
+                        data-testid={`tuning-facts-${group.id}`}
+                        // `auto-fit` with a real minimum, not a fixed column
+                        // count. Every Fact now carries a sentence of
+                        // explanation as well as a value, so a four-column
+                        // grid at 101px -- which is what `sm:grid-cols-4`
+                        // resolved to inside the old panel -- has nowhere to
+                        // put it. The track decides how many fit; the box
+                        // decides the track.
+                        className="mt-4 grid grid-cols-[repeat(auto-fit,minmax(min(14rem,100%),1fr))] gap-x-6 gap-y-4"
+                      >
+                        {keys.map((key) => (
+                          <Fact
+                            key={key}
+                            label={TUNABLES[key].label}
+                            tag={TUNABLES[key].tag}
+                            value={displayValue(key, tuning)}
+                            raw={tuning[key]}
+                            help={TUNABLES[key].help}
+                          />
+                        ))}
+                      </dl>
+                    ) : (
+                      <div
+                        data-testid={`tuning-controls-${group.id}`}
+                        // Same `auto-fit` reasoning as the facts above, with a
+                        // wider floor: a slider needs room for its track, its
+                        // number field and a sentence, and 20rem is where that
+                        // stops being cramped. It also means the controls pair
+                        // up when the panel is wide and stack when it is not,
+                        // WITHOUT a breakpoint -- which is the bug this whole
+                        // change set is about. `sm:grid-cols-2` asked how wide
+                        // the WINDOW was and got the wrong answer inside a
+                        // 511px box.
+                        className="mt-4 grid grid-cols-[repeat(auto-fit,minmax(min(20rem,100%),1fr))] gap-x-6 gap-y-6"
+                      >
+                        {keys.map((key) => (
+                          <TuningControl
+                            key={key}
+                            tunableKey={key}
+                            tuning={tuning}
+                            onEdit={editTuning}
+                            overlapProblem={overlapProblem}
+                            topNWarning={topNWarning}
+                            overlapRef={overlapRef}
+                          />
+                        ))}
+                      </div>
+                    )}
+                  </section>
+                );
+              })}
+            </div>
 
             {selected?.system_prompt && (
-              <div className="mt-5">
-                <Reveal summary="System prompt (read-only)" testId="template-prompt">
-                  <p className={`mb-3 ${HELP}`}>
-                    The persona&rsquo;s prompt, copied onto the agent as-is. It is the
-                    control that makes the agent refuse rather than guess, so it is shown
-                    here in full and changed by choosing a different persona.
+              <div className="mt-6">
+                <Reveal summary="The persona's instructions (read-only)" testId="template-prompt">
+                  <p className={`mb-3 max-w-prose ${HELP}`}>
+                    Copied onto the agent as written. This is the control that makes the
+                    agent say &ldquo;the material does not cover that&rdquo; rather than
+                    guess, so it is shown here in full. To change it, choose a different
+                    persona.
                   </p>
                   {/* A prompt is machine text, so mono on a well -- the same
                       treatment the settings sheet gives the editable copy of
@@ -1064,7 +1329,7 @@ export default function CreateAgentWizard({
             >
               Review and create
             </h2>
-            <p className="mt-1.5 max-w-2xl text-sm text-muted">
+            <p className="mt-1.5 max-w-prose text-sm text-muted">
               Nothing is created until you press the button. The next screen asks for the
               documents this agent answers from -- it has none until you upload them.
             </p>
@@ -1089,34 +1354,59 @@ export default function CreateAgentWizard({
                     </div>
                   </div>
                 ) : (
-                  <p className="text-sm text-muted">No persona -- server defaults</p>
+                  <p className="text-sm text-muted">
+                    No persona chosen &mdash; standard settings
+                  </p>
                 )}
               </ReviewRow>
 
               <ReviewRow
                 step={3}
-                label={customizing ? "Tuning (customized)" : "Tuning"}
+                // The provenance goes in the LABEL rather than in a caption
+                // underneath. "Unchanged from the persona" sat below a grid of
+                // ten values and had to be read after them to know what they
+                // were; the label is read first, which is when the question is
+                // being asked.
+                label={
+                  customizing
+                    ? "Settings (yours)"
+                    : selected
+                      ? `Settings (from ${selected.name})`
+                      : "Settings (standard)"
+                }
                 onEdit={goTo}
               >
                 <dl
                   data-testid="review-parameters"
-                  className="grid grid-cols-2 gap-x-6 gap-y-2 text-xs sm:grid-cols-4"
+                  className="grid grid-cols-[repeat(auto-fit,minmax(min(11rem,100%),1fr))] gap-x-6 gap-y-3 text-xs"
                 >
-                  <Fact label="Chunk size" value={tuning.chunk_size} />
-                  <Fact label="Overlap" value={tuning.chunk_overlap} />
-                  <Fact label="Splitter" value={tuning.splitter} />
-                  <Fact label="Retrieve k" value={tuning.retrieve_k} />
-                  <Fact label="Rerank" value={tuning.rerank_enabled ? "on" : "off"} />
-                  <Fact label="Rerank top n" value={tuning.rerank_top_n} />
-                  <Fact label="Score threshold" value={tuning.score_threshold} />
-                  <Fact label="Max rewrites" value={tuning.max_rewrites} />
-                  <Fact label="Tools" value={tuning.tools_enabled ? "on" : "off"} />
-                  <Fact label="Max tool steps" value={tuning.max_tool_steps} />
+                  {ORDERED_KEYS.map((key) => (
+                    <Fact
+                      key={key}
+                      label={TUNABLES[key].label}
+                      tag={TUNABLES[key].tag}
+                      value={displayValue(key, tuning)}
+                      raw={tuning[key]}
+                    />
+                  ))}
                 </dl>
-                {!customizing && (
-                  <p className={`mt-2 ${HELP}`}>Unchanged from the persona.</p>
-                )}
+                {/* No `help` on these Facts, unlike step 3's. This is the last
+                    screen before an irreversible-feeling button and its job is
+                    to be scannable; the explanations are one Edit click away,
+                    on the step that exists to carry them. */}
               </ReviewRow>
+
+              {/* The review step was a subset of the agent presented as the
+                  whole of it. These two are editable in the settings sheet and
+                  appear nowhere in this flow, so a user who read every screen
+                  still did not know they existed. Naming them here is the
+                  honest minimum; making them creation-time choices is a real
+                  decision and a separate one. */}
+              <p className={`${HELP} px-1`}>
+                Two more settings &mdash; self-check and the generation model &mdash; use
+                their defaults, and can be changed in the agent&rsquo;s settings once it
+                exists.
+              </p>
             </div>
 
             {submitError && (
@@ -1195,7 +1485,7 @@ export default function CreateAgentWizard({
           The same sentence is already beside the field, in that input's
           `aria-describedby`, and a blocked Next now moves focus there.
         */}
-        {step === 3 && overlapProblem && customizing && (
+        {step === SETTINGS_STEP && overlapProblem && customizing && (
           <span data-testid="wizard-step-problem" className="text-xs text-bad">
             {overlapProblem}
           </span>

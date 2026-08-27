@@ -89,6 +89,36 @@ export const BTN_ICON = `${BTN_BASE} min-w-11 px-0 text-muted hover:bg-sunken ho
  *  only the horizontal padding and type size move. */
 export const BTN_SM = "px-2.5 text-xs";
 
+/**
+ * The focus ring for a control whose real input is `sr-only`.
+ *
+ * **This is a bug fix, not a convenience, and the bug is invisible by
+ * construction.** The pattern it repairs is a `<label>` styled as a card or a
+ * segment wrapping a visually-hidden radio -- the persona picker and every
+ * `Segmented` option. `sr-only` is `position: absolute` at 1px with
+ * `clip: rect(0,0,0,0)`, so the global `:focus-visible` ring in `index.css`
+ * lands on a clipped 1px box and is **painted where nothing is drawn**. The
+ * radio genuinely has focus; the keyboard user simply cannot see which option
+ * it is on. Nothing throws, no contrast check fires, and the markup looks
+ * correct -- the ring is present in the stylesheet and absent from the screen.
+ *
+ * The repair is to move the ring to the element that IS drawn. `:has()` is what
+ * makes that possible without JavaScript and without a `focus-within` fallback:
+ * `focus-within` would also fire on a mouse click, which is the whole reason
+ * `:focus-visible` exists and the reason this app draws no ring for pointer
+ * users.
+ *
+ * Composed onto the VISIBLE label, never onto the input:
+ *
+ *     className={`${SEGMENT_LOOK} ${FOCUS_PROXY}`}
+ *
+ * The offset matches the global rule so a proxied ring and a real one are the
+ * same object to the eye, and `outline-focus` is the same token, so it inverts
+ * with the theme like everything else here.
+ */
+export const FOCUS_PROXY =
+  "has-[:focus-visible]:outline-2 has-[:focus-visible]:outline-offset-2 has-[:focus-visible]:outline-focus";
+
 // --------------------------------------------------------------------------
 // Form fields
 // --------------------------------------------------------------------------

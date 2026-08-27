@@ -25,6 +25,8 @@ import {
   BTN_SM,
   CARD_EMPTY,
   FIELD,
+  FOCUS_PROXY,
+  HELP,
   NEUTRAL_TONE,
   NOTICE,
   OK_TONE,
@@ -220,12 +222,82 @@ export function CategoryBadge({ category }: { category?: string | null }) {
 // Data display
 // --------------------------------------------------------------------------
 
-/** One label/value pair inside a `<dl>`. Used by every parameter grid. */
-export function Fact({ label, value }: { label: string; value: string | number }) {
+/**
+ * One label/value pair inside a `<dl>`. Used by every parameter grid.
+ *
+ * **`help` exists because the mode nobody has to opt into was the only one that
+ * explained nothing.** The wizard's tuning step has two modes, and the one the
+ * user LANDS in renders all ten parameters through this component -- so every
+ * sentence of explanation in that step is attached to `ParamSlider`, which only
+ * appears once you have opted into customising. Read the flow end to end and
+ * the default path shows ten database column names and their values and never
+ * says what one of them is. The slot was missing, so the copy had nowhere to go
+ * and was simply absent; nothing about that reads as a defect in the markup.
+ *
+ * A second `<dd>` rather than a sentence folded into the first, and that is a
+ * correctness point rather than a style one: a `<dt>` may carry more than one
+ * `<dd>`, and "what the value is" and "what it means" genuinely are two
+ * descriptions of one term. Putting the prose inside the value's `<dd>` would
+ * also put it inside `font-mono`, which is this app's measurement face.
+ *
+ * Optional, because the other caller is not a parameter grid at all --
+ * `AgentSettingsSheet`'s "Fixed for the life of this agent" block states four
+ * facts ABOUT the agent (persona, category, document count, embedding model),
+ * and a sentence under each would be padding rather than teaching.
+ */
+export function Fact({
+  label,
+  tag,
+  value,
+  raw,
+  help,
+}: {
+  label: string;
+  /** The real column name, kept beside the plain-English label rather than
+   *  replaced by it.
+   *
+   *  This product exists to TEACH retrieval, so a user who reads "Shortlist
+   *  size" here and meets `retrieve_k` in the trace panel, in EVAL.md or in
+   *  the API has been handed two vocabularies and told about one. The tag is
+   *  the join between them. Quiet, because it is the second thing to read --
+   *  never the first, which is what it used to be. */
+  tag?: string;
+  value: string | number;
+  /** The stored value behind the displayed one.
+   *
+   *  `value` is what the user reads and is formatted -- "400 tokens", "At
+   *  headings". This is what is actually on the column, published the same way
+   *  `ParamSlider` publishes `data-value`, so a harness can assert that what
+   *  the review step SHOWS is what the row RECORDS without having to reverse
+   *  the display copy. A check that string-matches formatted text is a check
+   *  that breaks the next time a unit is pluralised, and it fails in the
+   *  direction that looks like a data bug. */
+  raw?: string | number | boolean;
+  /** One sentence, sitting under the value. See the note above. */
+  help?: ReactNode;
+}) {
   return (
-    <div>
-      <dt className="text-xs text-muted">{label}</dt>
+    <div data-tunable={tag} data-value={raw === undefined ? undefined : String(raw)}>
+      <dt className="text-xs text-muted">
+        {label}
+        {tag && (
+          <span className="ml-1.5 font-mono text-[0.6875rem] text-faint">{tag}</span>
+        )}
+      </dt>
       <dd className="mt-0.5 font-mono text-sm text-ink">{value}</dd>
+      {/*
+        A `data-testid` rather than a positional selector, and deliberately not
+        a unique one -- `querySelectorAll` is the intended read. A harness
+        asserting "every parameter in this mode carries a visible explanation"
+        has to find the explanations without knowing how many columns the grid
+        resolved to, and the grid's shape is exactly what the container-query
+        rework is changing underneath it.
+      */}
+      {help && (
+        <dd data-testid="fact-help" className={`mt-1 ${HELP}`}>
+          {help}
+        </dd>
+      )}
     </div>
   );
 }
@@ -385,7 +457,9 @@ export const API_BOUNDS = {
 export function ParamSlider({
   id,
   label,
+  tag,
   help,
+  detail,
   value,
   onChange,
   band,
@@ -397,7 +471,21 @@ export function ParamSlider({
 }: {
   id: string;
   label: string;
+  /** The real column name, kept beside the label. See the note on `Fact`. */
+  tag?: string;
   help: ReactNode;
+  /**
+   * The measured facts that used to be crammed into `help`, moved down one
+   * tier rather than deleted.
+   *
+   * The longest `help` string on the tuning step is 296 characters, which is a
+   * paragraph pretending to be a caption -- and a caption nobody reads is a
+   * worse outcome than a short one plus a disclosure, because the numbers in
+   * those strings (830 ms of rerank latency, the 0.61-0.67 / 0.49-0.58 score
+   * bands) are the only place this product states what it measured. Nothing is
+   * dropped; it stops being the first thing in the way.
+   */
+  detail?: ReactNode;
   value: number;
   onChange: (next: number) => void;
   band: { min: number; max: number; step: number };
@@ -421,25 +509,54 @@ export function ParamSlider({
 
   return (
     <div data-testid={`param-${id}`} data-value={value}>
+      {/* `min-w-0` on the label: a flex item's automatic minimum size is its
+          min-content, so a long label plus its mono tag refuses to wrap and
+          shoves the number field out of the row instead. */}
       <div className="flex items-baseline justify-between gap-3">
-        <label className="text-sm font-medium text-ink" htmlFor={`${id}-range`}>
+        <label className="min-w-0 text-sm font-medium text-ink" htmlFor={`${id}-range`}>
           {label}
+          {tag && (
+            <span className="ml-1.5 font-mono text-[0.6875rem] font-normal text-faint">
+              {tag}
+            </span>
+          )}
         </label>
-        <input
-          id={`${id}-number`}
-          type="number"
-          ref={numberRef}
-          data-testid={`param-${id}-number`}
-          aria-label={`${label}, exact value`}
-          disabled={disabled}
-          value={value}
-          min={bounds.min}
-          max={bounds.max}
-          step={band.step}
-          onChange={(event) => commit(event.target.value)}
-          onBlur={settle}
-          className={`${FIELD} w-24 shrink-0 px-2 text-right font-mono disabled:opacity-50`}
-        />
+        {/*
+          The width lives on a WRAPPER, and that is a bug fix rather than a
+          nesting preference.
+
+          `FIELD` carries `w-full`. Written as `${FIELD} w-24`, the two are
+          width utilities of EQUAL specificity, so which one wins is decided by
+          their order in the generated stylesheet and not by the order of the
+          string -- and `w-full` was winning. Measured at a 320px viewport: this
+          input rendered 242px wide instead of 96px and hung 152px past its own
+          column. At 1440px it was the same defect with more room to hide in,
+          which is what put the value "800" on top of the neighbouring
+          "Overlap" label.
+
+          This repo has the identical trap written down for `contents` vs
+          `hidden`. The lesson there is the lesson here: do not try to out-rank
+          a utility whose specificity you tie, because the fix is invisible in
+          the class list and one refactor from silently reverting. Remove the
+          conflict instead -- inside a 6rem box, `w-full` IS 6rem.
+        */}
+        <span className="w-24 shrink-0">
+          <input
+            id={`${id}-number`}
+            type="number"
+            ref={numberRef}
+            data-testid={`param-${id}-number`}
+            aria-label={`${label}, exact value`}
+            disabled={disabled}
+            value={value}
+            min={bounds.min}
+            max={bounds.max}
+            step={band.step}
+            onChange={(event) => commit(event.target.value)}
+            onBlur={settle}
+            className={`${FIELD} px-2 text-right font-mono disabled:opacity-50`}
+          />
+        </span>
       </div>
 
       <input
@@ -463,7 +580,7 @@ export function ParamSlider({
         className="gw-range mt-0.5"
       />
 
-      <p id={`${id}-help`} className="text-xs leading-relaxed text-muted">
+      <p id={`${id}-help`} className={HELP}>
         {help}
       </p>
 
@@ -477,15 +594,69 @@ export function ParamSlider({
         </p>
       )}
 
+      {/*
+        Below the warning, not between it and the help text, and the ordering is
+        load-bearing. The warning is about the value the slider is on RIGHT NOW
+        -- `rerank_top_n` above `retrieve_k`, an overlap at half the chunk size
+        -- so it has to stay within a glance of the control that caused it. A
+        collapsed disclosure between them is only 44px of separation while shut
+        and an unbounded amount once opened, which would push a live warning off
+        screen at exactly the moment the user is reading about the parameter.
+
+        Deliberately NOT joined to `aria-describedby`. The point of moving this
+        material down a tier is that it is not read on the way past; wiring it
+        into the description would have a screen reader announce the whole
+        paragraph on every focus, which is the 296-character caption again with
+        extra steps. It is a `<summary>`, so it is in the tab order and reachable
+        on purpose -- see the note on `Reveal`, and `focusableWithin`, which
+        keeps Tab out of it while it is shut.
+      */}
+      {detail && (
+        // The wrapper carries the spacing because `Reveal` takes no
+        // `className` -- one fixed look for every disclosure in the app is the
+        // reason it is a primitive, and a margin is not a reason to open that.
+        <div className="mt-2">
+          <Reveal summary="Why this matters" testId={`param-${id}-detail`}>
+            <div className={HELP}>{detail}</div>
+          </Reveal>
+        </div>
+      )}
+
       {decimals > 0 && <span className="sr-only">{value.toFixed(decimals)}</span>}
     </div>
   );
 }
 
-/** A two-option segmented control. Two radios that look like one switch. */
+/**
+ * A two-option segmented control. Two radios that look like one switch.
+ *
+ * **`options` already separates what is STORED from what is READ** -- each
+ * option is `{ value, label }`, the value goes on the wire and the label goes
+ * on screen. Nothing in this component needs changing to say *At headings*
+ * while sending `"markdown"`; a caller rendering a raw column value is passing
+ * it as its own label, which is a call-site decision, not a limitation here.
+ *
+ * Two things this component got wrong, both fixed below, both of the shape this
+ * repo keeps rediscovering -- the markup looks right and the thing you wanted
+ * did not happen:
+ *
+ * **The help text was orphaned.** Nine instances across two files rendered a
+ * sentence under the control that no assistive technology could connect to it:
+ * the `<p>` had no `id` and nothing referenced it. `ParamSlider` had done this
+ * correctly since it was written, which is exactly why it went unnoticed here
+ * -- the two controls sit in the same column, look equally finished, and only
+ * one of them is described.
+ *
+ * **The focus ring was painted on a clipped box.** See `FOCUS_PROXY`: the real
+ * radio is `sr-only`, so the global `:focus-visible` outline was landing on a
+ * 1px `clip: rect(0,0,0,0)` element and a keyboard user could not see which
+ * option they were on.
+ */
 export function Segmented({
   legend,
+  tag,
   help,
+  detail,
   name,
   value,
   options,
@@ -494,17 +665,55 @@ export function Segmented({
   testId,
 }: {
   legend: string;
+  /** The real column name, kept beside the legend. See the note on `Fact`. */
+  tag?: string;
   help: ReactNode;
+  /** The second tier, for parity with `ParamSlider` -- see the note on `detail`
+   *  there. A `Segmented` legend is two words and its help one sentence, so
+   *  anything measured about the option (what reranking costs, what the
+   *  splitter does to a heading) has the same nowhere-to-go problem. */
+  detail?: ReactNode;
   name: string;
   value: string;
+  /** `value` is stored, `label` is displayed. They are allowed to differ, and
+   *  on this step they should: the column says `"markdown"`, the user reads
+   *  *At headings*. */
   options: { value: string; label: string }[];
   onChange: (next: string) => void;
   disabled?: boolean;
   testId: string;
 }) {
+  /*
+    Derived from `name` rather than from a new `id` prop, because `name` is
+    already required to be unique: it is the radio group's name, and two groups
+    sharing it would be one group and a bug well before it was an id collision.
+  */
+  const helpId = `${name}-help`;
+
   return (
-    <fieldset data-testid={testId} data-value={value} disabled={disabled}>
-      <legend className="text-sm font-medium text-ink">{legend}</legend>
+    /*
+      `aria-describedby` on the FIELDSET, not on each radio. The sentence
+      describes the group -- what reranking is, what the splitter does -- not
+      the option under the cursor, and a description on each input is
+      re-announced on every arrow-key step through the group. `ParamSlider`
+      puts it on the control because there the control IS the group; here the
+      `<fieldset>`/`<legend>` pair is what maps to a group, so that is what
+      carries the description.
+    */
+    <fieldset
+      data-testid={testId}
+      data-value={value}
+      disabled={disabled}
+      aria-describedby={helpId}
+    >
+      <legend className="text-sm font-medium text-ink">
+        {legend}
+        {tag && (
+          <span className="ml-1.5 font-mono text-[0.6875rem] font-normal text-faint">
+            {tag}
+          </span>
+        )}
+      </legend>
       <div className="mt-2 inline-flex rounded-md border border-line-strong bg-sunken p-1">
         {options.map((option) => {
           const active = option.value === value;
@@ -513,7 +722,7 @@ export function Segmented({
               key={option.value}
               data-testid={`${testId}-${option.value}`}
               data-selected={active}
-              className={`flex min-h-11 cursor-pointer items-center rounded-sm px-3.5 text-sm font-medium transition ${
+              className={`flex min-h-11 cursor-pointer items-center rounded-sm px-3.5 text-sm font-medium transition ${FOCUS_PROXY} ${
                 active
                   ? "bg-surface text-ink shadow-xs"
                   : "text-muted hover:text-ink"
@@ -532,7 +741,20 @@ export function Segmented({
           );
         })}
       </div>
-      <p className="mt-2 text-xs leading-relaxed text-muted">{help}</p>
+      <p id={helpId} className={`${HELP} mt-2`}>
+        {help}
+      </p>
+
+      {/* Same tier and same reasoning as `ParamSlider`'s, minus the ordering
+          argument -- a `Segmented` has no value-driven warning to stay next
+          to, so the disclosure simply follows the help text. */}
+      {detail && (
+        <div className="mt-2">
+          <Reveal summary="Why this matters" testId={`${testId}-detail`}>
+            <div className={HELP}>{detail}</div>
+          </Reveal>
+        </div>
+      )}
     </fieldset>
   );
 }

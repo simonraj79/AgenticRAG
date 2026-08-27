@@ -34,6 +34,38 @@
  *   broken app looks like, so the group says so before you touch it.
  * - `score_threshold` and `max_rewrites` change nothing at all today. See below.
  *
+ * **The three headings are now `GROUPS`, not three strings typed here.** The
+ * create wizard renders the same three bands out of the same array, so someone
+ * who tunes an agent after making one meets the same sentence in the same place
+ * instead of learning the arrangement twice. This file cannot ITERATE `GROUPS`
+ * the way the wizard does -- see the note on `GROUP` below -- but it can stop
+ * restating what that array already says.
+ *
+ * **The words for all ten parameters come from `lib/tunables.ts`.** Every label,
+ * column tag, one-line help and "Why this matters" detail for the ten is read
+ * from that table; none of it is written here any more. The two surfaces had
+ * drifted exactly as far as two independently maintained copies do, and none of
+ * it looked like a defect from inside either file: `retrieve_k` was "How many
+ * chunks come back from the vector search before reranking" here and "How many
+ * chunks Pinecone returns for the reranker to choose from" there; the overlap
+ * was "Chunk overlap" here and "Overlap" there; the splitter's options were
+ * capitalised here and lower case there; and the Cohere rerank hop -- ONE
+ * measurement, ~830 ms -- was quoted here as 800 ms against reranking and there
+ * as 830 ms against `retrieve_k`. A number measured once and printed twice
+ * differently is the drift arriving in the material the workshop teaches from.
+ *
+ * The splitter is the one place the split between stored and displayed is load
+ * bearing: the option labels became *At headings* / *At paragraphs* and the
+ * values stayed `markdown` / `recursive`, which is what the column, the PATCH
+ * body, the trace and EVAL.md still say.
+ *
+ * **Four controls in these same sections are deliberately NOT in that table**,
+ * because they are not among the ten: `self_check_enabled`, `generation_model`,
+ * `system_prompt` and the identity fields keep their copy here. `tunables.ts` is
+ * the contract for the parameters BOTH surfaces edit -- the wizard offers none
+ * of these four -- and widening it to serve one screen would turn a shared
+ * contract into a copy deck.
+ *
  * **The two inert parameters are shown, labelled, rather than hidden.** Both were
  * confirmed by exhaustive grep over `app/` and `scripts/`: `max_rewrites` is read
  * by no code whatsoever (PRD 3.5's Stage 2 rewrite loop is unimplemented; the
@@ -81,6 +113,8 @@ import {
   errorMessage,
 } from "./ui.tsx";
 import Drawer from "./Drawer.tsx";
+import { GROUPS, TUNABLES } from "../lib/tunables.ts";
+import type { TunableGroup } from "../lib/tunables.ts";
 import {
   BTN_PRIMARY,
   BTN_SECONDARY,
@@ -125,6 +159,23 @@ const KNOWN_MODELS: { slug: string; label: string }[] = [
 
 /** Sentinel option value. Not a legal model id, because it contains no "/". */
 const CUSTOM = "__custom__";
+
+/**
+ * `GROUPS`, keyed by id.
+ *
+ * **This sheet cannot map over `GROUPS` the way the wizard does, and the four
+ * fields that are not tunables are the reason.** The generation-model select,
+ * the self-check switch and the system prompt all sit INSIDE the answer band in
+ * a deliberate order, and `Identity` and `Fixed for the life of this agent` have
+ * no `GROUPS` entry at all -- so an iteration over the three groups would either
+ * drop them or invent two more groups to hold them. The three sections stay
+ * written out and take their WORDS from here: one voice with the wizard, without
+ * claiming the two surfaces render the same list.
+ */
+const GROUP = Object.fromEntries(GROUPS.map((group) => [group.id, group])) as Record<
+  TunableGroup,
+  (typeof GROUPS)[number]
+>;
 
 /** The editable shape, flattened out of `Agent`. Strings for the three
  *  free-text fields because neither a `<textarea>` nor a `<select>` can hold
@@ -295,11 +346,21 @@ export default function AgentSettingsSheet({
   const patch = useMemo(() => buildPatch(agent, draft), [agent, draft]);
   const dirtyCount = Object.keys(patch).length;
 
-  /** The one rule duplicated client-side -- see the file docstring. Judged on
-   *  the DRAFT, which is the merged config the server will judge. */
+  /**
+   * The one rule duplicated client-side -- see the file docstring. Judged on the
+   * DRAFT, which is the merged config the server will judge.
+   *
+   * The two labels are interpolated rather than retyped. This sentence read
+   * "Overlap must be smaller than chunk size" while the controls it points at
+   * now read *Passage overlap* and *Passage size* -- the drift `tunables.ts`
+   * exists to close, reappearing one line under the two controls it closed it
+   * for. Uncased on purpose: naming a control inside a warning only works if the
+   * words match the label character for character, so the reader can pair them
+   * by sight rather than by inference.
+   */
   const overlapProblem =
     draft.chunk_overlap >= draft.chunk_size
-      ? "Overlap must be smaller than chunk size. The server will reject this."
+      ? `${TUNABLES.chunk_overlap.label} must be smaller than ${TUNABLES.chunk_size.label}. The server will reject this.`
       : null;
 
   function set<K extends keyof Draft>(key: K, value: Draft[K]) {
@@ -388,14 +449,13 @@ export default function AgentSettingsSheet({
           </div>
         </Section>
 
-        <Section
-          title="Takes effect on the next answer"
-          note="Read at query time. Save, then ask a question and the change is in it."
-        >
+        <Section title={GROUP.answer.title} note={GROUP.answer.blurb}>
           <ParamSlider
             id="settings-retrieve-k"
-            label="Retrieve k"
-            help="How many chunks come back from the vector search before reranking."
+            label={TUNABLES.retrieve_k.label}
+            tag={TUNABLES.retrieve_k.tag}
+            help={TUNABLES.retrieve_k.help}
+            detail={TUNABLES.retrieve_k.detail}
             value={draft.retrieve_k}
             onChange={(next) => set("retrieve_k", next)}
             band={SLIDER_BAND.retrieve_k}
@@ -403,8 +463,10 @@ export default function AgentSettingsSheet({
           />
 
           <Segmented
-            legend="Rerank"
-            help="A second pass that reorders the retrieved chunks by relevance. Costs about 800 ms."
+            legend={TUNABLES.rerank_enabled.label}
+            tag={TUNABLES.rerank_enabled.tag}
+            help={TUNABLES.rerank_enabled.help}
+            detail={TUNABLES.rerank_enabled.detail}
             name="settings-rerank"
             testId="settings-rerank"
             value={draft.rerank_enabled ? "on" : "off"}
@@ -417,8 +479,10 @@ export default function AgentSettingsSheet({
 
           <ParamSlider
             id="settings-rerank-top-n"
-            label="Rerank top n"
-            help="How many of the reranked chunks reach the model."
+            label={TUNABLES.rerank_top_n.label}
+            tag={TUNABLES.rerank_top_n.tag}
+            help={TUNABLES.rerank_top_n.help}
+            detail={TUNABLES.rerank_top_n.detail}
             value={draft.rerank_top_n}
             onChange={(next) => set("rerank_top_n", next)}
             band={SLIDER_BAND.rerank_top_n}
@@ -427,8 +491,10 @@ export default function AgentSettingsSheet({
           />
 
           <Segmented
-            legend="Tools"
-            help="Lets the agent search the corpus again or write and run Python mid-answer. Adds a few seconds when it does."
+            legend={TUNABLES.tools_enabled.label}
+            tag={TUNABLES.tools_enabled.tag}
+            help={TUNABLES.tools_enabled.help}
+            detail={TUNABLES.tools_enabled.detail}
             name="settings-tools"
             testId="settings-tools"
             value={draft.tools_enabled ? "on" : "off"}
@@ -451,6 +517,12 @@ export default function AgentSettingsSheet({
             It is not disabled when `tools_enabled` is off, unlike the step
             slider above. The two are independent: an agent with no tools still
             drafts an answer that can cite something it was never given.
+
+            Hand-written, unlike the ten around it, and that is correct rather
+            than an oversight: `self_check_enabled` is not a `TunableKey`. The
+            create wizard does not offer this switch, so an eleventh entry in
+            `tunables.ts` would be a string with exactly one reader living in a
+            file whose whole justification is having two.
           */}
           <Segmented
             legend="Self-check"
@@ -533,8 +605,10 @@ export default function AgentSettingsSheet({
 
           <ParamSlider
             id="settings-max-tool-steps"
-            label="Max tool steps"
-            help="A ceiling, not a target. Most turns use none; the loop is closed and an answer forced when this runs out."
+            label={TUNABLES.max_tool_steps.label}
+            tag={TUNABLES.max_tool_steps.tag}
+            help={TUNABLES.max_tool_steps.help}
+            detail={TUNABLES.max_tool_steps.detail}
             value={draft.max_tool_steps}
             onChange={(next) => set("max_tool_steps", next)}
             band={SLIDER_BAND.max_tool_steps}
@@ -565,14 +639,13 @@ export default function AgentSettingsSheet({
           </div>
         </Section>
 
-        <Section
-          title="Takes effect on the next upload"
-          note="Read at ingest time. Documents already indexed keep the chunking they were ingested with -- re-upload to apply a change."
-        >
+        <Section title={GROUP.upload.title} note={GROUP.upload.blurb}>
           <ParamSlider
             id="settings-chunk-size"
-            label="Chunk size"
-            help="Tokens per chunk when a document is split."
+            label={TUNABLES.chunk_size.label}
+            tag={TUNABLES.chunk_size.tag}
+            help={TUNABLES.chunk_size.help}
+            detail={TUNABLES.chunk_size.detail}
             value={draft.chunk_size}
             onChange={(next) => set("chunk_size", next)}
             band={SLIDER_BAND.chunk_size}
@@ -581,8 +654,10 @@ export default function AgentSettingsSheet({
 
           <ParamSlider
             id="settings-chunk-overlap"
-            label="Chunk overlap"
-            help="Tokens each chunk repeats from the one before, so a sentence split across a boundary is still retrievable."
+            label={TUNABLES.chunk_overlap.label}
+            tag={TUNABLES.chunk_overlap.tag}
+            help={TUNABLES.chunk_overlap.help}
+            detail={TUNABLES.chunk_overlap.detail}
             value={draft.chunk_overlap}
             onChange={(next) => set("chunk_overlap", next)}
             band={SLIDER_BAND.chunk_overlap}
@@ -591,28 +666,39 @@ export default function AgentSettingsSheet({
           />
 
           <Segmented
-            legend="Splitter"
-            help="Markdown splits on headings and keeps sections whole; recursive splits on paragraphs and sentences."
+            legend={TUNABLES.splitter.label}
+            tag={TUNABLES.splitter.tag}
+            help={TUNABLES.splitter.help}
+            detail={TUNABLES.splitter.detail}
             name="settings-splitter"
             testId="settings-splitter"
             value={draft.splitter}
+            // `value` is STORED and `label` is READ, and only the label moved.
+            // The column, the PATCH body, the trace and EVAL.md all still say
+            // `markdown` / `recursive`; "Markdown" and "Recursive" named the
+            // splitter class, which says nothing about what happens to a file.
+            // `buildPatch` casts `draft.splitter` to those two literals, so a
+            // display label leaking into `value` would arrive as a 422 from the
+            // server rather than as a compile error here.
             options={[
-              { value: "markdown", label: "Markdown" },
-              { value: "recursive", label: "Recursive" },
+              { value: "markdown", label: "At headings" },
+              { value: "recursive", label: "At paragraphs" },
             ]}
             onChange={(next) => set("splitter", next)}
           />
         </Section>
 
         <Section
-          title="Recorded, but changes nothing today"
-          note="Both are saved and both appear in the trace. Neither is read by any code path in this build, so changing them will not change an answer. They are shown rather than hidden because the trace prints score_threshold on every turn."
+          title={GROUP.inert.title}
+          note={GROUP.inert.blurb}
           testId="settings-inert"
         >
           <ParamSlider
             id="settings-score-threshold"
-            label="Score threshold"
-            help="Specified as the trigger for the Stage 2 rewrite loop. Measured on this corpus, on-topic questions scored 0.61-0.67 and off-topic 0.49-0.58, so 0.5 sits inside the overlap -- which is why the loop reads the model's own words instead. Refusal comes from the prompt, never from this number."
+            label={TUNABLES.score_threshold.label}
+            tag={TUNABLES.score_threshold.tag}
+            help={TUNABLES.score_threshold.help}
+            detail={TUNABLES.score_threshold.detail}
             value={draft.score_threshold}
             onChange={(next) => set("score_threshold", next)}
             band={SLIDER_BAND.score_threshold}
@@ -622,8 +708,10 @@ export default function AgentSettingsSheet({
 
           <ParamSlider
             id="settings-max-rewrites"
-            label="Max rewrites"
-            help="Would bound the Stage 2 rewrite loop, which is not implemented. The only rewriter in this build is history contextualisation, which turns 'what is its power budget?' into a standalone question -- it is triggered by a pronoun, not by a score, and is not bounded by this."
+            label={TUNABLES.max_rewrites.label}
+            tag={TUNABLES.max_rewrites.tag}
+            help={TUNABLES.max_rewrites.help}
+            detail={TUNABLES.max_rewrites.detail}
             value={draft.max_rewrites}
             onChange={(next) => set("max_rewrites", next)}
             band={SLIDER_BAND.max_rewrites}
