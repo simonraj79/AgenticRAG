@@ -193,6 +193,34 @@ if jwt_imported:
     check("10. an expired token is rejected", rejects(mint(exp=int(time.time()) - 60)))
     check("11. a wrong issuer is rejected", rejects(mint(iss="https://evil.example")))
     check("12. a wrong audience is rejected", rejects(mint(aud="https://evil.example")))
+    # THE CASE THAT WAS MISSING, AND THE BUG IT LET THROUGH.
+    #
+    # Every case above passes `audience=AUD` against a token that carries `aud`,
+    # so the pairing was never varied. Better Auth SETS `aud` (to its baseURL),
+    # while `BETTER_AUTH_AUDIENCE` is empty by default -- so production ran the
+    # one combination no case covered, and pyjwt does NOT treat `audience=None`
+    # as "skip": `_validate_aud` raises InvalidAudienceError when the token has
+    # an `aud` the caller did not ask for. Every signed-in user got a 401 with a
+    # verifier that was, by every existing assertion, correct.
+    #
+    # This asserts the SEMANTICS this module documents -- "empty means do not
+    # verify aud" -- rather than the behaviour pyjwt happens to have.
+    _no_aud_configured = None
+    try:
+        _no_aud_configured = verify_token(mint(), JWKS, issuer=ISS, audience=None)
+    except InvalidToken as exc:
+        print(f"       audience=None rejected a token carrying aud: {exc}")
+    check(
+        "12b. audience=None ACCEPTS a token that carries aud",
+        (_no_aud_configured or {}).get("sub") == "google-sub-123",
+        "pyjwt reads audience=None as 'assert no aud', not as 'do not check'",
+    )
+    check(
+        "12c. a configured audience is still enforced",
+        rejects(mint(aud="https://evil.example")),
+        "the fix must not disable the check when one IS configured",
+    )
+
     check("13. a tampered payload is rejected", rejects(good[:-4] + "AAAA"))
     check("14. garbage is rejected, not raised as ValueError", rejects("not.a.token"))
 

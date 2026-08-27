@@ -204,7 +204,21 @@ def verify_token(
     except pyjwt.PyJWTError as exc:
         raise InvalidToken("key could not be loaded") from exc
 
-    options = {"require": ["exp", "iss", "sub"]}
+    options: dict[str, Any] = {"require": ["exp", "iss", "sub"]}
+    if audience is None:
+        # NOT redundant, and the reason is a pyjwt behaviour that reads exactly
+        # backwards from the intent. `audience=None` does not mean "do not check
+        # the audience" -- `_validate_aud` raises InvalidAudienceError when the
+        # TOKEN carries an `aud` the caller did not ask for. So a verifier
+        # configured with no audience rejects every token that has one.
+        #
+        # Better Auth always sets `aud` (to its baseURL), and
+        # `BETTER_AUTH_AUDIENCE` is empty by default, so that is the SHIPPED
+        # combination: a correct token, a correct verifier, and a 401 for every
+        # signed-in user. Found in the browser, not by the harness -- every case
+        # paired a token carrying `aud` with a caller that passed one, so the
+        # pairing was never varied. `auth_check.py` case 12b is that gap closed.
+        options["verify_aud"] = False
     try:
         return pyjwt.decode(
             token,
@@ -213,9 +227,9 @@ def verify_token(
             # is what rejects `alg: none` and the HS256 confusion above.
             algorithms=[algorithm],
             issuer=issuer,
-            # `audience=None` tells pyjwt not to verify `aud` at all, which is
-            # correct when the auth service is not configured to set one --
-            # passing a wrong string would be worse than passing none.
+            # Paired with `verify_aud: False` above when this is None. On its
+            # own it would REJECT any token carrying an `aud`; see the options
+            # block for why that is the opposite of what it reads like.
             audience=audience,
             leeway=leeway,
             options=options,
