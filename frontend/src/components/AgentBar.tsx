@@ -38,6 +38,7 @@
  */
 
 import type { Agent } from "../lib/types.ts";
+import { BTN_ICON, TAB, TAB_ACTIVE, TAB_INACTIVE } from "../lib/styles.ts";
 import { CategoryBadge, PersonaIcon, StatusPill } from "./ui.tsx";
 
 export type ViewId = "workspace" | "sources" | "evaluate";
@@ -95,16 +96,20 @@ export default function AgentBar({
   return (
     <div
       data-testid="agent-bar"
-      className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1 border-b border-slate-800 px-3 py-1 sm:px-6"
+      // A hairline, not a shadow and not a filled strip. In a design whose
+      // structure IS its rules, a border-bottom is the whole of what separates
+      // the bar from the workspace -- and it costs no height, which is the
+      // constraint this file exists to honour.
+      className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1 border-b border-line px-3 py-1 sm:px-6"
     >
       <button
         type="button"
         data-testid="agent-back"
         onClick={onBack}
         aria-label="Back to all agents"
-        // `min-w-11` as well as `min-h-11`: the wizard already records that
-        // height alone is not a touch target, and this is icon-only.
-        className="min-h-11 min-w-11 rounded-md text-slate-400 transition hover:text-slate-200"
+        // `BTN_ICON` carries `min-h-11 min-w-11`: the wizard already records
+        // that height alone is not a touch target, and this is icon-only.
+        className={BTN_ICON}
       >
         <span aria-hidden="true" className="text-lg">
           &larr;
@@ -117,7 +122,7 @@ export default function AgentBar({
           `min-width: auto` refuses to shrink below its content, so without it a
           long agent name pushes the status pill and `[...]` off the row. */}
       <div className="flex min-w-0 flex-1 items-center gap-2">
-        <h1 className="truncate text-sm font-semibold tracking-tight text-slate-100 sm:text-base">
+        <h1 className="truncate text-sm font-semibold tracking-tight text-ink sm:text-base">
           {agent.name}
         </h1>
         <StatusPill status={agent.status} />
@@ -129,7 +134,14 @@ export default function AgentBar({
       {/* Reference material, and the first thing to go when the row is tight.
           Hidden below `lg` rather than truncated: half a parameter summary is
           worse than none, because `k=3 · rerank top...` reads as a value. */}
-      <span className="hidden text-xs text-slate-400 lg:inline">{summary}</span>
+      {/* Sans, and deliberately NOT `font-mono` despite being mostly numbers.
+          This row must stay ONE row -- `ui_check.py` A1 caps the chrome above
+          the workspace at 140px, and the container is `flex-wrap`. JetBrains
+          Mono is materially wider than Instrument Sans at the same size, so
+          setting a ~60-character string in it is a real chance of pushing the
+          tab strip onto a second line. Mono belongs on an isolated number, not
+          on a sentence that happens to contain four. */}
+      <span className="hidden text-xs text-muted lg:inline">{summary}</span>
 
       {/* `order-last w-full` below `sm` puts this on its own line; at `sm` it
           returns to the row. One node, two layouts -- see the file docstring. */}
@@ -146,11 +158,11 @@ export default function AgentBar({
               data-testid={entry.testId}
               aria-current={active ? "page" : undefined}
               onClick={() => onView(entry.id)}
-              className={`min-h-11 flex-1 rounded-md px-3 text-sm font-medium transition sm:flex-none ${
-                active
-                  ? "bg-slate-800 text-slate-100"
-                  : "text-slate-400 hover:bg-slate-900 hover:text-slate-200"
-              }`}
+              // The ONE tab treatment (`lib/styles.ts`). This strip was one of
+              // the five different looks the audit found for "this one is
+              // selected"; `aria-current` above is how it IS selected, and
+              // `TAB_ACTIVE` is only how that looks.
+              className={`${TAB} flex-1 sm:flex-none ${active ? TAB_ACTIVE : TAB_INACTIVE}`}
             >
               {entry.label}
             </button>
@@ -165,7 +177,12 @@ export default function AgentBar({
         onClick={onOpenSettings}
         aria-label="Agent settings"
         aria-haspopup="dialog"
-        className="min-h-11 min-w-11 rounded-md border border-slate-700 bg-slate-900 text-slate-300 transition hover:border-slate-600 hover:text-slate-100"
+        // `BTN_ICON` plus a border, rather than `BTN_SECONDARY` narrowed with
+        // `px-0`. The two would be padding utilities of equal specificity, so
+        // which one won would depend on their order in the generated stylesheet
+        // rather than on this string -- the same trap `index.css` records for
+        // `contents`/`hidden`. `BTN_ICON` adds nothing this composes over.
+        className={`${BTN_ICON} border border-line-strong bg-surface`}
       >
         {/* Drawn rather than typed. A literal "..." is three full stops that a
             screen reader announces as an ellipsis and that shift with the font;

@@ -69,6 +69,22 @@ import {
   errorMessage,
 } from "../components/ui.tsx";
 import type { Tuning } from "../components/ui.tsx";
+import {
+  ACCENT_TONE,
+  BTN_PRIMARY,
+  BTN_SECONDARY,
+  BTN_SM,
+  CARD,
+  CARD_INTERACTIVE,
+  EYEBROW,
+  FIELD,
+  FIELD_INVALID,
+  HELP,
+  LABEL,
+  NOTICE,
+  PILL,
+  WELL,
+} from "../lib/styles.ts";
 
 // --------------------------------------------------------------------------
 // Shape of the tunables
@@ -163,7 +179,7 @@ function StepRail({
 }) {
   return (
     <nav aria-label="Progress" data-testid="wizard-rail">
-      <p className="text-xs font-medium tracking-wide text-slate-400 uppercase">
+      <p className={EYEBROW}>
         Step {current} of {STEPS.length} · {STEPS[current - 1].blurb}
       </p>
 
@@ -173,15 +189,21 @@ function StepRail({
           const active = step.n === current;
           const reachable = step.n <= furthest;
 
+          // The rail reads as PROGRESS rather than as three decorated states:
+          // a step behind you is filled in, the one you are on is outlined in
+          // the same colour, and one you have not reached is a plain hairline.
+          // Ink-filled would have been the alternative and is wrong here --
+          // filled ink is the primary ACTION in this palette (Next, Create),
+          // and the rail is a position indicator, not a button.
           const circle = (
             <span
               aria-hidden="true"
               className={`inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full border text-xs font-semibold transition ${
-                active
-                  ? "border-emerald-400 bg-emerald-500 text-emerald-950"
-                  : done
-                    ? "border-emerald-800/70 bg-emerald-950/50 text-emerald-300"
-                    : "border-slate-700 bg-slate-900 text-slate-400"
+                done
+                  ? "border-accent bg-accent text-inverse"
+                  : active
+                    ? "border-accent bg-surface text-accent"
+                    : "border-line bg-surface text-faint"
               }`}
             >
               {done ? "✓" : step.n}
@@ -191,7 +213,7 @@ function StepRail({
           const label = (
             <span
               className={`text-xs font-medium whitespace-nowrap ${
-                active ? "text-slate-100" : done ? "text-slate-300" : "text-slate-400"
+                active ? "text-ink" : done ? "text-muted" : "text-faint"
               } ${active ? "" : "hidden sm:inline"}`}
             >
               {step.title}
@@ -214,7 +236,12 @@ function StepRail({
                   // app carries it. The rail is the primary navigation of the
                   // flow that was rebuilt for mobile, and it was the smallest
                   // hit area on the screen at 36x36.
-                  className="flex min-h-11 items-center gap-2 rounded-md px-1 transition hover:opacity-80"
+                  // `hover:bg-sunken`, the same hover every other quiet control
+                  // in the app uses, rather than the `hover:opacity-80` this
+                  // carried: fading a control is the disabled affordance in
+                  // this design, so using it for hover said the opposite of
+                  // what was meant.
+                  className="flex min-h-11 items-center gap-2 rounded-md px-1 transition hover:bg-sunken"
                 >
                   {circle}
                   {label}
@@ -233,9 +260,7 @@ function StepRail({
               {index < STEPS.length - 1 && (
                 <span
                   aria-hidden="true"
-                  className={`h-px w-3 shrink-0 sm:w-8 ${
-                    done ? "bg-emerald-800/70" : "bg-slate-800"
-                  }`}
+                  className={`h-px w-3 shrink-0 sm:w-8 ${done ? "bg-accent" : "bg-line"}`}
                 />
               )}
             </li>
@@ -250,8 +275,11 @@ function StepRail({
 // Controls
 // --------------------------------------------------------------------------
 
-const INPUT_CLASS =
-  "min-h-11 w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 outline-none focus:border-slate-500";
+// `INPUT_CLASS` was defined here, and the two other files that used the
+// identical string had copy-pasted it rather than imported it -- which is the
+// specific finding `lib/styles.ts` exists to answer. It is now `FIELD`, in one
+// place, and the invalid state that used to be spelled out inline at the one
+// call site that needed it is `FIELD_INVALID` beside it.
 
 // `ParamSlider` and `Segmented` were defined here and are now imported from
 // `components/ui.tsx`, unchanged. They moved because the agent-settings sheet
@@ -565,7 +593,7 @@ export default function CreateAgentWizard({
     >
       <StepRail current={step} furthest={furthest} onJump={goTo} />
 
-      <div className="mt-5 flex-1 border-t border-slate-800 pt-5">
+      <div className="mt-5 flex-1 border-t border-line pt-5">
         {/* -------------------------------------------------- Step 1: Name */}
         {step === 1 && (
           <section aria-labelledby="wizard-heading">
@@ -573,26 +601,30 @@ export default function CreateAgentWizard({
               id="wizard-heading"
               ref={headingRef}
               tabIndex={-1}
-              className="text-lg font-semibold text-slate-100 outline-none"
+              className="text-lg font-semibold tracking-tight text-ink outline-none"
             >
               Name this agent
             </h2>
-            <p className="mt-1 max-w-2xl text-sm text-slate-400">
+            <p className="mt-1.5 max-w-2xl text-sm text-muted">
               One agent is one corpus, one persona and one isolated vector namespace. The
               name is how you will tell this one apart from the others on the dashboard.
             </p>
 
             <div className="mt-6 max-w-xl">
               <div className="flex items-baseline justify-between gap-3">
-                <label className="text-sm font-medium text-slate-200" htmlFor="agent-name">
+                <label className={LABEL} htmlFor="agent-name">
                   Name{" "}
-                  <span className="rounded border border-emerald-800/70 bg-emerald-950/40 px-1.5 py-0.5 text-[0.65rem] font-semibold tracking-wide text-emerald-300 uppercase">
+                  {/* The accent, on the one field the whole flow is gated by.
+                      It is the same colour the citation markers use, and that
+                      is deliberate rather than a reuse of convenience: both say
+                      "this is the load-bearing thing on the page". */}
+                  <span className={`${PILL} ${ACCENT_TONE} tracking-[0.04em] uppercase`}>
                     Required
                   </span>
                 </label>
                 <span
-                  className={`font-mono text-xs ${
-                    trimmedName.length > MAX_NAME_LENGTH ? "text-rose-300" : "text-slate-400"
+                  className={`font-mono text-xs tabular-nums ${
+                    trimmedName.length > MAX_NAME_LENGTH ? "text-bad" : "text-muted"
                   }`}
                 >
                   {trimmedName.length}/{MAX_NAME_LENGTH}
@@ -611,9 +643,7 @@ export default function CreateAgentWizard({
                 aria-invalid={showNameProblem ? true : undefined}
                 aria-describedby={showNameProblem ? "agent-name-error" : "agent-name-hint"}
                 placeholder="Topic 10 Lecture"
-                className={`mt-2 ${INPUT_CLASS} ${
-                  showNameProblem ? "border-rose-700 focus:border-rose-500" : ""
-                }`}
+                className={`${FIELD} mt-2 ${showNameProblem ? FIELD_INVALID : ""}`}
               />
 
               {showNameProblem ? (
@@ -621,23 +651,20 @@ export default function CreateAgentWizard({
                   id="agent-name-error"
                   role="alert"
                   data-testid="agent-name-error"
-                  className="mt-2 text-xs text-rose-300"
+                  className="mt-2 text-xs text-bad"
                 >
                   {nameProblem}
                 </p>
               ) : (
-                <p id="agent-name-hint" className="mt-2 text-xs text-slate-400">
+                <p id="agent-name-hint" className={`mt-2 ${HELP}`}>
                   Required. Name it after the material it will answer from -- a topic, a
                   module, a handbook.
                 </p>
               )}
 
               <div className="mt-5">
-                <label
-                  className="text-sm font-medium text-slate-200"
-                  htmlFor="agent-description"
-                >
-                  Description <span className="font-normal text-slate-400">(optional)</span>
+                <label className={LABEL} htmlFor="agent-description">
+                  Description <span className="font-normal text-muted">(optional)</span>
                 </label>
                 <input
                   id="agent-description"
@@ -645,9 +672,9 @@ export default function CreateAgentWizard({
                   value={description}
                   onChange={(event) => setDescription(event.target.value)}
                   placeholder="What this agent knows about"
-                  className={`mt-2 ${INPUT_CLASS}`}
+                  className={`${FIELD} mt-2`}
                 />
-                <p className="mt-2 text-xs text-slate-400">
+                <p className={`mt-2 ${HELP}`}>
                   Shown under the name on the dashboard card.
                 </p>
               </div>
@@ -662,18 +689,18 @@ export default function CreateAgentWizard({
               id="wizard-heading"
               ref={headingRef}
               tabIndex={-1}
-              className="text-lg font-semibold text-slate-100 outline-none"
+              className="text-lg font-semibold tracking-tight text-ink outline-none"
             >
               Choose a teaching persona
             </h2>
-            <p className="mt-1 max-w-2xl text-sm text-slate-400">
+            <p className="mt-1.5 max-w-2xl text-sm text-muted">
               The persona decides how the agent answers -- what it asks back, what it
               withholds, how it refuses. It never changes what the agent may answer{" "}
               <em>from</em>: every persona is bound to this agent&rsquo;s documents alone.
             </p>
 
             {templates.length === 0 ? (
-              <p className="mt-6 text-sm text-slate-400">
+              <p className="mt-6 text-sm text-muted">
                 No templates loaded. The agent will be created with the server&rsquo;s
                 default parameters.
               </p>
@@ -687,10 +714,16 @@ export default function CreateAgentWizard({
                       data-testid="template-card"
                       data-template-slug={template.slug}
                       data-selected={active}
-                      className={`flex cursor-pointer flex-col rounded-xl border p-4 transition focus-within:ring-2 focus-within:ring-emerald-500/60 ${
-                        active
-                          ? "border-emerald-500/70 bg-emerald-950/20"
-                          : "border-slate-800 bg-slate-950/50 hover:border-slate-700"
+                      // Selection is an accent border and an accent-soft fill --
+                      // the same pair `ROW_ACTIVE` uses for a selected
+                      // conversation, so "this one is chosen" looks the same
+                      // wherever it is said. No `focus-within:ring`: the real
+                      // radio inside is focusable and the global
+                      // `:focus-visible` rule in `index.css` draws its ring with
+                      // `!important`, so a second ring here would only be a
+                      // second thing to keep in step.
+                      className={`${CARD_INTERACTIVE} flex cursor-pointer flex-col p-4 ${
+                        active ? "border-accent bg-accent-soft" : ""
                       }`}
                     >
                       {/*
@@ -712,11 +745,13 @@ export default function CreateAgentWizard({
                         <PersonaIcon icon={template.icon} fallback={template.name} size="sm" />
                         <div className="min-w-0 flex-1">
                           <div className="flex items-start justify-between gap-2">
-                            <span className="font-medium text-slate-100">{template.name}</span>
+                            <span className="text-sm font-semibold text-ink">
+                              {template.name}
+                            </span>
                             <CategoryBadge category={template.category} />
                           </div>
                           {template.persona_role && (
-                            <span className="mt-0.5 block text-xs tracking-wide text-slate-400 uppercase">
+                            <span className={`mt-1 block ${EYEBROW}`}>
                               {template.persona_role}
                             </span>
                           )}
@@ -724,16 +759,16 @@ export default function CreateAgentWizard({
                       </div>
 
                       {template.description && (
-                        <p className="mt-3 text-sm text-slate-400">{template.description}</p>
+                        <p className="mt-3 text-sm text-muted">{template.description}</p>
                       )}
 
                       {template.pedagogy && (
                         <p
-                          className={`mt-3 border-t border-slate-800 pt-3 text-xs leading-relaxed text-slate-400 ${
+                          className={`mt-3 border-t border-line pt-3 ${HELP} ${
                             active ? "" : "line-clamp-3"
                           }`}
                         >
-                          <span className="font-medium text-slate-400">Rests on: </span>
+                          <span className="font-medium text-ink">Rests on: </span>
                           {template.pedagogy}
                         </p>
                       )}
@@ -752,11 +787,11 @@ export default function CreateAgentWizard({
               id="wizard-heading"
               ref={headingRef}
               tabIndex={-1}
-              className="text-lg font-semibold text-slate-100 outline-none"
+              className="text-lg font-semibold tracking-tight text-ink outline-none"
             >
               Retrieval tuning
             </h2>
-            <p className="mt-1 max-w-2xl text-sm text-slate-400">
+            <p className="mt-1.5 max-w-2xl text-sm text-muted">
               These values are <em>copied</em> onto the agent when it is created. Editing
               the persona later will not re-tune an agent you already built, and neither
               will editing these afterwards re-chunk documents you have already uploaded.
@@ -804,7 +839,11 @@ export default function CreateAgentWizard({
               <p
                 role="status"
                 data-testid="tuning-reset-notice"
-                className="mt-4 rounded-md border border-sky-800/60 bg-sky-950/30 px-3 py-2 text-xs text-sky-200"
+                // `ACCENT_TONE`, not `WARN_TONE`. This reports something that
+                // already happened and is recoverable by going back one step --
+                // it is information, and dressing it as caution would spend the
+                // warning tone on a non-problem and blunt it where it is real.
+                className={`${NOTICE} ${ACCENT_TONE} mt-4`}
               >
                 {resetNotice}
               </p>
@@ -813,7 +852,7 @@ export default function CreateAgentWizard({
             {!customizing ? (
               <dl
                 data-testid="template-parameters"
-                className="mt-5 grid grid-cols-2 gap-x-6 gap-y-3 rounded-lg border border-slate-800 bg-slate-950/60 p-4 text-xs sm:grid-cols-4"
+                className={`${WELL} mt-5 grid grid-cols-2 gap-x-6 gap-y-3 p-4 text-xs sm:grid-cols-4`}
               >
                 <Fact label="Chunk size" value={tuning.chunk_size} />
                 <Fact label="Overlap" value={tuning.chunk_overlap} />
@@ -995,12 +1034,17 @@ export default function CreateAgentWizard({
             {selected?.system_prompt && (
               <div className="mt-5">
                 <Reveal summary="System prompt (read-only)" testId="template-prompt">
-                  <p className="mb-3 text-xs text-slate-400">
+                  <p className={`mb-3 ${HELP}`}>
                     The persona&rsquo;s prompt, copied onto the agent as-is. It is the
                     control that makes the agent refuse rather than guess, so it is shown
                     here in full and changed by choosing a different persona.
                   </p>
-                  <pre className="max-h-64 overflow-y-auto text-xs leading-relaxed whitespace-pre-wrap text-slate-400">
+                  {/* A prompt is machine text, so mono on a well -- the same
+                      treatment the settings sheet gives the editable copy of
+                      the same string. */}
+                  <pre
+                    className={`${WELL} max-h-64 overflow-y-auto p-3 font-mono text-xs leading-relaxed whitespace-pre-wrap text-ink`}
+                  >
                     {selected.system_prompt}
                   </pre>
                 </Reveal>
@@ -1016,20 +1060,20 @@ export default function CreateAgentWizard({
               id="wizard-heading"
               ref={headingRef}
               tabIndex={-1}
-              className="text-lg font-semibold text-slate-100 outline-none"
+              className="text-lg font-semibold tracking-tight text-ink outline-none"
             >
               Review and create
             </h2>
-            <p className="mt-1 max-w-2xl text-sm text-slate-400">
+            <p className="mt-1.5 max-w-2xl text-sm text-muted">
               Nothing is created until you press the button. The next screen asks for the
               documents this agent answers from -- it has none until you upload them.
             </p>
 
             <div className="mt-6 space-y-3">
               <ReviewRow step={1} label="Name" onEdit={goTo}>
-                <p className="font-medium text-slate-100">{trimmedName || "—"}</p>
+                <p className="text-sm font-semibold text-ink">{trimmedName || "—"}</p>
                 {description.trim() && (
-                  <p className="mt-1 text-sm text-slate-400">{description.trim()}</p>
+                  <p className="mt-1 text-sm text-muted">{description.trim()}</p>
                 )}
               </ReviewRow>
 
@@ -1038,16 +1082,14 @@ export default function CreateAgentWizard({
                   <div className="flex items-start gap-3">
                     <PersonaIcon icon={selected.icon} fallback={selected.name} size="sm" />
                     <div className="min-w-0">
-                      <p className="font-medium text-slate-100">{selected.name}</p>
+                      <p className="text-sm font-semibold text-ink">{selected.name}</p>
                       {selected.persona_role && (
-                        <p className="text-xs tracking-wide text-slate-400 uppercase">
-                          {selected.persona_role}
-                        </p>
+                        <p className={`mt-1 ${EYEBROW}`}>{selected.persona_role}</p>
                       )}
                     </div>
                   </div>
                 ) : (
-                  <p className="text-slate-300">No persona -- server defaults</p>
+                  <p className="text-sm text-muted">No persona -- server defaults</p>
                 )}
               </ReviewRow>
 
@@ -1072,9 +1114,7 @@ export default function CreateAgentWizard({
                   <Fact label="Max tool steps" value={tuning.max_tool_steps} />
                 </dl>
                 {!customizing && (
-                  <p className="mt-2 text-xs text-slate-400">
-                    Unchanged from the persona.
-                  </p>
+                  <p className={`mt-2 ${HELP}`}>Unchanged from the persona.</p>
                 )}
               </ReviewRow>
             </div>
@@ -1089,13 +1129,27 @@ export default function CreateAgentWizard({
       </div>
 
       {/* ------------------------------------------------------- Controls */}
-      <div className="sticky bottom-0 z-10 -mx-4 -mb-4 mt-6 flex flex-wrap items-center gap-3 border-t border-slate-700 bg-slate-900/95 px-4 pt-4 pb-[max(1rem,env(safe-area-inset-bottom))] backdrop-blur">
+      {/* `bg-surface`, opaque, rather than the translucent panel plus
+          `backdrop-blur` this used to carry. The step content scrolls UNDER
+          this bar, so the blur was not decoration -- it was standing in for an
+          opaque background, and doing it at the cost of a compositor layer and
+          a rule the token layer already states.
+
+          `-bottom-4`, not `bottom-0`. `sticky` resolves its offset against the
+          scroll container's PADDING box, and this bar lives inside `Drawer`'s
+          `p-4` panel -- so `bottom-0` parks it 16px short of the panel edge and
+          the wizard's steps scroll visibly through the gap underneath it, which
+          reads as a rendering fault rather than a spacing one. The `-mx-4 -mb-4`
+          beside it makes the bar span the full width; it does NOT move where the
+          bar comes to rest. Only the offset does. `AgentSettingsSheet` already
+          had this right, and the two are the same control in two places. */}
+      <div className="sticky -bottom-4 z-10 -mx-4 -mb-4 mt-6 flex flex-wrap items-center gap-3 border-t border-line bg-surface px-4 pt-4 pb-[max(1rem,env(safe-area-inset-bottom))]">
         {step > 1 && (
           <button
             type="button"
             data-testid="wizard-back"
             onClick={() => goTo((step - 1) as StepNumber)}
-            className="min-h-11 rounded-md border border-slate-700 bg-slate-900 px-4 py-2 text-sm text-slate-300 transition hover:border-slate-600"
+            className={BTN_SECONDARY}
           >
             Back
           </button>
@@ -1110,7 +1164,13 @@ export default function CreateAgentWizard({
             // action prevents a mobile user from tapping a control that cannot
             // advance and then hunting above the fold for the reason.
             disabled={step === 1 && nameProblem !== null}
-            className="min-h-11 rounded-md bg-emerald-500 px-4 py-2 text-sm font-semibold text-emerald-950 transition hover:bg-emerald-400 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
+            // `BTN_PRIMARY` already carries `disabled:opacity-45` and
+            // `disabled:cursor-not-allowed`, which is the whole of the "you
+            // cannot press this yet" treatment. The old string repainted the
+            // disabled button in a different colour pair as well, which made a
+            // blocked Next read as a THIRD kind of button rather than as this
+            // one, unavailable.
+            className={BTN_PRIMARY}
           >
             {/* Looked up rather than indexed: `step < 4` does not narrow a
                 numeric literal union in TypeScript, so `STEPS[step]` is an
@@ -1122,7 +1182,7 @@ export default function CreateAgentWizard({
             type="submit"
             data-testid="agent-create-submit"
             disabled={busy}
-            className="min-h-11 rounded-md bg-emerald-500 px-4 py-2 text-sm font-semibold text-emerald-950 transition hover:bg-emerald-400 disabled:opacity-50"
+            className={BTN_PRIMARY}
           >
             {busy ? "Creating…" : "Create agent"}
           </button>
@@ -1136,7 +1196,7 @@ export default function CreateAgentWizard({
           `aria-describedby`, and a blocked Next now moves focus there.
         */}
         {step === 3 && overlapProblem && customizing && (
-          <span data-testid="wizard-step-problem" className="text-xs text-rose-300">
+          <span data-testid="wizard-step-problem" className="text-xs text-bad">
             {overlapProblem}
           </span>
         )}
@@ -1160,20 +1220,19 @@ function ReviewRow({
   return (
     <div
       data-testid={`review-row-${step}`}
-      className="rounded-lg border border-slate-800 bg-slate-950/60 p-4"
+      className={`${CARD} p-4`}
     >
       <div className="flex items-start justify-between gap-3">
-        <span className="text-xs font-medium tracking-wide text-slate-400 uppercase">
-          {label}
-        </span>
+        <span className={EYEBROW}>{label}</span>
         <button
           type="button"
           data-testid={`review-edit-${step}`}
           onClick={() => onEdit(step)}
           // The primary correction affordance on the review step, so it gets the
           // same 44px minimum as every other control rather than the 26x42 it
-          // had. `min-w-11` too: height alone is not a touch target.
-          className="min-h-11 min-w-11 shrink-0 rounded-md border border-slate-800 px-3 py-1 text-xs text-slate-400 transition hover:border-slate-600 hover:text-slate-200"
+          // had -- which `BTN_SECONDARY` carries on its shared base, along with
+          // `min-w-11`, because height alone is not a touch target.
+          className={`${BTN_SECONDARY} ${BTN_SM} min-w-11 shrink-0`}
         >
           Edit
         </button>

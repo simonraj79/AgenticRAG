@@ -27,6 +27,7 @@
 import { useId, useRef } from "react";
 import type { ReactNode, RefObject } from "react";
 import { useFocusTrap } from "../lib/useFocusTrap.ts";
+import { BTN_ICON } from "../lib/styles.ts";
 
 /**
  * Written out as whole class strings rather than composed from a fragment,
@@ -94,7 +95,13 @@ export function Drawer({
         aria-hidden="true"
         data-testid={testId ? `${testId}-backdrop` : "drawer-backdrop"}
         onClick={onClose}
-        className={`absolute inset-0 bg-slate-950/70 transition-opacity duration-200 ${
+        // `bg-ink/40` is one of the two places in the app where alpha is
+        // permitted (the other is `disabled:opacity-45`). A backdrop is the one
+        // element whose job IS to let the page show through, so it cannot come
+        // off the opaque surface ladder -- and the ink token means it dims
+        // correctly in both themes rather than only in the one it was written
+        // in.
+        className={`absolute inset-0 bg-ink/40 transition-opacity duration-200 ${
           open ? "opacity-100" : "opacity-0"
         }`}
       />
@@ -106,11 +113,16 @@ export function Drawer({
         aria-modal="true"
         aria-labelledby={headingId}
         data-testid={testId ?? "drawer"}
-        // `p-4` is not only spacing: the global focus ring is `outline: 3px`
-        // with `outline-offset: 3px`, so a control flush against the edge of an
-        // `overflow-y-auto` box loses six pixels of its ring to the clip. The
-        // padding is what keeps the indicator whole.
-        className={`absolute inset-y-0 right-0 flex h-full w-full flex-col overflow-y-auto border-l border-slate-800 bg-slate-900 p-4 shadow-2xl transition-transform duration-200 ease-out ${WIDTH_CLASS[width]} ${
+        // `p-4` is not only spacing: the global focus ring in `index.css` is
+        // drawn OUTSIDE the box (`outline: 2px` at `outline-offset: 2px`), so a
+        // control flush against the edge of an `overflow-y-auto` box loses four
+        // pixels of its ring to the clip. The padding is what keeps the
+        // indicator whole.
+        // `shadow-xl` rather than a hairline alone. Elevation in this design is
+        // normally a rule plus a surface change and shadows are near-absent --
+        // a drawer is one of the three things that genuinely floats above the
+        // page, so it is one of the three that gets one.
+        className={`absolute inset-y-0 right-0 flex h-full w-full flex-col overflow-y-auto border-l border-line bg-surface p-4 shadow-xl transition-transform duration-200 ease-out ${WIDTH_CLASS[width]} ${
           open ? "translate-x-0" : "translate-x-full pointer-events-none"
         }`}
       >
@@ -125,7 +137,7 @@ export function Drawer({
             id={headingId}
             ref={headingRef}
             tabIndex={-1}
-            className="min-h-11 py-2 text-sm font-semibold text-slate-100"
+            className="flex min-h-11 items-center py-2 text-lg font-semibold tracking-tight text-ink"
           >
             {title}
           </h2>
@@ -135,12 +147,15 @@ export function Drawer({
             onClick={onClose}
             aria-label={`Close ${title}`}
             data-testid={testId ? `${testId}-close` : "drawer-close"}
-            // `min-w-11` as well as `min-h-11`. A 44px-tall button 20px wide is
-            // not a 44px tap target, and an icon button is exactly where that
-            // gets missed.
-            className="min-h-11 min-w-11 shrink-0 rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-300 transition hover:border-slate-600 hover:text-slate-100"
+            // `BTN_ICON` carries `min-w-11` as well as `min-h-11`. A 44px-tall
+            // button 20px wide is not a 44px tap target, and an icon button is
+            // exactly where that gets missed -- which is why the width lives on
+            // the shared string rather than being remembered here.
+            className={`${BTN_ICON} shrink-0`}
           >
-            <span aria-hidden="true">&times;</span>
+            <span aria-hidden="true" className="text-lg leading-none">
+              &times;
+            </span>
           </button>
         </div>
 

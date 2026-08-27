@@ -53,6 +53,23 @@ import type {
   Conversation,
   Handout,
 } from "../lib/types.ts";
+import {
+  BTN_PRIMARY,
+  BTN_SECONDARY,
+  BTN_SM,
+  CARD,
+  CARD_EMPTY,
+  EYEBROW,
+  FIELD,
+  PROSE,
+  ROW,
+  ROW_ACTIVE,
+  ROW_INACTIVE,
+  TAB,
+  TAB_ACTIVE,
+  TAB_INACTIVE,
+  TEXTAREA,
+} from "../lib/styles.ts";
 import { ConfirmDeleteButton, ErrorBanner, Spinner, errorMessage } from "../components/ui.tsx";
 import Message from "../components/Message.tsx";
 import MentionPopup, { useMentions } from "../components/MentionPopup.tsx";
@@ -1125,7 +1142,12 @@ export default function AgentChat({
           aria-expanded={historyOpen}
           aria-controls="agent-rail"
           onClick={() => setHistoryOpen((open) => !open)}
-          className="min-h-11 shrink-0 rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-left text-sm font-medium text-slate-200 transition hover:border-slate-600 md:hidden"
+          // `justify-start` over `BTN_SECONDARY`'s own `justify-center`, and
+          // that composition is safe rather than lucky: Tailwind emits
+          // `.justify-center` before `.justify-start`, so the later rule wins.
+          // The reverse pairing does NOT hold -- `px-2` cannot narrow a `px-3`
+          // the same way -- which is why nothing here tries to.
+          className={`${BTN_SECONDARY} shrink-0 justify-start md:hidden`}
         >
           {historyOpen
             ? "Hide sources and threads"
@@ -1142,7 +1164,7 @@ export default function AgentChat({
         */}
         <aside
           id="agent-rail"
-          className={`${historyOpen ? "flex" : "hidden"} max-h-56 min-h-0 min-w-0 flex-col rounded-xl border border-slate-800 bg-slate-900/30 p-2 md:flex md:max-h-none`}
+          className={`${historyOpen ? "flex" : "hidden"} ${CARD} max-h-56 min-h-0 min-w-0 flex-col p-4 md:flex md:max-h-none`}
         >
           {/*
             The switch. `role="tablist"` rather than two plain buttons because
@@ -1150,7 +1172,7 @@ export default function AgentChat({
             the tab pattern describes -- and it is what tells a screen reader
             that picking one replaces the other rather than adding to it.
           */}
-          <div role="tablist" aria-label="Rail" className="mb-2 flex gap-1">
+          <div role="tablist" aria-label="Rail" className="mb-3 flex gap-1">
             {(
               [
                 { id: "sources" as const, label: "Sources", testId: "rail-tab-sources" },
@@ -1166,11 +1188,11 @@ export default function AgentChat({
                   aria-selected={active}
                   data-testid={entry.testId}
                   onClick={() => setRailTab(entry.id)}
-                  className={`min-h-11 flex-1 rounded-md px-2 text-xs font-medium tracking-wide uppercase transition ${
-                    active
-                      ? "bg-slate-800 text-slate-100"
-                      : "text-slate-400 hover:bg-slate-900 hover:text-slate-200"
-                  }`}
+                  // The same `TAB` treatment the agent bar uses, one step down
+                  // in size. `uppercase tracking-wide` is gone rather than
+                  // tokenised: it was never a section label, and this app now
+                  // has exactly one spelling for one of those (`EYEBROW`).
+                  className={`${TAB} flex-1 text-xs ${active ? TAB_ACTIVE : TAB_INACTIVE}`}
                 >
                   {entry.label}
                 </button>
@@ -1214,16 +1236,20 @@ export default function AgentChat({
                 type="button"
                 data-testid="conversation-new"
                 onClick={startDraft}
-                className="mb-2 min-h-11 rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-200 transition hover:border-slate-600"
+                className={`${BTN_SECONDARY} mb-2`}
               >
                 + New chat
               </button>
 
               <ul className="min-h-0 flex-1 space-y-1 overflow-y-auto">
             {activeId === null && (
-              <li className="rounded-md border border-emerald-800/60 bg-emerald-950/20 px-3 py-2 text-sm text-emerald-300">
+              /* The same `ROW` / `ROW_ACTIVE` pair every selectable row in
+                 this app uses. It IS the selected thread while it exists, so
+                 it looks like one -- the accent tint that means "this is the
+                 one you are reading" everywhere else. */
+              <li className={`${ROW} ${ROW_ACTIVE} text-sm text-ink`}>
                 New conversation
-                <span className="block text-xs text-slate-400">saved on your first question</span>
+                <span className="block text-xs text-muted">saved on your first question</span>
               </li>
             )}
 
@@ -1247,24 +1273,23 @@ export default function AgentChat({
                         if (event.key === "Enter") void rename(conversation.id);
                         if (event.key === "Escape") setRenamingId(null);
                       }}
-                      className="w-full rounded-md border border-slate-600 bg-slate-950 px-2 py-1.5 text-sm text-slate-100 outline-none"
+                      className={FIELD}
                     />
                   ) : (
                     <button
                       type="button"
                       data-testid="conversation-item"
                       onClick={() => void openConversation(conversation.id)}
-                      className={`w-full rounded-md px-3 py-2 text-left transition ${
-                        active
-                          ? "border border-slate-600 bg-slate-800/70"
-                          : "border border-transparent hover:bg-slate-900"
-                      }`}
+                      className={`${ROW} ${active ? ROW_ACTIVE : ROW_INACTIVE}`}
                     >
-                      <span className="block truncate text-sm text-slate-200">
+                      <span className="block truncate text-sm text-ink">
                         {conversation.title ?? "Untitled"}
                       </span>
-                      <span className="block text-xs text-slate-400">
-                        {conversation.message_count}{" "}
+                      {/* `font-mono` on the NUMBER only. It is a measurement;
+                          the noun after it is not, and setting both in mono
+                          reads as a code fragment rather than as a caption. */}
+                      <span className="block text-xs text-muted">
+                        <span className="font-mono">{conversation.message_count}</span>{" "}
                         {conversation.message_count === 1 ? "turn" : "turns"}
                       </span>
                     </button>
@@ -1279,7 +1304,7 @@ export default function AgentChat({
                           setRenamingId(conversation.id);
                         }}
                         aria-label={`Rename ${conversation.title ?? "untitled conversation"}`}
-                        className="min-h-11 rounded border border-slate-700 bg-slate-900 px-2 py-2 text-xs text-slate-300 transition hover:border-slate-600"
+                        className={`${BTN_SECONDARY} ${BTN_SM}`}
                       >
                         Rename
                       </button>
@@ -1330,7 +1355,11 @@ export default function AgentChat({
           // layout that was correct, which is the failure mode that teaches its
           // reader to stop believing the suite.
           data-testid="chat-column"
-          className="flex min-h-0 min-w-0 max-w-full flex-1 flex-col rounded-xl border border-slate-800 bg-slate-900/30"
+          // `CARD` and no padding of its own: the thread scroller, the composer
+          // and the dock each own their edge, and a pad here would put the
+          // composer's `border-t` short of the panel edge -- the same defect
+          // the settings sheet records for its sticky Save bar.
+          className={`${CARD} flex min-h-0 min-w-0 max-w-full flex-1 flex-col`}
         >
           {/*
             The toggle bar that used to sit here is gone with the column it
@@ -1357,14 +1386,21 @@ export default function AgentChat({
             {loadingThread && <Spinner label="Loading conversation" />}
 
             {!loadingThread && messages.length === 0 && !showPending && (
-              <p className="rounded-lg border border-dashed border-slate-800 px-4 py-10 text-center text-sm text-slate-400">
+              <p className={`${CARD_EMPTY} px-4 py-10 text-center text-sm text-muted`}>
                 Ask this agent a question. Follow-ups can refer back to earlier turns -- the
                 question that gets embedded is shown above each answer whenever it differs
                 from what you typed.
               </p>
             )}
 
-            <ol className="space-y-6">
+            {/*
+              No `space-y` of its own, deliberately. `Message` draws a
+              `border-t` and carries its own `pt-6`, so a gap here would sit
+              between the rule and the entry it belongs to and read as two
+              separators. The pending entry below wears the same pair, which is
+              what makes an in-flight turn and a settled one the same object.
+            */}
+            <ol>
               {messages.map((message) => (
                 <Message key={message.query_id} message={message} />
               ))}
@@ -1380,12 +1416,22 @@ export default function AgentChat({
                 */
                 <li
                   key={pending.queryId ? `pending-${pending.queryId}` : "pending"}
-                  className="space-y-2.5"
+                  className="border-t border-line pt-6 first:border-t-0 first:pt-0"
                 >
-                  <div className="flex justify-end">
-                    <div className="max-w-[85%] break-words rounded-2xl rounded-br-sm border border-slate-700 bg-slate-800/70 px-4 py-2.5 text-sm whitespace-pre-wrap text-slate-100">
+                  {/*
+                    The question as an ENTRY HEADING, byte-for-byte the shape
+                    `Message` folds this turn into a second later -- the same
+                    left rule, the same eyebrow, the same weight. A right-aligned
+                    bubble here and a heading there would make every completed
+                    turn appear to jump the moment it settled, which is exactly
+                    the mid-stream edit the "Writing..." note below exists to
+                    warn about, arriving in the one place nobody announced it.
+                  */}
+                  <div className="border-l-2 border-line-strong pl-3.5">
+                    <p className={EYEBROW}>Asked</p>
+                    <p className="mt-1 text-sm font-medium break-words whitespace-pre-wrap text-ink">
                       {pending.question}
-                    </div>
+                    </p>
                   </div>
 
                   {/*
@@ -1408,22 +1454,37 @@ export default function AgentChat({
                     by then it is answering a question the user has stopped
                     asking.
                   */}
-                  <div className="rounded-2xl rounded-bl-sm border border-slate-800 bg-slate-900/50 p-4">
+                  {/*
+                    No box. The settled answer renders straight onto the panel
+                    inside `gw-apparatus`, so a bordered card here would be a
+                    container that exists for four seconds and then vanishes.
+                    `mt-4` is `Message`'s own gap between the question and the
+                    answer.
+                  */}
+                  <div className="mt-4">
                     {!streaming && receipts.length > 0 && (
+                      /*
+                        A receipt, not an event. The old log gave each line its
+                        own colour; the only distinction that survives is
+                        whether something FAILED, and even that is a tool
+                        failure the loop recovers from rather than an error.
+                        Everything else is `text-muted` at `text-xs`, because
+                        this reports progress and is not the content.
+                      */
                       <ol
                         data-testid="turn-progress"
-                        className="mb-3 space-y-1 border-b border-slate-800 pb-3"
+                        className="mb-3 space-y-1 border-b border-line pb-3"
                       >
                         {receipts.map((entry) => (
                           <li
                             key={entry.key}
                             className="flex flex-wrap items-baseline gap-x-2 text-xs"
                           >
-                            <span className={entry.failed ? "text-amber-300" : "text-slate-400"}>
+                            <span className={entry.failed ? "text-warn" : "text-muted"}>
                               {entry.label}
                             </span>
                             {entry.detail && (
-                              <span className="min-w-0 break-words text-slate-500">
+                              <span className="min-w-0 break-words text-faint">
                                 {entry.detail}
                               </span>
                             )}
@@ -1441,7 +1502,7 @@ export default function AgentChat({
                     */}
                     <div role="status" aria-live="polite" aria-atomic="true">
                       {streaming ? (
-                        <p className="text-xs text-slate-500">{liveLine}</p>
+                        <p className="text-xs text-muted">{liveLine}</p>
                       ) : (
                         <Spinner label={`${liveLine}...`} />
                       )}
@@ -1457,7 +1518,7 @@ export default function AgentChat({
                         the single most likely way streaming feels WORSE than the
                         old wait, and an unannounced edit is how it happens.
                       */
-                      <p className="mt-3 text-xs text-slate-500">
+                      <p className="mt-3 text-xs text-muted">
                         Writing... source links and citation numbers are added when the answer
                         finishes.
                       </p>
@@ -1473,10 +1534,13 @@ export default function AgentChat({
                         the text for the same retrieval. Generation is
                         token-bound, so verbosity IS latency here.
                       */
-                      <p className="mt-2 text-xs text-slate-400">
-                        {elapsed}s elapsed &middot; retrieval takes under a second; the rest is the
-                        model writing. Coaching personas answer at length, so 30-60 s is normal
-                        for them.
+                      <p className="mt-2 text-xs text-muted">
+                        {/* `font-mono tabular-nums`: it is a measurement, and a
+                            proportional digit that changes width every second
+                            makes the sentence after it twitch. */}
+                        <span className="font-mono tabular-nums">{elapsed}s</span> elapsed
+                        &middot; retrieval takes under a second; the rest is the model writing.
+                        Coaching personas answer at length, so 30-60 s is normal for them.
                       </p>
                     )}
                   </div>
@@ -1487,7 +1551,13 @@ export default function AgentChat({
             <div ref={bottom} />
           </div>
 
-          <form onSubmit={onSubmit} className="border-t border-slate-800 p-3">
+          {/*
+            The most important control in the product, and the only one that
+            gets a rule of its own: a hairline across the full width of the
+            panel, with the composer sitting under it. `p-3` rather than `p-4`
+            so the textarea's own 44px minimum is what sets the footer's height.
+          */}
+          <form onSubmit={onSubmit} className="border-t border-line p-3">
             <label className="sr-only" htmlFor="chat-question">
               Question
             </label>
@@ -1535,7 +1605,10 @@ export default function AgentChat({
                       ? "Ask a question, or @mention a specialist. Enter sends, Shift+Enter adds a line."
                       : "Ask a question. Enter sends, Shift+Enter adds a line."
                   }
-                  className="min-h-12 w-full min-w-0 resize-y rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 outline-none focus:border-slate-500"
+                  // `TEXTAREA` is `FIELD` plus `resize-y`; `min-h-12` keeps
+                  // the two-row composer this had, and wins over `FIELD`'s own
+                  // `min-h-11` because Tailwind emits the smaller value first.
+                  className={`${TEXTAREA} min-h-12 min-w-0`}
                 />
               </div>
               {pending ? (
@@ -1550,7 +1623,12 @@ export default function AgentChat({
                   type="button"
                   data-testid="chat-stop"
                   onClick={stopWaiting}
-                  className="min-h-11 shrink-0 rounded-md border border-amber-700 bg-amber-950/50 px-3 py-2 text-sm font-semibold text-amber-200 transition hover:border-amber-500 hover:bg-amber-950"
+                  // Secondary rather than the filled primary Send occupies, and
+                  // rather than the amber it used to wear. Stopping is a
+                  // de-escalation -- the turn commits either way -- so it does
+                  // not need a caution colour, and an alarm-coloured control in
+                  // the send slot is exactly the noise this pass removes.
+                  className={`${BTN_SECONDARY} shrink-0`}
                 >
                   Stop
                 </button>
@@ -1559,7 +1637,11 @@ export default function AgentChat({
                   type="submit"
                   data-testid="chat-send"
                   disabled={loadingThread || question.trim() === "" || settling}
-                  className="min-h-11 shrink-0 rounded-md bg-emerald-500 px-4 py-2 text-sm font-semibold text-emerald-950 transition hover:bg-emerald-400 disabled:opacity-50"
+                  // The one affirmative action on this surface. `BTN_PRIMARY`
+                  // is filled with INK rather than with the accent on purpose:
+                  // the accent means "evidence, or a way to reach some", and
+                  // spending it on Send would make it mean "clickable".
+                  className={`${BTN_PRIMARY} shrink-0`}
                 >
                   Send
                 </button>
@@ -1578,7 +1660,7 @@ export default function AgentChat({
                 data-testid="chat-settling"
                 role="status"
                 aria-live="polite"
-                className="mt-2 text-xs text-slate-400"
+                className="mt-2 text-xs text-muted"
               >
                 The agent is still finishing that turn on the server. This thread
                 accepts the next question as soon as it lands.
@@ -1981,18 +2063,24 @@ function StreamingAnswer({ text }: { text: string }) {
   return (
     <div
       data-testid="streaming-answer"
-      // Dimmer than a finished answer on purpose: this text is provisional and
-      // is about to be replaced by the server's normalised version. `break-words`
-      // for the same reason `Message` carries it -- an unspaced 60-character
-      // identifier in the tail has nothing to scroll and takes the document's
-      // width with it at 320px.
-      className="mt-2 text-sm leading-relaxed break-words text-slate-300"
+      // `PROSE`, the same reading surface `Message` folds this into -- serif,
+      // the 65ch measure, the inter-block rhythm. It used to be dimmed sans to
+      // say "provisional", and that was the wrong signal in the wrong place:
+      // the answer would change TYPEFACE the moment it settled, on every single
+      // turn, which is a louder edit than the citation renumbering the note
+      // underneath already apologises for. Provisional is said in words and
+      // carried by the cursor.
+      //
+      // `break-words` for the same reason `Message` carries it -- an unspaced
+      // 60-character identifier in the tail has nothing to scroll and takes the
+      // document's width with it at 320px.
+      className={`${PROSE} mt-4 break-words`}
     >
       {settled && <SettledMarkdown source={settled} />}
       {tail && <span className="whitespace-pre-wrap break-words">{tail}</span>}
       <span
         aria-hidden="true"
-        className="ml-0.5 inline-block h-3.5 w-1.5 animate-pulse bg-slate-500 align-middle"
+        className="ml-0.5 inline-block h-3.5 w-1.5 animate-pulse bg-faint align-middle"
       />
     </div>
   );

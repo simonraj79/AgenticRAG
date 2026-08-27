@@ -26,6 +26,13 @@
  * One agent is one corpus, one config and one Pinecone namespace (PRD section
  * 3.2). That is why deleting an agent is a genuinely destructive act, why the
  * delete button confirms, and why it is not placed beside Open.
+ *
+ * **The card is one panel now, not three stacked strips.** It was a body plus a
+ * bordered action bar plus a second bordered footer, which gave one object three
+ * background tones and two full-bleed rules -- structure spent on a card the
+ * size of a postcard. What survives is the one separation that means something:
+ * the destructive action stays behind a hairline of its own, away from Open, for
+ * the reason the paragraph above gives.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -33,6 +40,7 @@ import { api } from "../lib/api.ts";
 import type { Agent, Template } from "../lib/types.ts";
 import CreateAgentWizard from "../components/CreateAgentWizard.tsx";
 import Drawer from "../components/Drawer.tsx";
+import { BTN_PRIMARY, CARD_INTERACTIVE, EYEBROW } from "../lib/styles.ts";
 import {
   CategoryBadge,
   ConfirmDeleteButton,
@@ -131,8 +139,10 @@ export default function Dashboard({ onOpenAgent }: { onOpenAgent: (agentId: stri
       >
       <header className="mb-8 flex flex-wrap items-start justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight text-slate-100">Your agents</h1>
-          <p className="mt-1 max-w-2xl text-sm text-slate-400">
+          <h1 className="text-2xl font-semibold tracking-tight text-ink sm:text-3xl">
+            Your agents
+          </h1>
+          <p className="mt-1 max-w-2xl text-sm text-muted">
             Each agent owns one document corpus, one teaching persona and one isolated
             vector namespace. Nothing it retrieves can come from another agent.
           </p>
@@ -145,7 +155,7 @@ export default function Dashboard({ onOpenAgent }: { onOpenAgent: (agentId: stri
           aria-expanded={createOpen}
           aria-controls="create-agent-panel"
           onClick={() => setCreateOpen(true)}
-          className="min-h-11 rounded-md border border-emerald-500 bg-emerald-500 px-4 py-2 text-sm font-medium text-emerald-950 transition hover:bg-emerald-400"
+          className={BTN_PRIMARY}
         >
           New agent
         </button>
@@ -156,9 +166,12 @@ export default function Dashboard({ onOpenAgent }: { onOpenAgent: (agentId: stri
       </div>
 
       <section>
-        <h2 className="mb-4 text-sm font-medium tracking-wide text-slate-400 uppercase">
-          Agents ({agents.length})
-        </h2>
+        {/*
+          A label above a group, so it is the one `EYEBROW` spelling rather than
+          the fifth hand-rolled `uppercase tracking-wide` in the app. It is still
+          an `<h2>`: the heading level is the semantics, the class is the look.
+        */}
+        <h2 className={`${EYEBROW} mb-4`}>Agents ({agents.length})</h2>
 
         {loading && <Spinner label="Loading agents" />}
 
@@ -175,41 +188,51 @@ export default function Dashboard({ onOpenAgent }: { onOpenAgent: (agentId: stri
               key={agent.id}
               data-testid="agent-card"
               data-agent-id={agent.id}
-              className="flex flex-col rounded-xl border border-slate-800 bg-slate-900/50"
+              className={`${CARD_INTERACTIVE} flex flex-col gap-3 p-5`}
             >
-              <div className="flex-1 p-5">
-                <div className="flex items-start gap-3">
-                  <PersonaIcon icon={agent.icon} fallback={agent.name} />
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-start justify-between gap-2">
-                      <h3 className="truncate font-medium text-slate-100">{agent.name}</h3>
-                      <StatusPill status={agent.status} />
-                    </div>
-                    {/*
-                      What it is and how much it knows, in one line. Chunk size
-                      and k used to occupy this row; neither tells you whether
-                      this is the agent you meant to open.
-                    */}
-                    <p className="mt-1 truncate text-xs text-slate-400">
-                      {agent.persona_role ?? "Custom agent"}
-                      <span className="text-slate-400"> · </span>
-                      {agent.document_count} {agent.document_count === 1 ? "document" : "documents"}
-                    </p>
+              <div className="flex items-start gap-3">
+                <PersonaIcon icon={agent.icon} fallback={agent.name} />
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-start justify-between gap-2">
+                    <h3 className="truncate text-sm font-semibold text-ink">{agent.name}</h3>
+                    <StatusPill status={agent.status} />
                   </div>
+                  {agent.description && (
+                    <p className="mt-1.5 line-clamp-2 text-xs text-muted">
+                      {agent.description}
+                    </p>
+                  )}
                 </div>
-
-                {agent.description && (
-                  <p className="mt-3 line-clamp-2 text-sm text-slate-400">{agent.description}</p>
-                )}
               </div>
 
-              <div className="flex items-center justify-between gap-3 border-t border-slate-800 px-5 py-3">
+              {/*
+                What it is and how much it knows, in one line. Chunk size and k
+                used to occupy this row; neither tells you whether this is the
+                agent you meant to open. The count is mono because it is a
+                measurement -- the same reason every score and token count in
+                this app is.
+              */}
+              <p className="flex flex-wrap items-center gap-x-1.5 text-xs text-muted">
+                <span className="truncate">{agent.persona_role ?? "Custom agent"}</span>
+                <span aria-hidden="true" className="text-faint">
+                  &middot;
+                </span>
+                <span>
+                  <span className="font-mono">{agent.document_count}</span>{" "}
+                  {agent.document_count === 1 ? "document" : "documents"}
+                </span>
+              </p>
+
+              {/* `mt-auto` so the action row sits on the card floor whatever the
+                  description length -- otherwise Open lands at a different
+                  height in every column of the grid. */}
+              <div className="mt-auto flex items-center justify-between gap-3">
                 <button
                   type="button"
                   data-testid="agent-open"
                   aria-label={`Open ${agent.name}`}
                   onClick={() => onOpenAgent(agent.id)}
-                  className="min-h-11 rounded-md bg-slate-100 px-3 py-2 text-sm font-medium text-slate-900 transition hover:bg-white"
+                  className={BTN_PRIMARY}
                 >
                   Open
                 </button>
@@ -217,16 +240,14 @@ export default function Dashboard({ onOpenAgent }: { onOpenAgent: (agentId: stri
               </div>
 
               {/*
-                Its own strip, below the primary action and behind its own
-                divider. Delete and Open were adjacent, which put an
-                irreversible action one cursor-width from the one people click
-                every session -- and arm-then-confirm does nothing about a click
-                that was aimed at the wrong button in the first place.
+                Behind its own hairline, below the primary action. Delete and
+                Open were adjacent, which put an irreversible action one
+                cursor-width from the one people click every session -- and
+                arm-then-confirm does nothing about a click that was aimed at the
+                wrong button in the first place.
               */}
-              <div className="flex items-center justify-between gap-3 rounded-b-xl border-t border-slate-800/70 bg-slate-950/40 px-5 py-2">
-                <span className="text-[0.65rem] text-slate-400">
-                  Deletes the corpus and its vectors
-                </span>
+              <div className="flex items-center justify-between gap-3 border-t border-line pt-3">
+                <span className="text-xs text-muted">Deletes the corpus and its vectors</span>
                 <ConfirmDeleteButton
                   testId="agent-delete"
                   label="Delete"

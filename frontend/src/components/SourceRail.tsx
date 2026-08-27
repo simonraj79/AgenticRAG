@@ -28,6 +28,13 @@
  * that changes when you change `chunk_size` and re-upload. That number is the
  * workshop exercise made visible, and it is a column NotebookLM has no reason to
  * have.
+ *
+ * **It is an evidence inventory, so it is typeset as one.** The filename is the
+ * row's subject and is set in ink; the status is a pill, the same pill the
+ * Documents view uses; the counts and sizes are mono, because they are
+ * measurements and because the chunk count is the one number a workshop
+ * attendee is asked to watch move. Nothing here is serif -- a filename is the
+ * harness naming a file, not the corpus speaking.
  */
 
 import { useRef, useState } from "react";
@@ -39,6 +46,7 @@ import {
 import { ConfirmDeleteButton, ErrorBanner, Spinner, StatusPill } from "./ui.tsx";
 import DuplicatePrompt from "./DuplicatePrompt.tsx";
 import { formatBytes } from "../lib/format.ts";
+import { BAD_TONE, BTN_SECONDARY, BTN_SM, CARD, CARD_EMPTY, NOTICE } from "../lib/styles.ts";
 
 export default function SourceRail({
   agentId,
@@ -93,9 +101,14 @@ export default function SourceRail({
         input is visually hidden and a styled label drives it, which is the
         standard technique and keeps the accessible name and the click target on
         one element.
+
+        `CARD_EMPTY` rather than a bordered button: dashed says "a container
+        waiting to be filled", which is what this is, and it is the same
+        treatment the empty-corpus notice below carries so the two read as one
+        state rather than two controls.
       */}
       <label
-        className="flex min-h-11 cursor-pointer items-center justify-center gap-2 rounded-md border border-dashed border-slate-700 bg-slate-900 px-3 text-sm text-slate-300 transition hover:border-slate-600 hover:text-slate-100"
+        className={`${CARD_EMPTY} flex min-h-11 cursor-pointer items-center justify-center gap-2 px-3 text-sm text-muted transition hover:bg-sunken hover:text-ink`}
         title={`Markdown, plain text or PDF, up to ${formatBytes(MAX_UPLOAD_BYTES)}`}
       >
         <input
@@ -131,13 +144,13 @@ export default function SourceRail({
       {corpus.loading && <Spinner label="Loading corpus" />}
 
       {!corpus.loading && corpus.documents.length === 0 && (
-        <p className="rounded-md border border-dashed border-slate-800 px-3 py-6 text-center text-xs leading-relaxed text-slate-400">
+        <p className={`${CARD_EMPTY} px-3 py-6 text-center text-xs leading-relaxed text-muted`}>
           No sources yet. This agent will refuse every question until it has one — which is
           the correct answer, not a failure.
         </p>
       )}
 
-      <ul className="min-h-0 flex-1 space-y-1 overflow-y-auto" data-testid="rail-source-list">
+      <ul className="min-h-0 flex-1 space-y-2 overflow-y-auto" data-testid="rail-source-list">
         {corpus.documents.map((document) => {
           const expanded = document.id === expandedId;
           return (
@@ -146,36 +159,42 @@ export default function SourceRail({
               data-testid="rail-source"
               data-document-id={document.id}
               data-status={document.status}
-              className="rounded-md border border-slate-800 bg-slate-900/40"
+              // `overflow-hidden` rather than a radius on the button inside:
+              // the row's hover fill has to stop at the card's own corner, and
+              // repeating the radius on the child is how one object ends up
+              // with two of them the first time either is retuned.
+              className={`${CARD} overflow-hidden`}
             >
               <button
                 type="button"
                 aria-expanded={expanded}
                 onClick={() => setExpandedId((current) => (current === document.id ? null : document.id))}
-                className="flex min-h-11 w-full min-w-0 flex-col items-start justify-center gap-0.5 px-3 py-2 text-left transition hover:bg-slate-900"
+                className="flex min-h-11 w-full min-w-0 flex-col items-start justify-center gap-0.5 px-3 py-2 text-left transition hover:bg-sunken"
               >
-                <span className="w-full truncate text-sm text-slate-200">{document.filename}</span>
-                <span className="flex items-center gap-2 text-xs text-slate-400">
+                <span className="w-full truncate text-sm text-ink">{document.filename}</span>
+                <span className="flex items-center gap-2">
                   <StatusPill status={document.status} />
-                  {/* The number the workshop exercise moves. */}
-                  <span>
+                  {/* The number the workshop exercise moves -- mono, because it
+                      is a measurement and because it is meant to be compared
+                      against the same file's count before a re-chunk. */}
+                  <span className="font-mono text-xs text-muted">
                     {document.chunk_count} {document.chunk_count === 1 ? "chunk" : "chunks"}
                   </span>
                 </span>
               </button>
 
               {expanded && (
-                <div className="space-y-2 border-t border-slate-800 px-3 py-2">
-                  <dl className="space-y-1 text-xs text-slate-400">
+                <div className="space-y-2 border-t border-line px-3 py-2">
+                  <dl className="space-y-1 text-xs text-muted">
                     <div className="flex justify-between gap-2">
                       <dt>Size</dt>
-                      <dd className="text-slate-300">
+                      <dd className="font-mono text-ink">
                         {document.byte_size === null ? "--" : formatBytes(document.byte_size)}
                       </dd>
                     </div>
                     <div className="flex justify-between gap-2">
                       <dt>Type</dt>
-                      <dd className="truncate text-slate-300">{document.mime_type ?? "--"}</dd>
+                      <dd className="truncate font-mono text-ink">{document.mime_type ?? "--"}</dd>
                     </div>
                   </dl>
 
@@ -185,7 +204,7 @@ export default function SourceRail({
                   {document.error && (
                     <p
                       data-testid="rail-source-error"
-                      className="rounded border border-rose-900/60 bg-rose-950/30 px-2 py-1 text-xs break-words text-rose-300"
+                      className={`${NOTICE} ${BAD_TONE} break-words`}
                     >
                       {document.error}
                     </p>
@@ -209,17 +228,21 @@ export default function SourceRail({
       </ul>
 
       {corpus.indexing && (
-        <p className="shrink-0 text-xs text-slate-400">
+        <p className="shrink-0 text-xs text-muted">
           {corpus.indexingCount} still indexing…
         </p>
       )}
 
+      {/* An ordinary secondary control. It used to be amber, which spent a state
+          colour on something that is not a state -- the sentence on the button
+          already says the poll stopped, and the four tones in this palette are
+          reserved for what something IS. */}
       {corpus.stalled && (
         <button
           type="button"
           data-testid="rail-recheck"
           onClick={() => void corpus.refresh()}
-          className="min-h-11 shrink-0 rounded-md border border-amber-800/60 bg-amber-950/20 px-3 text-xs text-amber-300 transition hover:border-amber-600"
+          className={`${BTN_SECONDARY} ${BTN_SM} shrink-0`}
         >
           Stopped watching. Check again
         </button>

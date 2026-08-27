@@ -10,55 +10,76 @@
  * **Fetched on open, not on render.** A thread of twenty turns would otherwise
  * fire twenty requests for timelines nobody asked to see. Fetched exactly once
  * per turn as well: the rows are immutable, so a second open reuses them.
+ *
+ * **Everything in here is diagnostic data, so it is set in mono** -- the step
+ * index, the score, the duration, the payload, the Python. Mono is this
+ * design's third voice and it means measurement: not the harness talking (sans)
+ * and not the corpus answering (serif), but a number recorded about the turn.
  */
 
 import { useEffect, useRef, useState } from "react";
 import { chat } from "../lib/api.ts";
 import type { TraceEvent } from "../lib/types.ts";
 import { formatDuration, formatJson, formatScore } from "../lib/format.ts";
+import {
+  BAD_TONE,
+  BTN_SECONDARY,
+  BTN_SM,
+  CARD,
+  EYEBROW,
+  HELP,
+  OK_TONE,
+  PILL,
+  PILL_NEUTRAL,
+  ROW,
+  WARN_TONE,
+  WELL,
+} from "../lib/styles.ts";
 import { ErrorBanner, Spinner, errorMessage } from "./ui.tsx";
 
 /**
- * Colour per decision type, so the shape of a turn is readable at a glance: a
- * Stage 1 chain is RETRIEVE -> GENERATE, while a Stage 2 loop shows amber
- * SCORE_CHECK and fuchsia REWRITE steps in the middle. The fuchsia matches the
- * rewritten-question banner above the answer on purpose -- same decision, seen
- * twice.
+ * Four buckets, not eleven hues.
  *
- * The three tool events are cyan, which is the one hue this palette had left
- * (slate, emerald, sky, rose, amber, fuchsia, indigo, violet and teal are all
- * spoken for) and reads as "the machine went and did something" beside the
- * retrieval colours. TOOL_ERROR breaks the family and joins REFUSE in rose,
- * because a failed tool call is a failure and colour is the fastest way to say
- * so -- the agent is shown the error and may try again, so the row beneath it
- * is very often another cyan TOOL_CALL.
+ * This map used to give eleven event kinds nine different colours -- sky,
+ * amber, fuchsia, indigo, emerald, rose, cyan, violet, teal -- on the argument
+ * that the shape of a turn should be readable at a glance. It was not: nine
+ * hues with no ordering between them is a legend the reader has to learn, and
+ * the one distinction anybody actually needs was buried inside it.
+ *
+ * **The kind is already written on the pill, in words.** So colour is freed to
+ * carry the only thing the words do not: did this step go WRONG. GENERATE is
+ * the turn succeeding, SCORE_CHECK and SELF_CHECK are the machine grading its
+ * own evidence, REFUSE and TOOL_ERROR are the two ways a step ends badly, and
+ * everything else is ordinary machinery that ran as designed.
+ *
+ * That REFUSE sits in the failure bucket is a presentation choice about the
+ * TRACE, not a claim about the product: a correct refusal is the behaviour the
+ * golden set scores, and the answer above says so in a sentence. Here it is
+ * simply the step that stopped the turn.
  *
  * Both maps are read through `??` at the call site, so an event type the
  * backend gains before this file hears about it degrades to a neutral pill and
- * a neutral sentence rather than crashing the panel.
- *
- * **That graceful degradation is exactly why a missing entry is invisible, so
- * both maps get an entry or neither does.** ROUTE is violet because the route
- * pill on the answer is violet -- same decision, seen twice, which is the same
- * argument that put REWRITE and the rewritten-question banner in fuchsia.
- * DELEGATE is teal, a colour of its own because a delegated section is a
- * different act from choosing the persona. SELF_CHECK is amber and shares that
- * hue with SCORE_CHECK deliberately: both are the machine grading its own
- * evidence, and amber is this palette's caution rather than its failure.
+ * a neutral sentence rather than crashing the panel. **That graceful
+ * degradation is exactly why a missing entry is invisible, so both maps get an
+ * entry or neither does** -- and with four buckets the cost of adding one is a
+ * decision about severity rather than a hunt for an unused colour.
  */
 const EVENT_STYLES: Record<string, string> = {
-  RETRIEVE: "border-sky-800/60 bg-sky-950/40 text-sky-300",
-  SCORE_CHECK: "border-amber-800/60 bg-amber-950/40 text-amber-300",
-  REWRITE: "border-fuchsia-800/60 bg-fuchsia-950/40 text-fuchsia-300",
-  RERANK: "border-indigo-800/60 bg-indigo-950/40 text-indigo-300",
-  GENERATE: "border-emerald-800/60 bg-emerald-950/40 text-emerald-300",
-  REFUSE: "border-rose-800/60 bg-rose-950/40 text-rose-300",
-  TOOL_CALL: "border-cyan-800/60 bg-cyan-950/40 text-cyan-200",
-  TOOL_RESULT: "border-cyan-800/60 bg-cyan-950/40 text-cyan-200",
-  TOOL_ERROR: "border-rose-800/60 bg-rose-950/40 text-rose-200",
-  ROUTE: "border-violet-800/60 bg-violet-950/40 text-violet-300",
-  DELEGATE: "border-teal-800/60 bg-teal-950/40 text-teal-300",
-  SELF_CHECK: "border-amber-800/60 bg-amber-950/40 text-amber-300",
+  GENERATE: `${PILL} ${OK_TONE}`,
+
+  SCORE_CHECK: `${PILL} ${WARN_TONE}`,
+  SELF_CHECK: `${PILL} ${WARN_TONE}`,
+
+  REFUSE: `${PILL} ${BAD_TONE}`,
+  TOOL_ERROR: `${PILL} ${BAD_TONE}`,
+
+  RETRIEVE: PILL_NEUTRAL,
+  RERANK: PILL_NEUTRAL,
+  REWRITE: PILL_NEUTRAL,
+  ROUTE: PILL_NEUTRAL,
+  DELEGATE: PILL_NEUTRAL,
+  TOOL_CALL: PILL_NEUTRAL,
+  TOOL_RESULT: PILL_NEUTRAL,
 };
 
 const EVENT_DESCRIPTIONS: Record<string, string> = {
@@ -152,14 +173,14 @@ export default function TracePanel({
         aria-expanded={open}
         aria-controls={panelId}
         onClick={toggle}
-        className="min-h-11 rounded-md border border-slate-700 bg-slate-900 px-2.5 py-2 text-xs text-slate-300 transition hover:border-slate-600 hover:text-slate-100"
+        className={`${BTN_SECONDARY} ${BTN_SM}`}
       >
         {open ? "Hide retrieval details" : "Retrieval details"}
       </button>
 
       {open && (
-        <div id={panelId} className="mt-3 rounded-lg border border-slate-800 bg-slate-950/50 p-3">
-          <p className="mb-3 text-xs leading-relaxed text-slate-400">
+        <div id={panelId} className={`${CARD} mt-3 p-4`}>
+          <p className={`${HELP} mb-3`}>
             This is an activity log of observable retrieval steps and scores. It does
             not expose private model reasoning.
           </p>
@@ -172,7 +193,7 @@ export default function TracePanel({
           )}
 
           {!loading && events !== null && events.length === 0 && (
-            <p className="text-xs text-slate-400">
+            <p className="text-xs text-muted">
               This turn recorded no trace events. A Stage 1 agent answers without writing
               decisions; only the Stage 2 loop has decisions to write.
             </p>
@@ -180,8 +201,7 @@ export default function TracePanel({
 
           <ol className="space-y-2">
             {(events ?? []).map((event) => {
-              const style =
-                EVENT_STYLES[event.event_type] ?? "border-slate-700 bg-slate-900 text-slate-300";
+              const style = EVENT_STYLES[event.event_type] ?? PILL_NEUTRAL;
               // The Python is lifted OUT of the payload rather than shown twice.
               // `formatJson` would render it as one long line of `\n` escapes,
               // which is not reading the program so much as decoding it.
@@ -192,28 +212,28 @@ export default function TracePanel({
                 <li
                   key={String(event.id)}
                   data-testid="trace-event"
-                  className="rounded-md border border-slate-800 bg-slate-900/40 p-2.5"
+                  // A hairline and nothing else. The panel around it is already
+                  // a surface, so a second fill here would stack two greys for
+                  // no information -- structure in this design is the rule, not
+                  // the box it draws.
+                  className={`${ROW} border-line`}
                 >
                   <div className="flex flex-wrap items-center gap-2">
-                    <span className="font-mono text-xs text-slate-400">
+                    <span className="font-mono text-xs text-muted">
                       {String(event.step_index).padStart(2, "0")}
                     </span>
-                    <span
-                      className={`rounded-full border px-2 py-0.5 text-xs font-medium ${style}`}
-                    >
-                      {event.event_type}
-                    </span>
+                    <span className={style}>{event.event_type}</span>
                     {event.score !== null && (
-                      <span className="font-mono text-xs text-slate-400">
+                      <span className="font-mono text-xs text-muted">
                         score {formatScore(event.score)}
                       </span>
                     )}
-                    <span className="text-xs text-slate-400">
+                    <span className="font-mono text-xs text-muted">
                       {formatDuration(event.duration_ms)}
                     </span>
                   </div>
 
-                  <p className="mt-1.5 text-xs text-slate-300">
+                  <p className="mt-1.5 text-xs text-muted">
                     {EVENT_DESCRIPTIONS[event.event_type] ?? "Recorded an agent activity."}
                   </p>
 
@@ -229,10 +249,10 @@ export default function TracePanel({
                       different program.
                     */
                     <div className="mt-2">
-                      <p className="mb-1 text-xs text-slate-400">Python the agent wrote</p>
+                      <p className={`${EYEBROW} mb-1`}>Python the agent wrote</p>
                       <pre
                         data-testid="trace-python"
-                        className="max-h-64 overflow-auto rounded bg-slate-950 p-2 font-mono text-xs leading-relaxed whitespace-pre text-emerald-200"
+                        className={`${WELL} max-h-64 overflow-auto p-2 font-mono text-xs leading-relaxed whitespace-pre text-ink`}
                       >
                         {code}
                       </pre>
@@ -240,7 +260,9 @@ export default function TracePanel({
                   )}
 
                   {payload && (
-                    <pre className="mt-2 max-h-48 overflow-auto rounded bg-slate-950 p-2 font-mono text-xs leading-relaxed text-slate-400">
+                    <pre
+                      className={`${WELL} mt-2 max-h-48 overflow-auto p-2 font-mono text-xs leading-relaxed text-muted`}
+                    >
                       {payload}
                     </pre>
                   )}

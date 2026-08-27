@@ -19,9 +19,28 @@
  * mean -- an answer here and its evidence somewhere else is the arrangement
  * this replaced.
  *
- * Sources start collapsed. A thread of ten turns each showing three chunk
- * previews is unreadable, and the chip is the affordance that reveals the one
- * chunk actually being questioned.
+ * ## The apparatus
+ *
+ * A turn is laid out as a critical edition rather than as a chat exchange: the
+ * question as an entry heading, the answer in a reading measure, and the
+ * sources in a margin beside it. That is the whole design, and it is here
+ * because it is the only arrangement that shows WHICH claim rests on WHICH
+ * chunk. A list of sources at the end of an answer says "these five files were
+ * involved somewhere", which is the claim this product exists not to make.
+ *
+ * Two facts about it are worth carrying:
+ *
+ * **The margin appears at 1280px and not before.** It is `.gw-apparatus` in
+ * `index.css`, and the media query there has the arithmetic: inside a chat
+ * column that has already given 17rem to the conversation rail, a 15rem margin
+ * below 1280px leaves the prose at about forty characters. Narrower than that,
+ * the sources collapse behind their toggle exactly as they always did.
+ *
+ * **Sources are still collapsed by default below that width, and the reason has
+ * not changed** -- a thread of ten turns each showing three chunk previews is
+ * unreadable. What changed is that `CitationCard` clamps its passage to two
+ * lines at rest, which is what makes a permanently-visible margin readable
+ * rather than a wall. The chip still expands the one chunk being questioned.
  */
 
 import { Children, useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -38,6 +57,16 @@ import { resolveSpecialist } from "../lib/specialists.ts";
 // the `inline` hook that turns `[1]` into a citation chip; the panel calls the
 // same factory with no hook.
 import { createMarkdownComponents } from "../lib/markdown.tsx";
+import {
+  ACCENT_TONE,
+  BTN_QUIET,
+  EYEBROW,
+  NOTICE,
+  PILL,
+  PILL_NEUTRAL,
+  PROSE,
+  WARN_TONE,
+} from "../lib/styles.ts";
 import CitationCard from "./CitationCard.tsx";
 import TracePanel from "./TracePanel.tsx";
 
@@ -99,222 +128,300 @@ export default function Message({ message }: { message: ChatMessage }) {
    *  is what makes the pill render nothing rather than a hole. */
   const routed = routedSlugs(message);
 
+  /*
+    The strongest score on THIS turn, which is the scale every source bar in the
+    margin is drawn against.
+
+    It lives here rather than in `CitationCard` because a card cannot see its
+    siblings, and the comparison the bar exists to make -- which of these
+    passages did the reranker prefer -- is a comparison across them. Computing it
+    per card against a fixed 1.0 is what made every bar render as the same
+    near-empty stub: Cohere's rerank scores on real passages are around 0.02.
+    See the note in `CitationCard` for the full measurement.
+  */
+  const peakStrength = useMemo(() => {
+    const scores = message.citations
+      .map((citation) => citation.rerank_score ?? citation.similarity_score)
+      .filter((score): score is number => typeof score === "number" && Number.isFinite(score));
+    return scores.length > 0 ? Math.max(...scores) : null;
+  }, [message.citations]);
+
   return (
-    <li data-testid="chat-message" className="space-y-2.5">
-      <div className="flex justify-end">
-        <div className="max-w-[85%] break-words rounded-2xl rounded-br-sm border border-slate-700 bg-slate-800/70 px-4 py-2.5 text-sm whitespace-pre-wrap text-slate-100">
+    <li data-testid="chat-message" className="border-t border-line pt-6 first:border-t-0 first:pt-0">
+      {/*
+        The question, as an entry heading rather than as a bubble.
+
+        A right-aligned bubble says "this is a chat, scroll for more". A rule and
+        a heading say "this is an entry, and what follows is its answer" -- which
+        is what the thread actually is, and it is what makes ten turns readable
+        as a document instead of as a transcript. The eyebrow does the work a
+        bubble's alignment used to: it names the speaker in one word, at a size
+        that cannot compete with the answer.
+      */}
+      <div className="border-l-2 border-line-strong pl-3.5">
+        <p className={EYEBROW}>Asked</p>
+        <p className="mt-1 text-sm font-medium break-words whitespace-pre-wrap text-ink">
           {message.question}
-        </div>
+        </p>
       </div>
 
-      <div className="rounded-2xl rounded-bl-sm border border-slate-800 bg-slate-900/50 p-4">
-        {message.rewritten_changed && message.rewritten_question && (
-          /*
-            The single most useful thing a multi-turn RAG can tell a user about
-            itself, and it is invisible everywhere else. "What about the second
-            one?" is embedded as "What is the second stage of Polya's method?",
-            and when that resolution grabs the wrong antecedent the answer is
-            confidently about the wrong thing with no visible cause. Shown
-            above the answer rather than inside the trace panel because a cause
-            you have to open a panel to see is a cause nobody sees.
-
-            **Gated on `rewritten_changed`, not on the string being present.**
-            The rewriter runs on every turn as of 2026-08-16, so the string is
-            almost always there -- and a banner on every message in every thread,
-            usually quoting a sentence one word away from the question directly
-            above it, is not a weaker version of this affordance. It is the thing
-            that makes a reader stop looking at it, so the one turn where the
-            rewrite really did grab the wrong antecedent reads as more noise.
-          */
-          <p
-            data-testid="rewritten-question"
-            className="mb-3 rounded-md border border-fuchsia-900/50 bg-fuchsia-950/30 px-3 py-2 text-xs text-fuchsia-200"
-          >
-            <span className="text-fuchsia-400/80">Searched for</span>{" "}
-            <span className="italic">&ldquo;{message.rewritten_question}&rdquo;</span>
-          </p>
-        )}
-
-        {/* The testid sits on the answer alone, so its textContent is the answer
-            and not also the latency and the model name.
-
-            `break-words` is on the container rather than on each tag: `pre` and
-            `table` carry their own `overflow-x-auto` in the component map, but a
-            60-character URL or an unspaced identifier inside an ordinary
-            paragraph has nothing to scroll and pushes the bubble past the
-            viewport, taking the whole document's width with it. */}
-        <div
-          data-testid="chat-answer"
-          className="text-sm leading-relaxed break-words text-slate-100"
-        >
-          <Markdown remarkPlugins={[remarkGfm]} components={components}>
-            {message.answer ?? ""}
-          </Markdown>
-        </div>
-
-        {message.refused && (
-          // Spelled out because a refusal looks like a failure and is not one.
-          // The system prompt forbids answering outside the retrieved context,
-          // and declining is the behaviour the golden set scores.
-          <p className="mt-3 border-t border-slate-800 pt-3 text-xs text-slate-400">
-            The agent declined because the retrieved context did not support an answer.
-            That is a correct outcome, not an error.
-          </p>
-        )}
-
-        <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-2 border-t border-slate-800 pt-3">
-          {message.refused && (
-            <span className="rounded-full border border-amber-800/60 bg-amber-950/40 px-2 py-0.5 text-xs font-medium text-amber-300">
-              refused
-            </span>
-          )}
-
-          {message.citations.length > 0 && (
-            <button
-              type="button"
-              aria-expanded={sourcesOpen}
-              aria-controls={sourcesId}
-              onClick={() => setSourcesOpen((open) => !open)}
-              className="min-h-11 rounded-md border border-slate-700 bg-slate-900 px-2.5 py-2 text-xs text-slate-300 transition hover:border-slate-600 hover:text-slate-100"
-            >
-              {sourcesOpen
-                ? "Hide retrieved passages"
-                : message.refused
-                  ? `Passages checked (${message.citations.length})`
-                  : `Sources (${message.citations.length})`}
-            </button>
-          )}
-
-          {toolActivity && (
+      <div className="gw-apparatus mt-4">
+        {/* ------------------------------------------------ the answer column */}
+        <div className="min-w-0">
+          {message.rewritten_changed && message.rewritten_question && (
             /*
-              A turn that used tools looked identical to one that did not until
-              somebody opened the trace, which is to say: it looked identical.
-              This is a SUMMARY, not a control -- it changes nothing about the
-              turn -- but it is a button, because the detail it summarises
-              already exists one element below and a chip that names something
-              unreachable is worse than no chip.
+              The single most useful thing a multi-turn RAG can tell a user about
+              itself, and it is invisible everywhere else. "What about the second
+              one?" is embedded as "What is the second stage of Polya's method?",
+              and when that resolution grabs the wrong antecedent the answer is
+              confidently about the wrong thing with no visible cause. Shown
+              above the answer rather than inside the trace panel because a cause
+              you have to open a panel to see is a cause nobody sees.
+
+              **Gated on `rewritten_changed`, not on the string being present.**
+              The rewriter runs on every turn as of 2026-08-16, so the string is
+              almost always there -- and a banner on every message in every thread,
+              usually quoting a sentence one word away from the question directly
+              above it, is not a weaker version of this affordance. It is the thing
+              that makes a reader stop looking at it, so the one turn where the
+              rewrite really did grab the wrong antecedent reads as more noise.
+
+              Accent rather than a warning colour: a rewrite is what the system
+              did, not something that went wrong, and the accent is this design's
+              colour for "here is how the answer was reached".
             */
-            <button
-              type="button"
-              data-testid="tool-activity"
-              onClick={() => setTraceSignal((value) => value + 1)}
-              className="min-h-11 rounded-full border border-cyan-800/60 bg-cyan-950/40 px-2.5 py-2 text-xs font-medium text-cyan-200 transition hover:border-cyan-600 hover:text-cyan-100"
+            <p
+              data-testid="rewritten-question"
+              className={`${NOTICE} ${ACCENT_TONE} mb-4`}
             >
-              {toolActivity}
-            </button>
-          )}
-
-          {routed.map((slug) => {
-            /*
-              Which teaching approach answered, beside the cyan chip that says
-              what the turn DID. Violet rather than cyan on purpose: a tool call
-              is the machine going and fetching something, a route is a choice
-              about voice, and two summaries in one hue would read as one fact.
-
-              A slug this client has never heard of still renders -- as the slug,
-              with a neutral glyph -- because the roster is a database column and
-              a sixth persona must not leave a hole in the chip row. That is the
-              same rule `CategoryBadge` follows for an unrecognised category.
-
-              Not a button. `PersonaIcon` was the obvious reuse and does not fit:
-              it draws a bordered 32px tile, which is a card affordance rather
-              than an inline pill, so the glyph goes in directly and carries
-              `aria-hidden` for the reason that component gives -- it always sits
-              beside the role it stands for.
-            */
-            const specialist = resolveSpecialist(slug);
-            return (
-              <span
-                key={slug}
-                data-testid="route-pill"
-                title={routeExplanation(message.route_trigger, specialist?.role ?? slug)}
-                className="inline-flex items-center gap-1.5 rounded-full border border-violet-800/60 bg-violet-950/40 px-2.5 py-1 text-xs font-medium text-violet-200"
-              >
-                <span aria-hidden="true">{specialist?.icon ?? "\u{1F9E0}"}</span>
-                {specialist?.role ?? slug}
+              <span className="font-medium">Searched for</span>{" "}
+              <span className="font-serif italic">
+                &ldquo;{message.rewritten_question}&rdquo;
               </span>
-            );
-          })}
-
-          {message.self_check_verdict === "ungrounded" && (
-            /*
-              The honest surfacing of the last row of the self-check table: the
-              critic said the draft was not grounded, the step budget was spent,
-              and **the draft was kept exactly as the model wrote it**. Editing
-              an answer to add a caveat the model did not write is the one
-              outcome worse than shipping the draft, because it makes the
-              system's voice unreliable in a way no trace event records. So the
-              caveat is a chip beside the answer rather than a sentence inside
-              it.
-
-              Amber, like `stopped`, and for the same reason: this is a caveat
-              about completeness and not an error. Rose would teach the reader
-              that something broke, when what happened is that a check ran and
-              reported honestly -- which is the product working.
-            */
-            <span
-              data-testid="ungrounded-chip"
-              title="This answer was checked against the passages it cited, and some of its claims were not carried by them. The text is exactly what the model wrote -- nothing was edited."
-              aria-label="Unverified claims: this answer was checked against its sources and some claims were not carried by them."
-              className="rounded-full border border-amber-800/60 bg-amber-950/30 px-2.5 py-1 text-xs font-medium text-amber-200"
-            >
-              Unverified claims
-            </span>
+            </p>
           )}
 
-          {message.stopped && (
-            /*
-              A stopped turn is TRUNCATED, and without this it renders exactly
-              like a finished one.
+          {/* The testid sits on the answer alone, so its textContent is the answer
+              and not also the latency and the model name.
 
-              The flag was set on the message and read nowhere, which is the
-              worst version of this: the bubble folds into the transcript
-              mid-sentence carrying `refused: false` and `citations: []`, so the
-              Sources button is hidden too and there is nothing at all to
-              distinguish it from a complete, uncited answer. Worse, the agent
-              finishes server-side and commits the WHOLE answer under the same
-              `query_id` -- so a reload silently replaces this text with longer
-              text, and nothing ever told the reader why.
+              `break-words` is here rather than on each tag: `pre` and `table`
+              carry their own `overflow-x-auto` in the component map, but a
+              60-character URL or an unspaced identifier inside an ordinary
+              paragraph has nothing to scroll and pushes the column past the
+              viewport, taking the whole document's width with it.
 
-              Amber rather than rose: this is not an error. The user pressed
-              Stop and got what had arrived, which is the behaviour they asked
-              for. It is a caveat about completeness, and the palette should say
-              so -- rose here would teach them that stopping broke something.
-            */
-            <span
-              data-testid="stopped-chip"
-              className="rounded-full border border-amber-800/60 bg-amber-950/30 px-2.5 py-1 text-xs font-medium text-amber-200"
-              title="You stopped reading this turn. The agent finished it on the server -- reload to see the whole answer."
-            >
-              stopped early · reload for the full answer
-            </span>
+              `PROSE` is `.gw-prose` -- the serif reading face, the 65ch measure
+              and the inter-block rhythm. Serif is not decoration here: it is the
+              provenance signal this design runs on. Sans is the harness
+              speaking; serif is text assembled out of the user's own documents. */}
+          <div
+            data-testid="chat-answer"
+            className={`${PROSE} break-words`}
+          >
+            <Markdown remarkPlugins={[remarkGfm]} components={components}>
+              {message.answer ?? ""}
+            </Markdown>
+          </div>
+
+          {message.refused && (
+            // Spelled out because a refusal looks like a failure and is not one.
+            // The system prompt forbids answering outside the retrieved context,
+            // and declining is the behaviour the golden set scores.
+            <p className="mt-4 border-t border-line pt-3 text-xs leading-relaxed text-muted">
+              The agent declined because the retrieved context did not support an answer.
+              That is a correct outcome, not an error.
+            </p>
           )}
 
-          <span className="ml-auto text-xs text-slate-400">
-            {formatTimestamp(message.created_at)}
-            {message.latency_ms !== null ? ` · ${formatDuration(message.latency_ms)}` : ""}
-            {message.model_used ? ` · ${message.model_used}` : ""}
-          </span>
+          <div className="mt-4 flex flex-wrap items-center gap-x-3 gap-y-2 border-t border-line pt-3">
+            {message.refused && (
+              <span className={`${PILL} ${WARN_TONE}`}>refused</span>
+            )}
+
+            {/*
+              The sources toggle exists only where the margin does not. Above
+              1280px the apparatus is on screen permanently and a button
+              offering to reveal what is already visible is worse than no
+              button -- so it is `xl:hidden`, matching the `.gw-apparatus` media
+              query exactly. The two must move together.
+            */}
+            {message.citations.length > 0 && (
+              <button
+                type="button"
+                aria-expanded={sourcesOpen}
+                aria-controls={sourcesId}
+                onClick={() => setSourcesOpen((open) => !open)}
+                className={`${BTN_QUIET} border border-line text-xs xl:hidden`}
+              >
+                {sourcesOpen
+                  ? "Hide retrieved passages"
+                  : message.refused
+                    ? `Passages checked (${message.citations.length})`
+                    : `Sources (${message.citations.length})`}
+              </button>
+            )}
+
+            {toolActivity && (
+              /*
+                A turn that used tools looked identical to one that did not until
+                somebody opened the trace, which is to say: it looked identical.
+                This is a SUMMARY, not a control -- it changes nothing about the
+                turn -- but it is a button, because the detail it summarises
+                already exists one element below and a chip that names something
+                unreachable is worse than no chip.
+              */
+              <button
+                type="button"
+                data-testid="tool-activity"
+                onClick={() => setTraceSignal((value) => value + 1)}
+                className={`${PILL_NEUTRAL} min-h-11 transition hover:border-line-strong hover:text-ink`}
+              >
+                {toolActivity}
+              </button>
+            )}
+
+            {routed.map((slug) => {
+              /*
+                Which teaching approach answered, beside the chip that says what
+                the turn DID.
+
+                The old palette gave these two facts two different hues -- cyan
+                for tool activity, violet for a route -- which was one of eleven
+                hues in a product that has three states. They are both neutral
+                now, and the distinction that used to be carried by colour is
+                carried by the words, which said it anyway.
+
+                A slug this client has never heard of still renders -- as the
+                slug, with a neutral glyph -- because the roster is a database
+                column and a sixth persona must not leave a hole in the chip row.
+                That is the same rule `CategoryBadge` follows for an unrecognised
+                category.
+
+                Not a button. `PersonaIcon` was the obvious reuse and does not
+                fit: it draws a bordered tile, which is a card affordance rather
+                than an inline pill, so the glyph goes in directly and carries
+                `aria-hidden` for the reason that component gives -- it always
+                sits beside the role it stands for.
+              */
+              const specialist = resolveSpecialist(slug);
+              return (
+                <span
+                  key={slug}
+                  data-testid="route-pill"
+                  title={routeExplanation(message.route_trigger, specialist?.role ?? slug)}
+                  className={PILL_NEUTRAL}
+                >
+                  <span aria-hidden="true">{specialist?.icon ?? "\u{1F9E0}"}</span>
+                  {specialist?.role ?? slug}
+                </span>
+              );
+            })}
+
+            {message.self_check_verdict === "ungrounded" && (
+              /*
+                The honest surfacing of the last row of the self-check table: the
+                critic said the draft was not grounded, the step budget was spent,
+                and **the draft was kept exactly as the model wrote it**. Editing
+                an answer to add a caveat the model did not write is the one
+                outcome worse than shipping the draft, because it makes the
+                system's voice unreliable in a way no trace event records. So the
+                caveat is a chip beside the answer rather than a sentence inside
+                it.
+
+                Warn, like `stopped`, and for the same reason: this is a caveat
+                about completeness and not an error. The error tone would teach
+                the reader that something broke, when what happened is that a
+                check ran and reported honestly -- which is the product working.
+              */
+              <span
+                data-testid="ungrounded-chip"
+                title="This answer was checked against the passages it cited, and some of its claims were not carried by them. The text is exactly what the model wrote -- nothing was edited."
+                aria-label="Unverified claims: this answer was checked against its sources and some claims were not carried by them."
+                className={`${PILL} ${WARN_TONE}`}
+              >
+                Unverified claims
+              </span>
+            )}
+
+            {message.stopped && (
+              /*
+                A stopped turn is TRUNCATED, and without this it renders exactly
+                like a finished one.
+
+                The flag was set on the message and read nowhere, which is the
+                worst version of this: the bubble folds into the transcript
+                mid-sentence carrying `refused: false` and `citations: []`, so the
+                Sources button is hidden too and there is nothing at all to
+                distinguish it from a complete, uncited answer. Worse, the agent
+                finishes server-side and commits the WHOLE answer under the same
+                `query_id` -- so a reload silently replaces this text with longer
+                text, and nothing ever told the reader why.
+
+                Warn rather than error: this is not a fault. The user pressed
+                Stop and got what had arrived, which is the behaviour they asked
+                for.
+              */
+              <span
+                data-testid="stopped-chip"
+                className={`${PILL} ${WARN_TONE}`}
+                title="You stopped reading this turn. The agent finished it on the server -- reload to see the whole answer."
+              >
+                stopped early &middot; reload for the full answer
+              </span>
+            )}
+
+            <span className="ml-auto font-mono text-xs text-faint">
+              {formatTimestamp(message.created_at)}
+              {message.latency_ms !== null ? ` · ${formatDuration(message.latency_ms)}` : ""}
+              {message.model_used ? ` · ${message.model_used}` : ""}
+            </span>
+          </div>
+
+          {/* On its own line, not in the row above: the panel it opens is
+              full-width, and a flex item that expands to a JSON payload drags the
+              whole row's layout with it. */}
+          <TracePanel queryId={message.query_id} openSignal={traceSignal} />
         </div>
 
-        {/* On its own line, not in the row above: the panel it opens is
-            full-width, and a flex item that expands to a JSON payload drags the
-            whole row's layout with it. */}
-        <TracePanel queryId={message.query_id} openSignal={traceSignal} />
+        {/* ---------------------------------------------- the evidence margin */}
+        {message.citations.length > 0 && (
+          /*
+            One node, two placements. Above 1280px `.gw-apparatus` puts this in
+            the grid's second track and `xl:block` keeps it open; below it, the
+            element is an ordinary block under the answer, shown only when the
+            toggle above says so.
 
-        {sourcesOpen && (
-          <div id={sourcesId} className="mt-3">
-            <p className="mb-2 text-xs text-slate-400">
-              {message.refused
-                ? "These are the closest passages the agent checked; they did not support an answer."
-                : "Retrieved passage previews used to ground this answer."}
+            Rendering it once rather than twice is not tidiness -- a second copy
+            would duplicate `data-testid="citation-card"` and the marker -> element
+            map that a chip click looks up would register whichever copy mounted
+            last, so on a narrow screen the chip would focus a node inside a
+            `display:none` subtree and silently do nothing.
+
+            `block`/`hidden` plus `xl:block`, never `contents`/`hidden`: those two
+            are utilities of equal specificity and which one wins is decided by
+            their order in the generated stylesheet rather than by the string --
+            a coin-flip this codebase has already paid for once.
+          */
+          <aside
+            id={sourcesId}
+            aria-label="Retrieved passages"
+            className={`${sourcesOpen ? "block" : "hidden"} mt-4 xl:mt-0 xl:block`}
+          >
+            <p className={`${EYEBROW} xl:border-b xl:border-line xl:pb-2`}>
+              {message.refused ? "Passages checked" : "Sources"}
             </p>
-            <ol className="space-y-2" aria-label="Retrieved passages">
+            <p className="mt-1.5 mb-2.5 text-xs leading-relaxed text-muted">
+              {message.refused
+                ? "The closest passages the agent checked. They did not support an answer."
+                : "Every claim above is numbered to one of these."}
+            </p>
+            <ol className="space-y-2">
               {message.citations.map((citation) => (
                 <CitationCard
                   key={`${citation.chunk_id}-${citation.marker}`}
                   citation={citation}
                   active={activeMarker === citation.marker}
+                  peakStrength={peakStrength}
                   cardRef={(element) => {
                     if (element) cards.current.set(citation.marker, element);
                     else cards.current.delete(citation.marker);
@@ -322,7 +429,7 @@ export default function Message({ message }: { message: ChatMessage }) {
                 />
               ))}
             </ol>
-          </div>
+          </aside>
         )}
       </div>
     </li>
@@ -456,7 +563,11 @@ function CitationChip({
       // pseudo-element in `index.css` gives the finger its area and leaves the
       // prose alone. See the comment there for why the overlap with a
       // neighbouring chip is harmless.
-      className="gw-chip mx-0.5 inline-flex h-6 min-w-6 items-center justify-center rounded border border-sky-700 bg-sky-950/60 px-1 align-super font-mono text-[11px] font-semibold text-sky-200 transition hover:border-sky-400 hover:bg-sky-900/60 hover:text-sky-50"
+      //
+      // Drawn identically to the marker on the card in the margin, deliberately:
+      // matching a bracket in the prose to an entry in the apparatus should be
+      // something the reader does by sight rather than by reading.
+      className="gw-chip mx-0.5 inline-flex h-5 min-w-5 items-center justify-center rounded-sm border border-accent-line bg-accent-soft px-1 align-super font-mono text-xs font-semibold text-accent transition hover:border-accent hover:bg-accent hover:text-inverse"
     >
       {marker}
     </button>
@@ -508,4 +619,3 @@ function summariseToolActivity(
 
   return parts.length > 0 ? parts.join(" · ") : null;
 }
-

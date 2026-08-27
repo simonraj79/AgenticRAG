@@ -1,144 +1,135 @@
 /**
- * The landing hero: the pipeline this app builds, drawn in depth.
+ * The six stages, drawn as strata.
  *
- * Six panes on the Z axis under one `perspective`, one per stage, with a pulse
- * travelling front-ward through them on a loop. It is a picture of the thing
- * the product does -- a question entering at the back and arriving as a scored
- * answer at the front -- rather than an abstract shape, which is the only
- * reason a decorative animation earns a place on the first screen a person
- * sees.
+ * ## What this replaced, and why
  *
- * **`aria-hidden`, and that is load-bearing rather than lazy.** Every stage
- * name here is repeated as real text in the hero beneath it, so a screen reader
- * that skips this subtree loses nothing at all. Announcing six divs of pipeline
- * jargon would be strictly worse than silence.
+ * This was a CSS 3D scene: six translucent panes on the Z axis under a
+ * `perspective`, swinging +-22deg, with a pulse travelling through them. It was
+ * well built and it was the wrong drawing. Three reasons, in order of weight:
  *
- * **Nothing here is random.** Positions are computed from the index by two pure
- * helpers below. `Math.random()` in a render body would reshuffle every dot on
- * each re-render -- and this component re-renders whenever the dev-login form
- * beside it takes a keystroke, so the bug would look like the page twitching
- * while you type rather than like anything to do with randomness.
+ * 1. **It said nothing true.** Six abstract panes rotating conveys "pipeline,
+ *    probably AI" and no fact about this system. The stage names had to be
+ *    repeated underneath it as a real `<ol>` precisely because the picture
+ *    carried none of them -- an illustration that needs a full text
+ *    transcription beside it is decoration wearing a diagram's clothes.
+ * 2. **Its geometry did not survive a phone.** The panes are `w-[248px]`,
+ *    rotated, inside a `w-full` scene; at 320px they exceed the viewport and the
+ *    only thing preventing horizontal scroll was an `overflow-hidden` on the
+ *    page root -- so the landing page's `A7 zero horizontal overflow` depended
+ *    on a clip two components away.
+ * 3. **`preserve-3d` fails silently in two documented ways** -- any `filter`,
+ *    `opacity < 1` or non-visible `overflow` on the carrying element flattens
+ *    it, and the 3D context must be contiguous, so one ordinary wrapper div ends
+ *    it. Both produce a page that renders perfectly, just flat, with nothing in
+ *    devtools naming a cause. That is a permanent maintenance tax on a drawing.
  *
- * Motion stops entirely under `prefers-reduced-motion` via the global rule in
- * index.css. The scene is still legible frozen: the panes keep their depth,
- * because the offsets are transforms, not animation state.
+ * ## What it draws now
+ *
+ * A bar per stage, and **the width is the datum**. Retrieval narrows: a whole
+ * corpus becomes k=20 neighbours, becomes the top 5 after reranking, becomes one
+ * answer. That narrowing is the single most important thing to understand about
+ * how this product works and it is the thing the pipeline diagram should show.
+ *
+ * The same figure is the wordmark -- six ground layers tapering to a point -- so
+ * the mark stops being a logo that happens to sit next to a diagram and becomes
+ * the diagram, at small size.
+ *
+ * **Measure is drawn apart, and that is not a styling choice.** The first five
+ * stages are one pass narrowing toward an answer; measurement is a separate act
+ * performed on the result, against a golden set, and drawing it as a sixth
+ * narrowing bar would claim it is part of the funnel. It is the claim this
+ * product is actually built on, so it gets the accent and the gap.
+ *
+ * No `aria-hidden`, and no duplicate text list beneath it. The old scene needed
+ * both because it was a picture of nothing; this is an ordered list of labelled
+ * stages that happens to be drawn with rules, so a screen reader gets the real
+ * thing and the page carries the stage names exactly once.
  */
 
-const STAGES = [
-  { key: "ingest", label: "Ingest", detail: "PDF, DOCX, Markdown" },
-  { key: "embed", label: "Embed", detail: "gemini-embedding-2" },
-  { key: "retrieve", label: "Retrieve", detail: "Pinecone, top-k" },
-  { key: "rerank", label: "Rerank", detail: "Cohere, top-n" },
-  { key: "generate", label: "Generate", detail: "grounded, or it declines" },
-  { key: "measure", label: "Measure", detail: "Ragas, four metrics" },
-] as const;
-
-/** Depth per pane. Front pane at 0, each one 108px further back. */
-function depthFor(index: number): number {
-  return -index * 108;
-}
+import type { CSSProperties } from "react";
 
 /**
- * A dot's resting position, from its index alone.
- *
- * Two incommensurable multipliers (golden-ratio-ish) so the dots scatter
- * instead of banding, without a random source. The same index always yields the
- * same point, which is what keeps them still across re-renders.
+ * `width` is proportional and deliberately not to scale -- k=20 to top-5 to one
+ * answer is a 20x taper, and drawn faithfully the last bar would be invisible.
+ * It is an ordering, and the `detail` column carries the real numbers.
  */
-function dotAt(index: number): { left: string; top: string; delay: string; depth: number } {
-  const x = (index * 61.8) % 100;
-  const y = (index * 38.2 + index * index * 3.7) % 100;
-  return {
-    left: `${x.toFixed(2)}%`,
-    top: `${y.toFixed(2)}%`,
-    delay: `${((index * 0.47) % 4).toFixed(2)}s`,
-    depth: -((index * 53) % 480),
-  };
-}
+const STAGES: { name: string; detail: string; width: number }[] = [
+  { name: "Ingest", detail: "your documents, split into chunks", width: 100 },
+  { name: "Embed", detail: "768-dimension vectors, one per chunk", width: 84 },
+  { name: "Retrieve", detail: "the k nearest to the question", width: 66 },
+  { name: "Rerank", detail: "re-scored, and cut to the best few", width: 45 },
+  { name: "Generate", detail: "an answer, from those passages only", width: 27 },
+];
 
-const DOTS = Array.from({ length: 18 }, (_, index) => dotAt(index));
+const MEASURE = {
+  name: "Measure",
+  detail: "faithfulness, relevance, precision, recall",
+};
 
 export default function PipelineScene() {
   return (
-    <div
-      aria-hidden="true"
-      className="gw-scene pointer-events-none relative h-[300px] w-full select-none sm:h-[380px] lg:h-[460px]"
-    >
-      {/*
-        The glow is a SIBLING of the rig, never a parent. A blur filter on an
-        ancestor flattens `preserve-3d` and the whole scene silently collapses
-        to 2D -- see the note in index.css.
-      */}
-      <div className="absolute inset-0 flex items-center justify-center">
-        <div
-          className="h-56 w-56 rounded-full bg-emerald-500/25 blur-3xl sm:h-72 sm:w-72"
-          style={{ animation: "gw-glow 9s ease-in-out infinite" }}
-        />
-      </div>
-      <div className="absolute inset-0 flex items-center justify-center">
-        <div
-          className="h-40 w-72 rounded-full bg-sky-500/20 blur-3xl"
-          style={{ animation: "gw-glow 11s ease-in-out infinite reverse" }}
-        />
-      </div>
+    <div className="mt-10">
+      <p className="text-[0.6875rem] font-semibold tracking-[0.08em] text-faint uppercase">
+        Six stages, every one inspectable
+      </p>
 
-      <div className="gw-rig absolute inset-0 flex items-center justify-center">
-        {/* Chunks suspended in the vector space, behind the panes. */}
-        {DOTS.map((dot, index) => (
-          <span
-            key={index}
-            className="absolute h-1.5 w-1.5 rounded-full bg-emerald-300"
-            style={{
-              left: dot.left,
-              top: dot.top,
-              transform: `translateZ(${dot.depth}px)`,
-              animation: `gw-drift ${7 + (index % 5)}s ease-in-out ${dot.delay} infinite`,
-            }}
-          />
-        ))}
-
+      <ol className="mt-4 space-y-2.5">
         {STAGES.map((stage, index) => (
-          <div
-            key={stage.key}
-            className="gw-pane absolute flex h-[132px] w-[248px] flex-col justify-between rounded-xl border border-emerald-400/25 bg-slate-900/40 p-4 shadow-[0_0_40px_-12px_rgba(16,185,129,0.5)] sm:h-[150px] sm:w-[290px]"
-            data-stage={stage.key}
-            style={
-              {
-                "--z": `${depthFor(index)}px`,
-                "--y": `${index * 5}px`,
-                // Panes further back are dimmer. Depth cueing by opacity, not by
-                // fog: the panes are translucent, so a fog layer between them
-                // would tint the ones in front of it too.
-                opacity: 1 - index * 0.11,
-              } as React.CSSProperties
-            }
-          >
-            <div className="flex items-center justify-between">
-              <span className="text-[11px] font-semibold uppercase tracking-[0.18em] text-emerald-300">
-                {stage.label}
-              </span>
-              <span className="font-mono text-[10px] text-slate-400">
-                {String(index + 1).padStart(2, "0")}
-              </span>
-            </div>
+          <li key={stage.name} className="flex items-baseline gap-3">
+            <span className="w-4 shrink-0 font-mono text-xs text-faint tabular-nums">
+              {index + 1}
+            </span>
 
-            {/* A few bars standing in for the content moving through. */}
-            <div className="space-y-1.5">
-              <div className="h-1 w-full rounded-full bg-gradient-to-r from-emerald-400/60 to-transparent" />
-              <div className="h-1 w-4/5 rounded-full bg-gradient-to-r from-sky-400/45 to-transparent" />
-              <div className="h-1 w-3/5 rounded-full bg-gradient-to-r from-emerald-400/30 to-transparent" />
-            </div>
+            <span className="w-[4.5rem] shrink-0 text-xs font-medium text-ink">
+              {stage.name}
+            </span>
 
-            <span className="text-[11px] text-slate-400">{stage.detail}</span>
-          </div>
+            {/*
+              The bar and the sentence share a row rather than stacking, so the
+              taper is read down the left edge in one movement. `min-w-0` on the
+              wrapper is what stops a long detail string from pushing the bar
+              column out at 320px.
+            */}
+            <span className="flex min-w-0 flex-1 items-center gap-3">
+              <span
+                aria-hidden="true"
+                className="gw-strata h-[3px] shrink-0"
+                style={
+                  {
+                    // `width` directly, NOT `--gw-strata-width`. An inline
+                    // `width` beats the class's `width: var(--gw-strata-width)`
+                    // regardless of the custom property, so setting both leaves
+                    // one of them silently dead -- the kind of line that reads
+                    // as intent and does nothing.
+                    //
+                    // The 0.42 factor keeps the widest bar inside the row: the
+                    // bar shares its flex track with the stage description, and
+                    // a 100% bar would push that text out at narrow widths.
+                    width: `${stage.width * 0.42}%`,
+                    // Later stages are fainter as well as shorter, so the taper
+                    // still reads when the bars are only a few pixels apart.
+                    "--gw-strata-opacity": 0.3 + (stage.width / 100) * 0.55,
+                  } as CSSProperties
+                }
+              />
+              <span className="min-w-0 truncate text-xs text-muted">{stage.detail}</span>
+            </span>
+          </li>
         ))}
 
-        {/* The query, travelling the stages back-to-front on a loop. */}
-        <div
-          className="absolute h-[132px] w-[248px] rounded-xl border-2 border-emerald-300/80 bg-emerald-400/10 shadow-[0_0_60px_-4px_rgba(52,211,153,0.85)] sm:h-[150px] sm:w-[290px]"
-          style={{ animation: "gw-pulse 6.5s cubic-bezier(0.4, 0, 0.6, 1) infinite" }}
-        />
-      </div>
+        {/*
+          Set apart by a rule, not by a gap alone -- a gap reads as spacing, a
+          rule reads as a boundary, and this is a boundary: everything above is
+          how an answer is produced, and this is how it is checked.
+        */}
+        <li className="flex items-baseline gap-3 border-t border-line pt-3.5">
+          <span className="w-4 shrink-0 font-mono text-xs text-accent tabular-nums">6</span>
+          <span className="w-[4.5rem] shrink-0 text-xs font-semibold text-accent">
+            {MEASURE.name}
+          </span>
+          <span className="min-w-0 flex-1 text-xs text-muted">{MEASURE.detail}</span>
+        </li>
+      </ol>
     </div>
   );
 }

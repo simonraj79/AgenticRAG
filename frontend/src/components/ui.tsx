@@ -11,10 +11,27 @@
  * them. A copy of `ParamSlider` in particular is not a copy of a control, it is
  * a copy of the blur/keystroke clamping asymmetry documented on it, and the
  * copy is where that reasoning would quietly stop being true.
+ *
+ * Everything visual here now comes from `lib/styles.ts` and the token layer in
+ * `index.css`. No component in this file names a colour.
  */
 
 import { useEffect, useState } from "react";
 import type { ReactNode, RefObject } from "react";
+import {
+  BAD_TONE,
+  BTN_DANGER,
+  BTN_SECONDARY,
+  BTN_SM,
+  CARD_EMPTY,
+  FIELD,
+  NEUTRAL_TONE,
+  NOTICE,
+  OK_TONE,
+  PILL,
+  PILL_NEUTRAL,
+  WARN_TONE,
+} from "../lib/styles.ts";
 
 // --------------------------------------------------------------------------
 // Feedback
@@ -22,9 +39,9 @@ import type { ReactNode, RefObject } from "react";
 
 export function Spinner({ label }: { label?: string }) {
   return (
-    <span className="inline-flex items-center gap-2 text-sm text-slate-400">
+    <span className="inline-flex items-center gap-2 text-sm text-muted">
       <span
-        className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-slate-600 border-t-slate-200"
+        className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-line-strong border-t-accent"
         aria-hidden="true"
       />
       {label && <span>{label}</span>}
@@ -45,7 +62,7 @@ export function ErrorBanner({ error }: { error: string | null }) {
     <div
       role="alert"
       data-testid="error-banner"
-      className="rounded-lg border border-rose-800/60 bg-rose-950/40 px-4 py-3 text-sm whitespace-pre-wrap text-rose-200"
+      className={`${NOTICE} ${BAD_TONE} text-sm whitespace-pre-wrap`}
     >
       {error}
     </div>
@@ -69,10 +86,10 @@ export function EmptyState({
   children?: ReactNode;
 }) {
   return (
-    <div className="rounded-xl border border-dashed border-slate-800 px-6 py-10 text-center">
-      <p className="text-sm text-slate-300">{title}</p>
-      {detail && <p className="mx-auto mt-1 max-w-md text-xs text-slate-400">{detail}</p>}
-      {children && <div className="mt-4 flex justify-center">{children}</div>}
+    <div className={`${CARD_EMPTY} px-6 py-10 text-center`}>
+      <p className="text-sm font-medium text-ink">{title}</p>
+      {detail && <p className="mx-auto mt-1.5 max-w-md text-xs text-muted">{detail}</p>}
+      {children && <div className="mt-5 flex justify-center">{children}</div>}
     </div>
   );
 }
@@ -89,25 +106,25 @@ export function EmptyState({
  * are in the same table, so the pill has to speak both vocabularies -- and so
  * does anything deciding whether a document has stopped moving (see
  * `TERMINAL_DOCUMENT_STATUSES` in AgentDocuments).
+ *
+ * A STATE, so it is a filled tinted pill. See the note on `PILL` in
+ * `lib/styles.ts` for why that is a contract rather than a look: the taxonomy
+ * badges below deliberately do NOT fill, which is what lets both families reuse
+ * hues without becoming ambiguous.
  */
-const STATUS_STYLES: Record<string, string> = {
-  ready: "border-emerald-800/60 bg-emerald-950/40 text-emerald-300",
-  indexed: "border-emerald-800/60 bg-emerald-950/40 text-emerald-300",
-  indexing: "border-amber-800/60 bg-amber-950/40 text-amber-300",
-  processing: "border-amber-800/60 bg-amber-950/40 text-amber-300",
-  pending: "border-slate-700 bg-slate-900 text-slate-400",
-  empty: "border-slate-700 bg-slate-900 text-slate-400",
-  failed: "border-rose-800/60 bg-rose-950/40 text-rose-300",
+const STATUS_TONES: Record<string, string> = {
+  ready: OK_TONE,
+  indexed: OK_TONE,
+  indexing: WARN_TONE,
+  processing: WARN_TONE,
+  pending: NEUTRAL_TONE,
+  empty: NEUTRAL_TONE,
+  failed: BAD_TONE,
 };
 
 export function StatusPill({ status }: { status: string }) {
-  const style = STATUS_STYLES[status] ?? "border-slate-700 bg-slate-900 text-slate-400";
   return (
-    <span
-      className={`inline-block rounded-full border px-2 py-0.5 text-xs font-medium ${style}`}
-    >
-      {status}
-    </span>
+    <span className={`${PILL} ${STATUS_TONES[status] ?? NEUTRAL_TONE}`}>{status}</span>
   );
 }
 
@@ -125,9 +142,9 @@ export function StatusPill({ status }: { status: string }) {
  */
 
 const ICON_SIZES: Record<"sm" | "md" | "lg", string> = {
-  sm: "h-8 w-8 text-lg",
-  md: "h-10 w-10 text-xl",
-  lg: "h-12 w-12 text-2xl",
+  sm: "h-8 w-8 text-base",
+  md: "h-10 w-10 text-lg",
+  lg: "h-12 w-12 text-xl",
 };
 
 /**
@@ -150,7 +167,7 @@ export function PersonaIcon({
   return (
     <span
       aria-hidden="true"
-      className={`inline-flex shrink-0 items-center justify-center rounded-lg border border-slate-800 bg-slate-950 leading-none ${ICON_SIZES[size]}`}
+      className={`inline-flex shrink-0 items-center justify-center rounded-md border border-line bg-sunken leading-none ${ICON_SIZES[size]}`}
     >
       {glyph}
     </span>
@@ -163,6 +180,13 @@ export function PersonaIcon({
  * an unrecognised value must render as something neutral instead of indexing
  * into `undefined`, which is why the fallback is a real label ("ungrouped")
  * rather than a crash or an empty badge.
+ *
+ * TAXONOMY, so: a neutral pill with a coloured dot, never a filled one. That is
+ * what lets `assess` sit on a gold that is near the `warn` state and `reflect`
+ * on a teal near `ok` without either being ambiguous -- the shapes differ, so
+ * the hues are free to be close. Before this split, `border-amber-800/60  (palette-check: ignore -- quoting the old design, not a class)
+ * bg-amber-950/40 text-amber-300` meant the `indexing` status AND the `assess`  (palette-check: ignore -- quoting the old design, not a class)
+ * category AND `ai_suggested` provenance AND a `running` eval, all at once.
  */
 const CATEGORY_LABELS: Record<string, string> = {
   explain: "Explain",
@@ -172,24 +196,21 @@ const CATEGORY_LABELS: Record<string, string> = {
   general: "General",
 };
 
-const CATEGORY_STYLES: Record<string, string> = {
-  explain: "border-sky-800/60 bg-sky-950/40 text-sky-300",
-  practice: "border-violet-800/60 bg-violet-950/40 text-violet-300",
-  assess: "border-amber-800/60 bg-amber-950/40 text-amber-300",
-  reflect: "border-teal-800/60 bg-teal-950/40 text-teal-300",
-  general: "border-slate-700 bg-slate-900 text-slate-400",
+const CATEGORY_DOTS: Record<string, string> = {
+  explain: "bg-cat-explain",
+  practice: "bg-cat-practice",
+  assess: "bg-cat-assess",
+  reflect: "bg-cat-reflect",
+  general: "bg-faint",
 };
-
-const UNGROUPED = "border-slate-700 bg-slate-900 text-slate-400";
 
 export function CategoryBadge({ category }: { category?: string | null }) {
   const key = category ?? "";
   const label = CATEGORY_LABELS[key] ?? "ungrouped";
-  const style = CATEGORY_STYLES[key] ?? UNGROUPED;
+  const dot = CATEGORY_DOTS[key] ?? "bg-faint";
   return (
-    <span
-      className={`inline-block rounded-full border px-2 py-0.5 text-[0.65rem] font-medium tracking-wide uppercase ${style}`}
-    >
+    <span className={`${PILL_NEUTRAL} text-[0.6875rem] tracking-[0.04em] uppercase`}>
+      <span aria-hidden="true" className={`h-1.5 w-1.5 shrink-0 rounded-full ${dot}`} />
       {label}
     </span>
   );
@@ -203,8 +224,8 @@ export function CategoryBadge({ category }: { category?: string | null }) {
 export function Fact({ label, value }: { label: string; value: string | number }) {
   return (
     <div>
-      <dt className="text-slate-400">{label}</dt>
-      <dd className="mt-0.5 text-slate-200">{value}</dd>
+      <dt className="text-xs text-muted">{label}</dt>
+      <dd className="mt-0.5 font-mono text-sm text-ink">{value}</dd>
     </div>
   );
 }
@@ -216,6 +237,11 @@ export function Fact({ label, value }: { label: string; value: string | number }
  * A native `<details>` rather than a `useState` toggle: it is open-able before
  * React hydrates, Ctrl+F finds text inside a closed one in Chrome, and the
  * disclosure semantics arrive without an `aria-expanded` to keep in sync.
+ *
+ * **It must stay a `<details>`/`<summary>` pair.** `HandoutCard.test.tsx`
+ * reaches through `reveal.querySelector("summary")` in four cases, and
+ * `useFocusTrap`'s `FOCUSABLE` list names `summary` so a disclosure inside a
+ * drawer stays reachable. A custom accordion breaks both.
  */
 export function Reveal({
   summary,
@@ -227,7 +253,7 @@ export function Reveal({
   testId?: string;
 }) {
   return (
-    <details data-testid={testId} className="group rounded-lg border border-slate-800 bg-slate-950/60">
+    <details data-testid={testId} className="group rounded-md border border-line bg-surface">
       {/*
         `min-h-11` plus `flex items-center`, not padding. A `<summary>` is the
         one interactive element in this file that is not a `<button>`, which is
@@ -240,13 +266,16 @@ export function Reveal({
         bigger while the text appears to drift upward. The marker span keeps
         `inline-block` for its rotate transform.
       */}
-      <summary className="flex min-h-11 cursor-pointer list-none items-center px-4 py-2.5 text-xs font-medium tracking-wide text-slate-400 uppercase transition select-none hover:text-slate-200">
-        <span className="mr-2 inline-block transition group-open:rotate-90" aria-hidden="true">
+      <summary className="flex min-h-11 cursor-pointer list-none items-center gap-2 px-3.5 py-2.5 text-[0.6875rem] font-semibold tracking-[0.08em] text-faint uppercase transition select-none hover:text-ink">
+        <span
+          className="inline-block text-sm transition group-open:rotate-90"
+          aria-hidden="true"
+        >
           &rsaquo;
         </span>
         {summary}
       </summary>
-      <div className="border-t border-slate-800 px-4 py-4">{children}</div>
+      <div className="border-t border-line px-3.5 py-4">{children}</div>
     </details>
   );
 }
@@ -393,7 +422,7 @@ export function ParamSlider({
   return (
     <div data-testid={`param-${id}`} data-value={value}>
       <div className="flex items-baseline justify-between gap-3">
-        <label className="text-xs font-medium text-slate-300" htmlFor={`${id}-range`}>
+        <label className="text-sm font-medium text-ink" htmlFor={`${id}-range`}>
           {label}
         </label>
         <input
@@ -409,7 +438,7 @@ export function ParamSlider({
           step={band.step}
           onChange={(event) => commit(event.target.value)}
           onBlur={settle}
-          className="min-h-11 w-24 shrink-0 rounded-md border border-slate-700 bg-slate-950 px-2 py-1 text-right font-mono text-sm text-slate-100 outline-none focus:border-slate-500 disabled:opacity-50"
+          className={`${FIELD} w-24 shrink-0 px-2 text-right font-mono disabled:opacity-50`}
         />
       </div>
 
@@ -431,10 +460,10 @@ export function ParamSlider({
         // would interrupt continuously for the length of it. Described-by is
         // announced on focus, which is when it is wanted.
         aria-describedby={warning ? `${id}-help ${id}-warning` : `${id}-help`}
-        className="gw-range mt-1"
+        className="gw-range mt-0.5"
       />
 
-      <p id={`${id}-help`} className="text-xs leading-relaxed text-slate-400">
+      <p id={`${id}-help`} className="text-xs leading-relaxed text-muted">
         {help}
       </p>
 
@@ -442,7 +471,7 @@ export function ParamSlider({
         <p
           id={`${id}-warning`}
           data-testid={`param-${id}-warning`}
-          className="mt-1.5 rounded-md border border-amber-800/60 bg-amber-950/30 px-2.5 py-1.5 text-xs text-amber-200"
+          className={`${NOTICE} ${WARN_TONE} mt-2`}
         >
           {warning}
         </p>
@@ -475,8 +504,8 @@ export function Segmented({
 }) {
   return (
     <fieldset data-testid={testId} data-value={value} disabled={disabled}>
-      <legend className="text-xs font-medium text-slate-300">{legend}</legend>
-      <div className="mt-2 inline-flex rounded-md border border-slate-700 bg-slate-950 p-1">
+      <legend className="text-sm font-medium text-ink">{legend}</legend>
+      <div className="mt-2 inline-flex rounded-md border border-line-strong bg-sunken p-1">
         {options.map((option) => {
           const active = option.value === value;
           return (
@@ -484,10 +513,10 @@ export function Segmented({
               key={option.value}
               data-testid={`${testId}-${option.value}`}
               data-selected={active}
-              className={`min-h-11 cursor-pointer rounded px-3 py-2 text-sm transition focus-within:ring-2 focus-within:ring-emerald-500/60 ${
+              className={`flex min-h-11 cursor-pointer items-center rounded-sm px-3.5 text-sm font-medium transition ${
                 active
-                  ? "bg-emerald-500 font-medium text-emerald-950"
-                  : "text-slate-300 hover:text-slate-100"
+                  ? "bg-surface text-ink shadow-xs"
+                  : "text-muted hover:text-ink"
               } ${disabled ? "cursor-not-allowed opacity-50" : ""}`}
             >
               <input
@@ -503,7 +532,7 @@ export function Segmented({
           );
         })}
       </div>
-      <p className="mt-2 text-xs leading-relaxed text-slate-400">{help}</p>
+      <p className="mt-2 text-xs leading-relaxed text-muted">{help}</p>
     </fieldset>
   );
 }
@@ -533,13 +562,12 @@ export function Segmented({
  * is why callers place this away from the primary action rather than next to
  * it -- the two protections are against different mistakes and neither
  * substitutes for the other.
+ *
+ * Resting state is an ordinary secondary button that turns red only on hover,
+ * and the filled red belongs exclusively to the ARMED state. A delete that is
+ * red before it has been confirmed teaches people to click through red.
  */
 const ARM_TIMEOUT_MS = 5000;
-
-const DELETE_SIZES: Record<"sm" | "md", string> = {
-  sm: "min-h-11 px-2.5 py-2 text-xs",
-  md: "min-h-11 px-3 py-2 text-sm",
-};
 
 export function ConfirmDeleteButton({
   testId,
@@ -586,12 +614,8 @@ export function ConfirmDeleteButton({
           setArmed(true);
         }
       }}
-      className={`rounded-md border font-medium transition disabled:opacity-50 ${
-        DELETE_SIZES[size]
-      } ${
-        armed
-          ? "border-rose-500 bg-rose-600 text-white hover:bg-rose-500"
-          : "border-slate-800 bg-slate-900 text-slate-400 hover:border-rose-800 hover:text-rose-300"
+      className={`${armed ? BTN_DANGER : `${BTN_SECONDARY} text-muted hover:border-bad-line hover:bg-bad-soft hover:text-bad`} ${
+        size === "sm" ? BTN_SM : ""
       }`}
     >
       {busy ? "Deleting…" : armed ? confirmLabel : label}

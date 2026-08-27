@@ -42,6 +42,7 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { KeyboardEvent, RefObject } from "react";
 import type { Specialist } from "../lib/specialists.ts";
+import { ROW, ROW_ACTIVE, ROW_INACTIVE } from "../lib/styles.ts";
 import {
   applyMention,
   filterSpecialists,
@@ -265,11 +266,19 @@ export default function MentionPopup({ state }: { state: MentionState }) {
   return (
     <div
       data-testid="mention-popup"
+      // The `flex` / `hidden` pair is LITERAL and must stay that way: eleven
+      // unit cases match those two strings textually, and `index.css` records
+      // why the `contents` alternative is a coin flip. Everything else about
+      // this panel is free to move; that expression is not.
+      //
+      // `bg-raised` and a `shadow-lg`: this is one of the three things in the
+      // app that genuinely floats -- a drawer, a menu, and this -- so it is the
+      // one place elevation is drawn with a shadow rather than with a hairline.
       className={`${
         open ? "flex" : "hidden"
-      } absolute inset-x-0 bottom-full z-30 mb-2 flex-col rounded-lg border border-violet-900/70 bg-slate-950 p-1 shadow-lg shadow-slate-950/60`}
+      } absolute inset-x-0 bottom-full z-30 mb-2 flex-col rounded-lg border border-line bg-raised p-1 shadow-lg`}
     >
-      <p className="px-2 pt-1 pb-1.5 text-[11px] text-slate-500">
+      <p className="px-2 pt-1 pb-1.5 text-xs text-faint">
         Answer as a specialist. Enter or Tab accepts, Esc closes.
       </p>
       <ul id={listboxId} role="listbox" aria-label="Specialists" className="min-w-0">
@@ -291,16 +300,19 @@ export default function MentionPopup({ state }: { state: MentionState }) {
                 pick(specialist);
               }}
               onMouseEnter={() => setActive(specialist.slug)}
-              className={`flex min-h-11 min-w-0 cursor-pointer items-center gap-2 rounded-md px-2 transition ${
-                activeRow
-                  ? "bg-violet-950/60 text-violet-100"
-                  : "text-slate-300 hover:bg-slate-900"
+              // `ROW` plus the shared active/inactive pair, the same treatment a
+              // conversation row wears -- the accent tint means "this is the one
+              // you are on" in both places. `min-h-11` is kept explicitly on top
+              // of `ROW` because `mention_popup_check.py` measures every option
+              // and `ROW` carries padding rather than a height.
+              className={`${ROW} flex min-h-11 min-w-0 cursor-pointer items-center gap-2 ${
+                activeRow ? ROW_ACTIVE : ROW_INACTIVE
               }`}
             >
               <span aria-hidden="true" className="shrink-0 text-base leading-none">
                 {specialist.icon}
               </span>
-              <span className="min-w-0 flex-1 truncate text-sm">{specialist.role}</span>
+              <span className="min-w-0 flex-1 truncate text-sm text-ink">{specialist.role}</span>
               {/*
                 `min-w-0 truncate` and deliberately NOT `shrink-0`. The role
                 carries `flex-1`, so its basis is 0 and it contributes nothing
@@ -309,7 +321,7 @@ export default function MentionPopup({ state }: { state: MentionState }) {
                 zero horizontal overflow there. Letting it truncate makes the
                 row arithmetically incapable of overflowing at any width.
               */}
-              <span className="min-w-0 truncate font-mono text-[11px] text-slate-500">
+              <span className="min-w-0 truncate font-mono text-xs text-faint">
                 @{specialist.slug}
               </span>
             </li>

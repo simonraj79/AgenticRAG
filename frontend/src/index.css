@@ -1,52 +1,553 @@
 @import "tailwindcss";
 
 /*
-  Base rules only, and each one exists because a utility class cannot reach the
-  thing it fixes. Everything else is a utility on the element that needs it --
-  which keeps the styling next to the markup it applies to and avoids a second
-  place to look when something renders wrong.
+  Self-hosted, not linked. `Login.tsx` already inlines its own SVG marks "so the
+  page makes no third-party request"; a Google Fonts <link> would undo that for
+  the one asset class that blocks first paint. These resolve through Vite and
+  ship in the bundle.
+
+  Variable faces -- one file per family rather than nine static weights.
 */
+@import "@fontsource-variable/instrument-sans";
+@import "@fontsource-variable/literata";
+@import "@fontsource-variable/jetbrains-mono";
+
+/*
+  Theme is driven by a CLASS, not by the media query alone.
+
+  `prefers-color-scheme` on its own cannot express "the user chose light while
+  their OS is dark", and this product is read on shared workshop machines where
+  that is a normal request. The pre-paint script in index.html resolves
+  system/light/dark into the presence or absence of `.dark` on <html> BEFORE
+  first paint, so there is no flash -- which matters past cosmetics:
+  `ui_check.py` A10 fails the whole run on a single console error, and a theme
+  applied in an effect produces both a flash and a hydration warning.
+*/
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* ==========================================================================
+   PALETTE
+
+   Raw values live here, on :root and .dark. Nothing in the app should name a
+   value from this block -- the `@theme inline` map below turns them into
+   semantic utilities, and semantic is the only layer components may see.
+
+   The rule that keeps this honest: a component states WHAT a colour is for
+   (`bg-surface`, `text-muted`), never WHICH colour it is (`bg-white`,
+   `text-slate-400`). That is what makes a theme switch a value change here
+   rather than an edit across forty files -- and it is what turns
+   `bg-emerald-950/500` (a real bug that shipped: `/500` is not a valid opacity
+   modifier, so Tailwind emitted nothing and the Admin cost bars rendered
+   invisible) into a class that either exists or fails loudly.
+
+   Contrast was computed, not eyeballed. Every text token against the surface it
+   is normally drawn on clears WCAG AA for body text; `--gw-faint` is the
+   tightest at ~4.9 light / ~4.7 dark, which is why it is not any lighter.
+   ========================================================================== */
 
 :root {
-  /* Tells the browser to render its own chrome dark: form controls, the
-     scrollbar, and the native file-picker button. Without it the file input in
-     the Documents tab renders as a light-grey control on a near-black panel. */
-  color-scheme: dark;
+  color-scheme: light;
+
+  /* Surfaces, furthest back to nearest front. */
+  --gw-canvas: #fbfaf8;
+  --gw-surface: #ffffff;
+  --gw-raised: #ffffff;
+  --gw-sunken: #f2f1ed;
+
+  /* Ink. */
+  --gw-ink: #14161a;
+  --gw-ink-hover: #000000;
+  --gw-muted: #52585f;
+  --gw-faint: #6e747c;
+  --gw-inverse: #fbfaf8;
+
+  /* Rules. Hairlines carry the structure in this design, so there are two
+     weights and the difference between them is meant to be legible. */
+  --gw-line: #e4e2dc;
+  --gw-line-strong: #c9c6be;
+
+  /* Form fields get their own surface rather than reusing one of the four
+     above, because the relationship that makes a field READ as a field inverts
+     between themes: on paper it is BRIGHTER than the page it sits on, and in
+     the dark it is DARKER than the panel it sits in. One token expresses that;
+     picking `bg-surface` or `bg-sunken` for both gives an invisible field in
+     one theme or the other, which is how it currently is. */
+  --gw-field: #ffffff;
+
+  /* The one chromatic accent. Interactive, and -- deliberately the same hue --
+     the apparatus: citation markers, source references, retrieval scores.
+     Sharing it is the point. The colour means "this is evidence, or a way to
+     reach some", which is the single claim this product makes. */
+  --gw-accent: #12557f;
+  --gw-accent-hover: #0e4468;
+  --gw-accent-soft: #e8f1f7;
+  --gw-accent-line: #b9d5e6;
+
+  /* State. Saturated, and always drawn as a FILLED tinted pill. */
+  --gw-ok: #196b4b;
+  --gw-ok-soft: #e6f3ec;
+  --gw-ok-line: #b4dcc7;
+  --gw-warn: #8a5a0e;
+  --gw-warn-soft: #fbf1de;
+  --gw-warn-line: #e8ce9a;
+  --gw-bad: #a32a2a;
+  --gw-bad-soft: #fbeaea;
+  --gw-bad-line: #eebfbf;
+
+  /* Persona taxonomy. Always drawn as a DOT on a neutral pill, never as a
+     filled pill -- which is what lets `assess` sit near `warn` and `reflect`
+     near `ok` without either being ambiguous. Form separates them, so hue does
+     not have to, and four categories need not dodge three states. The old
+     palette had one class string (`border-amber-800/60 bg-amber-950/40
+     text-amber-300`) meaning `indexing`, `assess`, `ai_suggested`, `running`
+     and SCORE_CHECK simultaneously; this is that collision resolved
+     structurally rather than by finding four more hues. */
+  --gw-cat-explain: #3f5bc4;
+  --gw-cat-practice: #8a3fa6;
+  --gw-cat-assess: #b07314;
+  --gw-cat-reflect: #0d7f79;
+
+  --gw-focus: #12557f;
+
+  /* Shadows are near-absent by design: on paper a hairline reads as structure
+     and a drop shadow reads as chrome. Only things that genuinely float -- a
+     drawer, a popup, a menu -- get one. */
+  --gw-shadow-xs: 0 1px 2px rgb(20 22 26 / 0.05);
+  --gw-shadow-sm: 0 1px 3px rgb(20 22 26 / 0.06), 0 1px 2px rgb(20 22 26 / 0.04);
+  --gw-shadow-md: 0 4px 12px -2px rgb(20 22 26 / 0.08), 0 2px 4px -2px rgb(20 22 26 / 0.05);
+  --gw-shadow-lg: 0 12px 32px -8px rgb(20 22 26 / 0.14), 0 4px 8px -4px rgb(20 22 26 / 0.06);
+  --gw-shadow-xl: 0 24px 56px -12px rgb(20 22 26 / 0.2);
 }
+
+.dark {
+  color-scheme: dark;
+
+  --gw-canvas: #0f1216;
+  --gw-surface: #171a1f;
+  --gw-raised: #1d2127;
+  --gw-sunken: #0a0c0f;
+
+  --gw-ink: #e9eaed;
+  --gw-ink-hover: #ffffff;
+  --gw-muted: #a3a9b2;
+  --gw-faint: #797f88;
+  --gw-inverse: #0f1216;
+
+  --gw-line: #262a31;
+  --gw-line-strong: #3a404a;
+
+  /* Darker than `--gw-surface`, so a field reads as inset in a panel. See the
+     note on the light value. */
+  --gw-field: #0b0e12;
+
+  --gw-accent: #7ab8de;
+  --gw-accent-hover: #9bcdeb;
+  --gw-accent-soft: #12283a;
+  --gw-accent-line: #244b67;
+
+  --gw-ok: #5ccb9b;
+  --gw-ok-soft: #0d2419;
+  --gw-ok-line: #1e4b37;
+  --gw-warn: #e0b25f;
+  --gw-warn-soft: #2a2009;
+  --gw-warn-line: #4e3d14;
+  --gw-bad: #f08c8c;
+  --gw-bad-soft: #2b1414;
+  --gw-bad-line: #542424;
+
+  --gw-cat-explain: #8fa2f0;
+  --gw-cat-practice: #cf92e2;
+  --gw-cat-assess: #e3b25c;
+  --gw-cat-reflect: #4fc8c0;
+
+  --gw-focus: #7ab8de;
+
+  /* A shadow tuned for paper disappears entirely on a dark surface, so the
+     alpha roughly quadruples rather than the geometry changing. */
+  --gw-shadow-xs: 0 1px 2px rgb(0 0 0 / 0.4);
+  --gw-shadow-sm: 0 1px 3px rgb(0 0 0 / 0.5), 0 1px 2px rgb(0 0 0 / 0.4);
+  --gw-shadow-md: 0 4px 12px -2px rgb(0 0 0 / 0.55), 0 2px 4px -2px rgb(0 0 0 / 0.4);
+  --gw-shadow-lg: 0 12px 32px -8px rgb(0 0 0 / 0.65), 0 4px 8px -4px rgb(0 0 0 / 0.45);
+  --gw-shadow-xl: 0 24px 56px -12px rgb(0 0 0 / 0.75);
+}
+
+/* ==========================================================================
+   THEME MAP
+
+   `inline` is load-bearing and is not a style preference. Without it a utility
+   emits `var(--color-surface)`, which resolves against the value captured on
+   :root and does NOT change when `.dark` redefines the raw variable. With it,
+   `bg-surface` emits `background-color: var(--gw-surface)` -- resolved at the
+   element, so the ancestor class wins and one class on <html> re-themes the
+   whole app.
+   ========================================================================== */
+
+@theme inline {
+  --color-canvas: var(--gw-canvas);
+  --color-surface: var(--gw-surface);
+  --color-raised: var(--gw-raised);
+  --color-sunken: var(--gw-sunken);
+
+  --color-ink: var(--gw-ink);
+  --color-ink-hover: var(--gw-ink-hover);
+  --color-muted: var(--gw-muted);
+  --color-faint: var(--gw-faint);
+  --color-inverse: var(--gw-inverse);
+
+  --color-line: var(--gw-line);
+  --color-line-strong: var(--gw-line-strong);
+  --color-field: var(--gw-field);
+
+  --color-accent: var(--gw-accent);
+  --color-accent-hover: var(--gw-accent-hover);
+  --color-accent-soft: var(--gw-accent-soft);
+  --color-accent-line: var(--gw-accent-line);
+
+  --color-ok: var(--gw-ok);
+  --color-ok-soft: var(--gw-ok-soft);
+  --color-ok-line: var(--gw-ok-line);
+  --color-warn: var(--gw-warn);
+  --color-warn-soft: var(--gw-warn-soft);
+  --color-warn-line: var(--gw-warn-line);
+  --color-bad: var(--gw-bad);
+  --color-bad-soft: var(--gw-bad-soft);
+  --color-bad-line: var(--gw-bad-line);
+
+  --color-cat-explain: var(--gw-cat-explain);
+  --color-cat-practice: var(--gw-cat-practice);
+  --color-cat-assess: var(--gw-cat-assess);
+  --color-cat-reflect: var(--gw-cat-reflect);
+
+  --color-focus: var(--gw-focus);
+
+  --shadow-xs: var(--gw-shadow-xs);
+  --shadow-sm: var(--gw-shadow-sm);
+  --shadow-md: var(--gw-shadow-md);
+  --shadow-lg: var(--gw-shadow-lg);
+  --shadow-xl: var(--gw-shadow-xl);
+
+  /*
+    Two text families, and which one is used is a SEMANTIC choice rather than a
+    decorative one.
+
+    Sans is the harness speaking: navigation, controls, labels, its own status
+    messages. Serif is the ANSWER -- prose assembled out of the user's own
+    documents, which is the one thing on screen that has to be read closely and
+    checked against a source. Literata was drawn for exactly that (TypeTogether,
+    for Google Play Books) and holds at 15-17px where most text faces thin out.
+
+    So the typeface itself carries provenance. Anything set in serif came from
+    the corpus; anything in sans is the machine talking about it. That is the
+    cheapest possible signal for the one distinction this product exists to
+    make, and it costs no pixels and no colour.
+
+    Mono is measurement: scores, token counts, parameters, trace payloads.
+  */
+  --font-sans: "Instrument Sans Variable", ui-sans-serif, system-ui, -apple-system,
+    "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-serif: "Literata Variable", ui-serif, Georgia, Cambria, "Times New Roman", serif;
+  --font-mono: "JetBrains Mono Variable", ui-monospace, SFMono-Regular, Menlo, Consolas,
+    monospace;
+
+  /*
+    Only the ends of the size scale are touched. Tailwind's body sizes are
+    already right for reading; its display leading is tuned for "a heading"
+    rather than for a heading set this large, and its tracking is tuned for a
+    face with wider defaults than Instrument Sans.
+  */
+  /*
+    `text-xs` carries 203 of this app's ~340 pieces of text -- the audit found
+    94% of everything on screen is either `text-xs` or `text-sm`. At Tailwind's
+    12px that is a lot of the product sitting one step below comfortable, and
+    "clear" was the brief. 12.5px with looser leading is a deliberate half-step:
+    enough to feel read rather than scanned, small enough that the two pixel
+    budgets it threatens -- `ui_check.py` A1 (chrome above the workspace <=
+    140px) and A5 (composer inside a 390x844 viewport) -- are measured after,
+    not assumed. If either fails, this line is the one to move.
+  */
+  --text-xs: 0.78125rem;
+  --text-xs--line-height: 1.45;
+
+  --text-3xl--line-height: 1.15;
+  --text-3xl--letter-spacing: -0.017em;
+  --text-4xl--line-height: 1.08;
+  --text-4xl--letter-spacing: -0.021em;
+  --text-5xl--line-height: 1.04;
+  --text-5xl--letter-spacing: -0.024em;
+  --text-6xl--line-height: 1.01;
+  --text-6xl--letter-spacing: -0.028em;
+
+  /* Softer than Tailwind's defaults by 2-4px at every step. A hairline-heavy
+     design reads as brittle at small radii and inflated at large ones; this is
+     the middle, applied consistently. Overriding the scale rather than editing
+     call sites is what makes `rounded-lg` and `rounded-xl` -- which the audit
+     found doing the same job on the same kind of object in different files --
+     stop mattering. */
+  --radius-sm: 0.3125rem;
+  --radius-md: 0.5rem;
+  --radius-lg: 0.75rem;
+  --radius-xl: 1rem;
+  --radius-2xl: 1.25rem;
+}
+
+/* ==========================================================================
+   BASE
+
+   Everything below is here because no utility class can reach it. That was the
+   bar this file already set, and it has not moved.
+   ========================================================================== */
 
 body {
-  /* Painted here as well as on the app root so the overscroll area past the
-     top or bottom of the page is not white on a dark UI. */
-  background-color: var(--color-slate-950);
+  /* Painted here as well as on the app root so the overscroll area past the top
+     or bottom of the page is not the wrong colour in either theme. */
+  background-color: var(--gw-canvas);
+  color: var(--gw-ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
-/* A visible keyboard focus indicator is a global interaction guarantee, not a
-   decoration each control should have to remember. Sky-400 stays distinct on
-   the slate surfaces and clears WCAG's 3:1 non-text contrast requirement. */
+/*
+  Literata ships an optical-size axis. `auto` lets the browser redistribute
+  contrast per size -- more at display sizes, sturdier at reading sizes -- which
+  is the entire reason to pick a face that has one.
+*/
+.font-serif,
+.gw-prose {
+  font-optical-sizing: auto;
+}
+
+/*
+  A visible keyboard focus indicator is a global interaction guarantee, not a
+  decoration every control has to remember.
+
+  The offset is what lets one rule work everywhere: drawn 2px OUTSIDE the box,
+  the ring never lands on an accent-filled button where it would vanish. Both
+  focus tokens clear WCAG's 3:1 non-text requirement against their own canvas
+  (~7.4 light, ~8.5 dark).
+
+  `!important` stays. The audit found 25 inputs carrying `outline-none
+  focus:border-...`, which this already overrides -- the border change is the
+  decoration and the ring is the guarantee, and that ordering is deliberate.
+*/
 :focus-visible {
-  outline: 3px solid var(--color-sky-400) !important;
-  outline-offset: 3px;
+  outline: 2px solid var(--gw-focus) !important;
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
 }
 
 /* Tailwind's `list-none` hides the disclosure triangle in Chrome and Firefox
-   but not in Safari, which draws it through a -webkit pseudo-element that no
-   utility class targets. Left in, it sits beside the caret drawn by `Reveal`
-   and every collapsed panel appears to have two markers. */
+   but not in Safari, which draws it through a -webkit pseudo-element no utility
+   class targets. Left in, it sits beside the caret drawn by `Reveal` and every
+   collapsed panel appears to have two markers. */
 summary::-webkit-details-marker {
   display: none;
 }
 
+::selection {
+  background-color: var(--gw-accent-soft);
+  color: var(--gw-ink);
+}
+
+/*
+  A themed scrollbar. Firefox takes the two-value shorthand; WebKit needs the
+  pseudo-elements, and the two cannot be merged into one rule. Kept quiet: in a
+  layout whose structure is hairlines, a heavy scrollbar reads as another rule.
+*/
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--gw-line-strong) transparent;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background-color: var(--gw-line-strong);
+  border: 3px solid transparent;
+  border-radius: 9999px;
+  background-clip: content-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background-color: var(--gw-faint);
+}
+
 /*
   ------------------------------------------------------------------
-  Range inputs, in the create-agent wizard's tuning step.
+  THE APPARATUS -- the signature of this design.
 
-  Here for the same reason as everything else in this file: no utility class
-  reaches a `::-webkit-slider-thumb`. `accent-color` (Tailwind's
-  `accent-emerald-500`) does colour the thumb and the filled track in current
-  Chrome and Firefox, and on its own it is not enough -- it cannot set the track
-  height, so the control keeps a 4px hit area on a page where every other
-  interactive element is 44px tall (`min-h-11`). The input below is 44px tall and
-  transparent; the 6px track is drawn inside it.
+  An answer in this product is not a chat message, it is a claim with evidence
+  behind it, and the layout says so: prose in the measure, sources in a margin
+  beside it, markers binding the two. That is a critical edition, and it is the
+  right form because it is the only one that shows WHICH claim rests on WHICH
+  chunk rather than listing sources at the end and hoping.
+
+  The grid is here rather than in utilities for one reason: the margin has to
+  collapse to nothing below `md` and the marker has to hang OUT of the text
+  column, and a hanging indent that survives a collapse is not expressible as a
+  class on a wrapper.
+*/
+
+/*
+  `block` below the breakpoint, and it is NOT merely "a one-column grid written
+  differently". `ui_check.py` A4 locates the chat layout as *the first `div`
+  descendant of `agent-shell` that computes to `display: grid`* and asserts it
+  has exactly two tracks. A one-column grid here would be a second grid inside
+  that shell -- harmless today because the chat layout is an ancestor and
+  therefore earlier in document order, and one DOM reshuffle away from making a
+  correct layout fail a correct assertion. Staying `block` until the margin
+  actually exists removes the coupling rather than relying on it.
+*/
+.gw-apparatus {
+  display: block;
+}
+
+/*
+  80rem, not 64rem, and the number was worked out rather than picked.
+
+  The margin lives inside the chat column, which at 1024px has already given
+  17rem to the conversation rail. Subtract the 15rem margin and its gap and the
+  prose column lands near 390px -- about 40 characters, which is a worse measure
+  than no margin at all. At 1280px the same arithmetic leaves ~650px, which is
+  the 65ch this design is set for. So the margin appears at the width where it
+  costs the reading nothing, and below it the sources collapse exactly as they
+  did before.
+
+  `justify-content: start` and a capped first track: without them the prose
+  column stretches to whatever is left on a 2560px monitor while `.gw-prose`
+  holds the text at 65ch, leaving a growing empty gutter between the answer and
+  its own margin -- the two halves of the apparatus drifting apart on exactly
+  the screens that have room to show them together.
+*/
+@media (min-width: 80rem) {
+  .gw-apparatus {
+    display: grid;
+    grid-template-columns: minmax(0, 44rem) 15rem;
+    justify-content: start;
+    gap: 2.25rem;
+    align-items: start;
+  }
+
+  /*
+    The margin tracks the text it annotates.
+
+    Found by reading a real answer rather than a fixture: a settled turn ran
+    about 1,400px of prose, `align-items: start` put the apparatus at the top of
+    it, and by the time you had scrolled to the sentence carrying marker [4] its
+    source card was a screen and a half above you. The apparatus was correct and
+    useless -- which is the failure this whole layout exists to fix, reproduced
+    inside the fix.
+
+    `top: 0` against the thread scroller, and deliberately NO `max-height` with
+    `overflow-y`. A scrolling margin would be the obvious completion and it is
+    forbidden: `ui_check.py` A6 asserts exactly one scrollable region inside
+    `[data-testid="chat-column"]`, and the comment in `AgentChat.tsx` spells out
+    why -- a second scroller there means the thread and the panel fight over the
+    wheel. An apparatus taller than the viewport simply scrolls with the page,
+    which is the honest behaviour for a turn with more evidence than screen.
+  */
+  .gw-apparatus > aside {
+    position: sticky;
+    top: 0;
+  }
+}
+
+/*
+  The reading surface. Descendant selectors, deliberately: `react-markdown`
+  emits bare `p`/`li`/`blockquote`, so this is content the app does not author
+  and cannot put a class on. That is exactly the case this file is for.
+
+  `text-wrap: pretty` is the one line here that is purely typographic -- it
+  prevents a one-word last line, which on a 65ch measure happens often enough to
+  be the difference between "a document" and "a chat log".
+*/
+.gw-prose {
+  font-family: var(--font-serif);
+  font-size: 1rem;
+  line-height: 1.65;
+  color: var(--gw-ink);
+  /* 65 characters. The measure is a reading decision, not a layout one: past
+     ~75ch the eye loses the line return, and this text is meant to be read
+     against a source rather than skimmed. */
+  max-width: 65ch;
+  text-wrap: pretty;
+  hanging-punctuation: first last;
+}
+
+.gw-prose > * + * {
+  margin-top: 0.9em;
+}
+
+.gw-prose strong {
+  font-weight: 600;
+}
+
+.gw-prose blockquote {
+  border-left: 2px solid var(--gw-accent-line);
+  padding-left: 1rem;
+  color: var(--gw-muted);
+}
+
+/*
+  ------------------------------------------------------------------
+  Citation chips, inline in a rendered answer.
+
+  Here for the same reason as everything else in this file: no utility class can
+  give an element a hit area LARGER than the box it draws, and this is the one
+  control in the app where those two must differ. The chip is small because it
+  sits inline in prose -- a 44px inline-flex box would push every line of the
+  containing paragraph apart, a worse defect than the one being fixed -- while
+  `min-h-11`, the 44px tap-target contract, still has to hold for what is the
+  most-tapped control in the product.
+
+  A centred, transparent ::after is the standard resolution: the chip renders
+  identically and the finger gets the area it needs. Nothing sets
+  `pointer-events` here on purpose -- the pseudo-element inherits the button's
+  own, which is what makes the enlarged region clickable rather than merely
+  painted.
+
+  **The 44px literals are asserted.** `ui_check.py` case 13 does a STRING
+  compare against `getComputedStyle(chip, "::after").width === "44px"`, so these
+  must stay px. Writing them as `2.75rem` still computes to `44px` today and
+  stops the moment anything changes the root font size.
+
+  The overlap with a neighbouring chip is real and harmless: `mx-0.5` separates
+  two adjacent chips by 4px, so their 44px regions overlap -- over each other's
+  MARGINS, not over each other's visible boxes, and a tap landing in that sliver
+  was ambiguous to the user before it was ambiguous to the browser.
+*/
+
+.gw-chip {
+  position: relative;
+}
+
+.gw-chip::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 44px;
+  height: 44px;
+  transform: translate(-50%, -50%);
+}
+
+/*
+  ------------------------------------------------------------------
+  Range inputs, in the tuning surfaces.
+
+  Here for the same reason as everything else: no utility class reaches a
+  `::-webkit-slider-thumb`. `accent-color` does colour the thumb and filled
+  track in current Chrome and Firefox, and on its own it is not enough -- it
+  cannot set the track height, so the control keeps a 4px hit area on a page
+  where every other interactive element is 44px tall. The input below is 44px
+  tall and transparent; the 6px track is drawn inside it.
 
   The two vendor blocks cannot be merged into one selector list: an unknown
   pseudo-element invalidates the whole rule, so `::-webkit-...` and `::-moz-...`
@@ -70,7 +571,7 @@ summary::-webkit-details-marker {
 .gw-range::-webkit-slider-runnable-track {
   height: 0.375rem;
   border-radius: 9999px;
-  background: var(--color-slate-800);
+  background: var(--gw-line-strong);
 }
 
 .gw-range::-webkit-slider-thumb {
@@ -82,159 +583,80 @@ summary::-webkit-details-marker {
      track rather than centring it, unlike Firefox, which needs no equivalent. */
   margin-top: -0.375rem;
   border-radius: 9999px;
-  background: var(--color-emerald-400);
-  border: 2px solid var(--color-emerald-950);
+  background: var(--gw-accent);
+  border: 2px solid var(--gw-surface);
+  box-shadow: var(--gw-shadow-xs);
 }
 
 .gw-range::-moz-range-track {
   height: 0.375rem;
   border-radius: 9999px;
-  background: var(--color-slate-800);
+  background: var(--gw-line-strong);
 }
 
 .gw-range::-moz-range-thumb {
   height: 1.125rem;
   width: 1.125rem;
   border-radius: 9999px;
-  background: var(--color-emerald-400);
-  border: 2px solid var(--color-emerald-950);
+  background: var(--gw-accent);
+  border: 2px solid var(--gw-surface);
+  box-shadow: var(--gw-shadow-xs);
 }
 
 /*
   ------------------------------------------------------------------
-  Citation chips, inline in a rendered answer.
+  The strata rule: the one structural motif, and it is not decoration.
 
-  Here for the same reason as everything else in this file: no utility class can
-  give an element a hit area LARGER than the box it draws, and this is the one
-  control in the app where those two must differ. The chip is 24x24 because it
-  sits inline in prose -- a 44px inline-flex box would push every line of the
-  paragraph containing it apart, which is a worse defect than the one being
-  fixed -- while `min-h-11`, the 44px tap-target contract, still has to hold for
-  what is the most-tapped control in the product.
+  The mark is six ground layers narrowing to a point. The same figure reads as a
+  ranked list -- which is what retrieval produces -- so the rule below is used
+  wherever something is ordered by strength: the six pipeline stages, and the
+  rank of a retrieved chunk. Each bar's width is set by the element that draws
+  it, because the width IS the datum.
 
-  A centred, transparent ::after is the standard resolution: the chip renders
-  identically and the finger gets the area it actually needs. Nothing sets
-  `pointer-events` here on purpose -- the pseudo-element inherits the button's
-  own, which is what makes the enlarged region clickable rather than merely
-  painted.
-
-  The overlap with a neighbouring chip is real and harmless. `mx-0.5` separates
-  two adjacent chips by 4px, so their 44px regions do overlap -- but they
-  overlap over each other's MARGINS, not over each other's visible boxes, and a
-  tap landing in that sliver was ambiguous to the user before it was ambiguous
-  to the browser.
+  Used anywhere else it would be decoration, and it is deliberately not
+  available as a general divider.
 */
 
-.gw-chip {
-  position: relative;
-}
-
-.gw-chip::after {
-  content: "";
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  width: 44px;
-  height: 44px;
-  transform: translate(-50%, -50%);
+.gw-strata {
+  display: block;
+  height: 2px;
+  border-radius: 9999px;
+  background-color: var(--gw-accent);
+  opacity: var(--gw-strata-opacity, 1);
+  width: var(--gw-strata-width, 100%);
 }
 
 /*
   ------------------------------------------------------------------
-  The landing scene: CSS 3D, no dependency.
-
-  Kept here rather than inline because @keyframes and `transform-style` have no
-  utility-class equivalent -- which is the bar this file sets. Nothing below is
-  reachable from a class on an element.
-
-  **No 3D library.** "3D" here is six translucent panes on the Z axis under a
-  single `perspective`, which the compositor animates on the GPU as cheaply as
-  an opacity fade. three.js or Remotion would add megabytes to a static site
-  whose entire config surface is one backend URL, to draw six rectangles.
-
-  **`preserve-3d` is fragile in two specific ways, and both fail silently** --
-  the scene still renders, just flat, with nothing in devtools naming a cause:
-
-  1. An element that carries `transform-style: preserve-3d` AND any of
-     `filter`, `backdrop-filter`, `opacity < 1` or `overflow` other than
-     `visible` is forced back to `flat`. The property wins; the declaration is
-     not an error.
-  2. The 3D rendering context must be CONTIGUOUS. Every element between the
-     `perspective` and the transformed panes has to be `preserve-3d` too; one
-     ordinary div in the chain ends the context and flattens everything below.
-
-  Hence the glow is a SIBLING of the rig rather than a wrapper around it, and
-  the per-pane opacity used for depth cueing sits on the panes (leaves) rather
-  than on the rig (which carries `preserve-3d`). An ancestor further up may
-  safely clip -- the page root's `overflow-hidden` is fine, because it is
-  outside the perspective, not inside the chain.
+  Entrance. One keyframe, used on first paint only.
 */
-
-.gw-scene {
-  perspective: 1200px;
-  perspective-origin: 50% 45%;
-}
-
-.gw-rig {
-  transform-style: preserve-3d;
-  animation: gw-orbit 28s ease-in-out infinite;
-}
-
-/* Deliberately NOT `preserve-3d`: a pane's contents are flat, and the panes
-   carry the depth-cue `opacity`, which by rule 1 above would force them back to
-   flat anyway. Declaring it would read as intent that the browser then ignores. */
-.gw-pane {
-  /* Set per pane from the component: each one owns its depth. */
-  transform: translateZ(var(--z)) translateY(var(--y, 0px));
-}
-
-/* Backface culling off, deliberately: the rig swings +-22deg and never turns a
-   pane away from the camera, so leaving it visible costs nothing and avoids a
-   pane vanishing mid-swing if the angle is ever widened. */
-@keyframes gw-orbit {
-  0%, 100% { transform: rotateY(-22deg) rotateX(8deg); }
-  50%      { transform: rotateY(22deg) rotateX(3deg); }
-}
-
-/* The query, travelling the pipeline. Starts behind the last pane and arrives
-   in front of the first, so it reads as one pass through the stages. */
-@keyframes gw-pulse {
-  0%   { transform: translateZ(-620px) scale(0.82); opacity: 0; }
-  12%  { opacity: 0.85; }
-  78%  { opacity: 0.55; }
-  100% { transform: translateZ(90px) scale(1.06); opacity: 0; }
-}
-
-/* Chunks in the vector space. Three variants so 18 dots do not pulse in unison. */
-@keyframes gw-drift {
-  0%, 100% { transform: translate3d(0, 0, 0); opacity: 0.25; }
-  50%      { transform: translate3d(6px, -14px, 40px); opacity: 0.85; }
-}
-
-@keyframes gw-glow {
-  0%, 100% { opacity: 0.35; transform: scale(1); }
-  50%      { opacity: 0.6; transform: scale(1.12); }
-}
 
 @keyframes gw-rise {
-  from { opacity: 0; transform: translateY(14px); }
-  to   { opacity: 1; transform: translateY(0); }
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 .gw-rise {
-  animation: gw-rise 0.7s cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation: gw-rise 0.55s cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
 /*
   Motion is decorative everywhere in this app -- a spinner, a rotating caret, a
-  colour transition. None of it conveys state that is not also in text, so
-  honouring the OS setting costs nothing and removes a genuine accessibility
-  problem for users with vestibular disorders. `!important` because the
-  animation is applied by a utility class of equal specificity.
+  colour transition, one entrance. None of it conveys state that is not also in
+  text, so honouring the OS setting costs nothing and removes a real problem for
+  users with vestibular disorders. `!important` because the animation is applied
+  by a utility class of equal specificity.
 
-  The landing scene above is covered by this too, and that is the reason it
-  carries no state: every stage name in it is also a text label under the hero,
-  so a reader who stops the animation loses nothing but the motion.
+  `Drawer` depends on this rule holding rather than working around it: it never
+  gates a close on `transitionend`, because under this block the event either
+  fires immediately or never arrives. Anything added here that animates a theme
+  change must obey the same constraint.
 */
 @media (prefers-reduced-motion: reduce) {
   *,
