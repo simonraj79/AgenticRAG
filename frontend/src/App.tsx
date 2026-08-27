@@ -30,12 +30,27 @@
  *
  * 401 means *nobody is signed in* -> Login.
  * Anything else means *we could not find out* -> say so, and offer Retry.
+ *
+ * **Landmarks.** The chrome is a `<header>` wrapping a labelled `<nav>`, and the
+ * views render inside `<main id="main">`. Both exist so the skip link below has
+ * somewhere to skip TO: with a sticky nav on every screen and a conversation
+ * rail on one of them, a keyboard user otherwise tabs through the same chrome
+ * before reaching any content, on every view.
  */
 
 import { useCallback, useEffect, useState } from "react";
 import { ApiError, api, setUnauthorizedHandler } from "./lib/api.ts";
 import type { User } from "./lib/types.ts";
 import { ErrorBanner, Spinner, errorMessage } from "./components/ui.tsx";
+import ThemeToggle from "./components/ThemeToggle.tsx";
+import {
+  ACCENT_TONE,
+  BTN_PRIMARY,
+  BTN_SECONDARY,
+  CARD,
+  PILL,
+  PILL_NEUTRAL,
+} from "./lib/styles.ts";
 import Login from "./views/Login.tsx";
 import Dashboard from "./views/Dashboard.tsx";
 import AgentDetail from "./views/AgentDetail.tsx";
@@ -128,7 +143,7 @@ export default function App() {
 
   if (booting) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-slate-950">
+      <div className="flex min-h-screen items-center justify-center bg-canvas">
         <Spinner label="Checking your session" />
       </div>
     );
@@ -139,13 +154,13 @@ export default function App() {
   // is precisely the bug this branch exists to prevent.
   if (bootError) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-slate-950 px-6">
-        <div className="w-full max-w-md space-y-4 text-center">
-          <h1 className="text-lg font-semibold tracking-tight text-slate-100">
+      <div className="flex min-h-screen items-center justify-center bg-canvas px-6">
+        <div className={`${CARD} w-full max-w-md space-y-4 p-5 text-center`}>
+          <h1 className="text-lg font-semibold tracking-tight text-ink">
             Could not check your session
           </h1>
           <ErrorBanner error={bootError} />
-          <p className="text-sm text-slate-400">
+          <p className="text-sm text-muted">
             You have not been signed out &mdash; the app could not reach the API to
             find out. If you signed in just now, your session is most likely intact.
           </p>
@@ -153,7 +168,7 @@ export default function App() {
             type="button"
             data-testid="retry-session"
             onClick={() => void loadSession()}
-            className="min-h-11 rounded-md border border-slate-700 bg-slate-900 px-4 py-2 text-sm text-slate-200 transition hover:border-slate-600"
+            className={BTN_PRIMARY}
           >
             Try again
           </button>
@@ -167,76 +182,126 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100">
+    <div className="min-h-screen bg-canvas text-ink">
+      {/*
+        The first focusable thing in the document, and invisible until it is
+        focused. Everything below it is chrome that repeats on every view -- the
+        wordmark, the account, the theme control, sign-out -- so without this a
+        keyboard user pays for all of it before reaching the agent list or a
+        conversation, on every single view.
+
+        One node with `focus:not-sr-only` rather than two, so the visible and
+        hidden halves cannot drift apart. `sr-only` is also what `ui_check.py`'s
+        tap-target sweep filters on, which is what correctly exempts the hidden
+        state from the 44px rule.
+      */}
+      <a
+        href="#main"
+        className="sr-only focus:not-sr-only focus:fixed focus:top-3 focus:left-3 focus:z-50 focus:rounded-md focus:bg-ink focus:px-4 focus:py-2 focus:text-sm focus:font-medium focus:text-inverse"
+      >
+        Skip to content
+      </a>
+
       {/*
         Sticky, which it did not need to be when every view fitted on a screen.
         A conversation with an agent does not: sign-out and the way back to the
         agent list would otherwise be a full scroll away from wherever the
         thread has got to.
-      */}
-      <nav className="sticky top-0 z-20 border-b border-slate-800 bg-slate-950/90 backdrop-blur">
-        {/*
-          `flex-wrap` on both rows is the floor, not the fix. At 320px the
-          brand, the monogram, the email, the admin pill and Sign out come to
-          more than the viewport with `gap-3` between them, and a flex row with
-          no wrap does not overflow its own box -- it overflows the DOCUMENT,
-          which is the horizontal scrollbar the whole app then inherits. Wrapping
-          converts that into a taller nav, which is merely ugly. The pill moving
-          behind `sm:` below is what stops it ever having to.
-        */}
-        <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-3 px-4 py-3 sm:px-6">
-          <button
-            type="button"
-            onClick={() => setView({ kind: "dashboard" })}
-            className="min-h-11 rounded-md px-1 text-sm font-semibold tracking-tight text-slate-100 transition hover:text-white"
-          >
-            Groundwork
-          </button>
 
-          <div className="flex flex-wrap items-center gap-3">
-            <Initials user={user} />
-            <span className="hidden text-xs text-slate-400 sm:inline">{user.email}</span>
-            {user.role === "admin" && (
-              // Hidden below `sm` for the same reason the email is: it is a
-              // status label, not a control, and the narrow viewport has to
-              // spend its width on the two things that are (the way back to the
-              // agent list, and the way out). The monogram stays because it is
-              // the only remaining answer to "who am I signed in as".
-              // Was a status label; it is now the way in. The `sm:` gate stays
-              // for the reason the comment above gives -- at 320px the width
-              // belongs to the way back and the way out.
-              <button
-                type="button"
-                onClick={() => setView({ kind: "admin" })}
-                aria-current={view.kind === "admin" ? "page" : undefined}
-                className={`hidden min-h-11 rounded-full border px-2.5 py-0.5 text-xs font-medium transition sm:inline-flex sm:items-center ${
-                  view.kind === "admin"
-                    ? "border-sky-500 bg-sky-900/70 text-sky-100"
-                    : "border-sky-800/60 bg-sky-950/40 text-sky-300 hover:border-sky-600 hover:text-sky-100"
-                }`}
-              >
-                admin
-              </button>
-            )}
+        A `<header>` around the `<nav>`, because the two are not the same
+        landmark: the banner is the whole bar (wordmark, account, theme,
+        sign-out) and the navigation is the part of it that goes somewhere. The
+        audit found the banner missing entirely -- the bar was a bare `<nav>`.
+      */}
+      <header className="sticky top-0 z-20 border-b border-line bg-canvas/85 backdrop-blur">
+        <nav aria-label="Main">
+          {/*
+            `flex-wrap` on both rows is the floor, not the fix. At 320px the
+            brand, the monogram, the theme control, the admin pill and Sign out
+            come to more than the viewport with `gap-3` between them, and a flex
+            row with no wrap does not overflow its own box -- it overflows the
+            DOCUMENT, which is the horizontal scrollbar the whole app then
+            inherits. Wrapping converts that into a taller nav, which is merely
+            ugly. The email moving behind `sm:` below is what stops it ever
+            having to.
+          */}
+          <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-3 px-4 py-3 sm:px-6">
             <button
               type="button"
-              data-testid="logout"
-              onClick={() => void logout()}
-              className="min-h-11 rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-300 transition hover:border-slate-600"
+              onClick={() => setView({ kind: "dashboard" })}
+              className="min-h-11 rounded-md px-1 text-sm font-semibold tracking-tight text-ink transition hover:text-ink-hover"
             >
-              Sign out
+              Groundwork
             </button>
+
+            <div className="flex flex-wrap items-center gap-3">
+              <Initials user={user} />
+              {/*
+                Hidden below `sm` because it is a status label rather than a
+                control, and the narrow viewport has to spend its width on the
+                things that are. The monogram stays as the remaining answer to
+                "who am I signed in as".
+              */}
+              <span className="hidden text-xs text-muted sm:inline">{user.email}</span>
+              <ThemeToggle />
+              {user.role === "admin" && (
+                // Visible at EVERY width now. It was gated behind `sm:` back
+                // when it was a status label, and that gate stopped being
+                // correct the moment it became the way IN: hiding it made a
+                // whole view unreachable on a phone, in an app with no router
+                // and therefore no URL to fall back on. The label is one short
+                // word so the 320px row still fits it, and shortening the label
+                // is the lever to reach for before hiding the control.
+                <button
+                  type="button"
+                  onClick={() => setView({ kind: "admin" })}
+                  aria-current={view.kind === "admin" ? "page" : undefined}
+                  className={`min-h-11 transition ${
+                    view.kind === "admin"
+                      ? `${PILL} ${ACCENT_TONE}`
+                      : `${PILL_NEUTRAL} hover:border-line-strong hover:text-ink`
+                  }`}
+                >
+                  Admin
+                </button>
+              )}
+              <button
+                type="button"
+                data-testid="logout"
+                onClick={() => void logout()}
+                className={BTN_SECONDARY}
+              >
+                Sign out
+              </button>
+            </div>
           </div>
-        </div>
-      </nav>
+        </nav>
+      </header>
 
-      {error && (
-        <div className="mx-auto max-w-6xl px-6 pt-6">
-          <ErrorBanner error={error} />
-        </div>
-      )}
+      {/*
+        `tabIndex={-1}` so the skip link moves FOCUS here and not merely the
+        scroll position -- a `#main` target that is not focusable leaves the next
+        Tab back at the top of the nav, which is exactly the failure that makes
+        skip links look decorative while testing green.
+      */}
+      <main id="main" tabIndex={-1}>
+        {/*
+          The banner sits INSIDE `<main>`, and that is load-bearing rather than
+          tidy. `AgentDetail` sizes its workspace as `calc(100dvh - top)` from an
+          offset it measures once and re-takes only on `[agent]` and on window
+          resize. A banner rendered ABOVE `<main>` changes that offset with
+          nothing re-measuring, so a single API error would silently push the
+          whole workspace past the fold -- the same class of defect as the header
+          disclosures that once collapsed the chat pane to 24px. As the first
+          child of `<main>` it consumes space inside the measured box instead of
+          moving the box.
+        */}
+        {error && (
+          <div className="mx-auto max-w-6xl px-6 pt-6">
+            <ErrorBanner error={error} />
+          </div>
+        )}
 
-      <main>
         {view.kind === "dashboard" && (
           <Dashboard onOpenAgent={(agentId) => setView({ kind: "agent", agentId })} />
         )}
@@ -280,7 +345,7 @@ function Initials({ user }: { user: User }) {
   return (
     <span
       title={user.name ?? user.email}
-      className="inline-flex h-7 w-7 items-center justify-center rounded-full border border-slate-700 bg-slate-900 text-[0.65rem] font-semibold text-slate-300"
+      className="inline-flex h-7 w-7 items-center justify-center rounded-full border border-line-strong bg-sunken text-xs font-semibold text-muted"
     >
       {letters || "?"}
     </span>

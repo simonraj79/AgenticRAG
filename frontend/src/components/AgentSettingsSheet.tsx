@@ -81,6 +81,15 @@ import {
   errorMessage,
 } from "./ui.tsx";
 import Drawer from "./Drawer.tsx";
+import {
+  BTN_PRIMARY,
+  BTN_SECONDARY,
+  EYEBROW,
+  FIELD,
+  HELP,
+  LABEL,
+  TEXTAREA_MONO,
+} from "../lib/styles.ts";
 
 /**
  * The models this build has actually been measured against, and the sentinel for
@@ -353,7 +362,7 @@ export default function AgentSettingsSheet({
           note="Shown in the bar above and on the agents list."
         >
           <div>
-            <label htmlFor={nameId} className="block text-xs font-medium text-slate-300">
+            <label htmlFor={nameId} className={`block ${LABEL}`}>
               Name
             </label>
             <input
@@ -361,12 +370,12 @@ export default function AgentSettingsSheet({
               data-testid="settings-name"
               value={draft.name}
               onChange={(event) => set("name", event.target.value)}
-              className="mt-1 min-h-11 w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 outline-none focus:border-slate-500"
+              className={`${FIELD} mt-1.5`}
             />
           </div>
 
           <div>
-            <label htmlFor={descriptionId} className="block text-xs font-medium text-slate-300">
+            <label htmlFor={descriptionId} className={`block ${LABEL}`}>
               Description
             </label>
             <input
@@ -374,7 +383,7 @@ export default function AgentSettingsSheet({
               data-testid="settings-description"
               value={draft.description}
               onChange={(event) => set("description", event.target.value)}
-              className="mt-1 min-h-11 w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 outline-none focus:border-slate-500"
+              className={`${FIELD} mt-1.5`}
             />
           </div>
         </Section>
@@ -472,10 +481,10 @@ export default function AgentSettingsSheet({
             which it answers with a hard 400.
           */}
           <div>
-            <label htmlFor={modelId} className="block text-xs font-medium text-slate-300">
+            <label htmlFor={modelId} className={`block ${LABEL}`}>
               Generation model
             </label>
-            <p className="mt-0.5 text-xs text-slate-400">
+            <p className={`mt-1 ${HELP}`}>
               Which model writes the answers. This changes behaviour, not just cost:
               DeepSeek searches the corpus again on its own judgement, Gemma does not
               and relies on the gap trigger to make it look.
@@ -498,7 +507,7 @@ export default function AgentSettingsSheet({
                 set("generation_model", next === CUSTOM ? "" : next);
                 setCustomModel(next === CUSTOM);
               }}
-              className="mt-1 min-h-11 w-full rounded-md border border-slate-700 bg-slate-950 px-3 text-sm text-slate-100 outline-none focus:border-slate-500"
+              className={`${FIELD} mt-1.5`}
             >
               <option value="">Server default</option>
               {KNOWN_MODELS.map((entry) => (
@@ -515,7 +524,9 @@ export default function AgentSettingsSheet({
                 onChange={(event) => set("generation_model", event.target.value)}
                 placeholder="author/model"
                 aria-label="Custom OpenRouter model id"
-                className="mt-2 min-h-11 w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 font-mono text-xs text-slate-100 outline-none focus:border-slate-500"
+                // A model slug is an identifier, so it is set in mono -- the
+                // same family the trace panel prints it in.
+                className={`${FIELD} mt-2 font-mono text-xs`}
               />
             )}
           </div>
@@ -532,20 +543,24 @@ export default function AgentSettingsSheet({
           />
 
           <div>
-            <label htmlFor={promptId} className="block text-xs font-medium text-slate-300">
+            <label htmlFor={promptId} className={`block ${LABEL}`}>
               System prompt
             </label>
-            <p className="mt-0.5 text-xs text-slate-400">
+            <p className={`mt-1 ${HELP}`}>
               The grounding rule comes before the voice in every prompt here, and that order is
               what lets the agent be trusted when it says it does not know.
             </p>
+            {/* `TEXTAREA_MONO`, not `TEXTAREA`: a system prompt is machine text
+                read by structure -- paragraph order, blank lines, the position
+                of the grounding clause -- and a proportional face hides all
+                three. */}
             <textarea
               id={promptId}
               data-testid="settings-prompt"
               rows={10}
               value={draft.system_prompt}
               onChange={(event) => set("system_prompt", event.target.value)}
-              className="mt-1 min-h-11 w-full resize-y rounded-md border border-slate-700 bg-slate-950 px-3 py-2 font-mono text-xs leading-relaxed text-slate-200 outline-none focus:border-slate-500"
+              className={`${TEXTAREA_MONO} mt-1.5`}
             />
           </div>
         </Section>
@@ -627,7 +642,7 @@ export default function AgentSettingsSheet({
             <Fact label="Documents" value={agent.document_count} />
             <Fact label="Embedding model" value={agent.embedding_model ?? "unset"} />
           </dl>
-          <p className="text-xs text-slate-400">
+          <p className={HELP}>
             The embedding model cannot change without re-ingesting: a namespace built by one
             model and queried with another returns confident nonsense rather than an error, so
             the API returns 400 rather than letting the record drift from the vectors.
@@ -649,15 +664,20 @@ export default function AgentSettingsSheet({
           cancels exactly the padding that created the gap.
 
           The panel keeps its `p-4` regardless, because the global focus ring is
-          `outline: 3px` at `outline-offset: 3px` and a control flush against the
-          edge of a clipping box loses six pixels of its indicator.
+          drawn outside the box (`outline: 2px` at `outline-offset: 2px`) and a
+          control flush against the edge of a clipping box loses four pixels of
+          its indicator.
+
+          `bg-surface` is required rather than decorative: the form scrolls
+          UNDER this bar, so a transparent one would show the fields sliding
+          through the buttons.
         */}
-        <div className="sticky -bottom-4 -mx-4 -mb-4 mt-auto flex flex-wrap items-center gap-3 border-t border-slate-800 bg-slate-900 px-4 py-3">
+        <div className="sticky -bottom-4 -mx-4 -mb-4 mt-auto flex flex-wrap items-center gap-3 border-t border-line bg-surface px-4 py-3">
           <button
             type="submit"
             data-testid="settings-save"
             disabled={dirtyCount === 0 || saving}
-            className="min-h-11 rounded-md bg-emerald-500 px-4 py-2 text-sm font-semibold text-emerald-950 transition hover:bg-emerald-400 disabled:opacity-50"
+            className={BTN_PRIMARY}
           >
             {saving ? "Saving…" : "Save changes"}
           </button>
@@ -670,7 +690,7 @@ export default function AgentSettingsSheet({
               setDraft(draftFrom(agent));
               setSaved(false);
             }}
-            className="min-h-11 rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-300 transition hover:border-slate-600 disabled:opacity-50"
+            className={BTN_SECONDARY}
           >
             Revert
           </button>
@@ -682,7 +702,7 @@ export default function AgentSettingsSheet({
             data-testid="settings-status"
             role="status"
             aria-live="polite"
-            className="text-xs text-slate-400"
+            className="text-xs text-muted"
           >
             {dirtyCount > 0
               ? `${dirtyCount} unsaved ${dirtyCount === 1 ? "change" : "changes"}`
@@ -710,10 +730,18 @@ function Section({
   testId?: string;
 }) {
   return (
-    <section data-testid={testId} className="min-w-0 space-y-3">
+    // The hairline is the grouping. Ten controls in one column say "all of
+    // these do the same kind of thing", which is the exact misreading the
+    // grouping exists to prevent -- so a rule separates each band, and the
+    // `first:` variants keep one from being drawn above the top band (or, when
+    // the error banner is present, above the banner it would collide with).
+    <section
+      data-testid={testId}
+      className="min-w-0 space-y-3 border-t border-line pt-6 first:border-t-0 first:pt-0"
+    >
       <div>
-        <h3 className="text-xs font-medium tracking-wide text-slate-300 uppercase">{title}</h3>
-        <p className="mt-1 text-xs leading-relaxed text-slate-400">{note}</p>
+        <h3 className={EYEBROW}>{title}</h3>
+        <p className={`mt-1.5 ${HELP}`}>{note}</p>
       </div>
       {children}
     </section>

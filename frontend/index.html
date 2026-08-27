@@ -15,6 +15,53 @@
       name="description"
       content="Retrieval over your own documents that tells you when it is wrong. Ingest, embed, retrieve, rerank, generate -- then score it on a golden set."
     />
+    <!--
+      The browser chrome follows the page. Two entries rather than one, because
+      the theme below can put a dark page on a light OS and vice versa; a single
+      value would leave the address bar disagreeing with the page half the time.
+    -->
+    <meta name="theme-color" media="(prefers-color-scheme: light)" content="#fbfaf8" />
+    <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0f1216" />
+
+    <!--
+      THEME, RESOLVED BEFORE FIRST PAINT.
+
+      This has to be an inline, synchronous script in <head>. The alternatives
+      both fail in ways that matter here:
+
+        - applying the class from a React effect paints the light theme first
+          and then repaints, which is the "flash of wrong theme" every dark-mode
+          user recognises, and on a slow first load it is a full second of it;
+        - relying on `prefers-color-scheme` alone cannot express "I chose light
+          while my OS is dark", which is a normal request on the shared machines
+          this is used on.
+
+      Kept deliberately tiny and dependency-free. It runs before the bundle
+      exists, so it cannot import `lib/theme.ts` -- the two therefore agree by
+      convention, and the storage key is repeated in exactly these two places.
+      `lib/theme.ts` names this file in its own comment for that reason.
+
+      The try/catch is not defensive padding: `localStorage` THROWS on access
+      (not returns null) in a Chrome profile with site data blocked, and an
+      uncaught throw here would abort the script and leave the page unthemed.
+      A throw is also indistinguishable from "no preference stored", which is
+      why both land on the same branch.
+    -->
+    <script>
+      (function () {
+        try {
+          var stored = localStorage.getItem("gw-theme");
+          var dark =
+            stored === "dark" ||
+            ((stored === "system" || stored === null) &&
+              window.matchMedia("(prefers-color-scheme: dark)").matches);
+          if (dark) document.documentElement.classList.add("dark");
+        } catch (_) {
+          /* Storage unavailable. Fall through to the light default, which is
+             the one that is legible if everything else is missing too. */
+        }
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

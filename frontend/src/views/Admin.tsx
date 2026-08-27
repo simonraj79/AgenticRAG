@@ -38,6 +38,23 @@ import type {
   Spend,
 } from "../lib/types.ts";
 import { ErrorBanner, Spinner, errorMessage } from "../components/ui.tsx";
+import {
+  ACCENT_TONE,
+  BTN_QUIET,
+  BTN_SECONDARY,
+  BTN_SM,
+  CARD,
+  EYEBROW,
+  NEUTRAL_TONE,
+  NOTICE,
+  OK_TONE,
+  PILL,
+  PILL_NEUTRAL,
+  TAB,
+  TAB_ACTIVE,
+  TAB_INACTIVE,
+  WARN_TONE,
+} from "../lib/styles.ts";
 
 type Tab =
   | "overview"
@@ -111,18 +128,12 @@ function Tile({
   wide?: boolean;
 }) {
   return (
-    <div
-      className={`rounded-lg border border-slate-800 bg-slate-900 p-4 ${
-        wide ? "sm:col-span-2" : ""
-      }`}
-    >
-      <div className="text-xs font-medium uppercase tracking-wide text-slate-400">
-        {label}
-      </div>
-      <div className="mt-1 text-2xl font-semibold tabular-nums text-slate-100">
+    <div className={`${CARD} p-4 ${wide ? "sm:col-span-2" : ""}`}>
+      <div className={EYEBROW}>{label}</div>
+      <div className="mt-1 font-mono text-2xl font-semibold tabular-nums text-ink">
         {value}
       </div>
-      {hint ? <div className="mt-1 text-xs text-slate-400">{hint}</div> : null}
+      {hint ? <div className="mt-1 text-xs text-muted">{hint}</div> : null}
     </div>
   );
 }
@@ -181,8 +192,8 @@ function SpendCell({ spend }: { spend: Spend }) {
   const unpriced = spend.calls - spend.priced_calls;
   return (
     <div className="tabular-nums">
-      <div className="font-medium text-slate-100">{cost(spend)}</div>
-      <div className="text-xs text-slate-400">
+      <div className="font-mono font-medium text-ink">{cost(spend)}</div>
+      <div className="text-xs text-muted">
         {num(spend.prompt_tokens + spend.completion_tokens)} tok / {num(spend.calls)} calls
         {unpriced > 0 ? ` (${num(unpriced)} unpriced)` : ""}
       </div>
@@ -200,21 +211,21 @@ function Table({
   // The wrapper scrolls, never the page. Wide content inside its own
   // overflow-x container is the standing rule in this codebase.
   return (
-    <div className="overflow-x-auto rounded-lg border border-slate-800 bg-slate-900">
+    <div className={`${CARD} overflow-x-auto`}>
       <table className="min-w-full text-sm">
-        <thead className="border-b border-slate-800 bg-slate-900/60">
+        <thead className="border-b border-line bg-sunken">
           <tr>
             {head.map((h) => (
               <th
                 key={h}
-                className="px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide text-slate-400"
+                className="px-3 py-2 text-left text-xs font-semibold text-faint"
               >
                 {h}
               </th>
             ))}
           </tr>
         </thead>
-        <tbody className="divide-y divide-slate-800">{children}</tbody>
+        <tbody className="divide-y divide-line">{children}</tbody>
       </table>
     </div>
   );
@@ -269,7 +280,10 @@ function Overview() {
 
   return (
     <div className="space-y-6">
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+      {/* `grid-cols-1` is the BASE deliberately. At 320px a two-column base put
+          a currency value and its label into ~146px, which is where this page's
+          only horizontal-overflow risk lived. */}
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <Tile
           label="Users"
           value={num(o.users)}
@@ -292,7 +306,7 @@ function Overview() {
         />
       </div>
 
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-4">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
         {/* Deliberately the widest tile on the page. It is the number that says
             how much of everything else can be trusted. */}
         <MeasuredTile
@@ -309,13 +323,13 @@ function Overview() {
         <MeasuredTile label="Refusal rate" m={o.refusal_rate} format={pct} />
       </div>
 
-      <section className="rounded-lg border border-slate-800 bg-slate-900 p-4">
-        <h3 className="text-sm font-semibold text-slate-100">
+      <section className={`${CARD} p-5`}>
+        <h3 className="text-sm font-semibold text-ink">
           Reconciliation against OpenRouter
         </h3>
-        <p className="mt-1 text-xs text-slate-400">{account.note}</p>
+        <p className="mt-1 text-xs text-muted">{account.note}</p>
         {account.openrouter.ok ? (
-          <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
+          <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
             <Tile label="Recorded here" value={usd(account.recorded.cost_usd)} />
             <Tile
               label="This key, month"
@@ -331,7 +345,7 @@ function Overview() {
         ) : (
           // Reported, never raised. A page that 500s on a provider outage
           // teaches its reader to ignore the page.
-          <p className="mt-3 rounded border border-amber-800/60 bg-amber-950/40 px-3 py-2 text-sm text-amber-200">
+          <p className={`${NOTICE} ${WARN_TONE} mt-3`}>
             Could not reach OpenRouter: {account.openrouter.error}. The recorded
             figure of {usd(account.recorded.cost_usd)} is unaffected.
           </p>
@@ -351,8 +365,8 @@ function Users() {
       {(data ?? []).map((u) => (
         <tr key={u.id} className={u.is_active ? "" : "opacity-50"}>
           <td className="px-3 py-2">
-            <div className="font-medium text-slate-100">{u.email}</div>
-            <div className="text-xs text-slate-400">
+            <div className="font-medium text-ink">{u.email}</div>
+            <div className="text-xs text-muted">
               {u.name ?? "no name"}
               {/* Surfaced because this database holds two rows for two real
                   people -- the dev shim keys on `dev|<email>`, so signing in
@@ -361,23 +375,17 @@ function Users() {
             </div>
           </td>
           <td className="px-3 py-2">
-            <span
-              className={`rounded px-2 py-0.5 text-xs font-medium ${
-                u.role === "admin"
-                  ? "bg-emerald-900/40 text-emerald-300"
-                  : "bg-slate-800 text-slate-400"
-              }`}
-            >
+            <span className={u.role === "admin" ? `${PILL} ${ACCENT_TONE}` : PILL_NEUTRAL}>
               {u.role}
             </span>
           </td>
-          <td className="px-3 py-2 tabular-nums">{num(u.agents)}</td>
-          <td className="px-3 py-2 tabular-nums">{num(u.conversations)}</td>
-          <td className="px-3 py-2 tabular-nums">{num(u.queries)}</td>
+          <td className="px-3 py-2 font-mono tabular-nums">{num(u.agents)}</td>
+          <td className="px-3 py-2 font-mono tabular-nums">{num(u.conversations)}</td>
+          <td className="px-3 py-2 font-mono tabular-nums">{num(u.queries)}</td>
           <td className="px-3 py-2">
             <SpendCell spend={u.spend} />
           </td>
-          <td className="px-3 py-2 text-xs text-slate-400">{when(u.last_login_at)}</td>
+          <td className="px-3 py-2 text-xs text-muted">{when(u.last_login_at)}</td>
         </tr>
       ))}
     </Table>
@@ -393,12 +401,12 @@ function Agents() {
     <Table head={["Agent", "Owner", "Docs", "Threads", "Turns", "Evals", "Spend"]}>
       {(data ?? []).map((a) => (
         <tr key={a.id}>
-          <td className="px-3 py-2 font-medium text-slate-100">{a.name}</td>
-          <td className="px-3 py-2 text-slate-400">{a.owner_email}</td>
-          <td className="px-3 py-2 tabular-nums">{num(a.documents)}</td>
-          <td className="px-3 py-2 tabular-nums">{num(a.conversations)}</td>
-          <td className="px-3 py-2 tabular-nums">{num(a.queries)}</td>
-          <td className="px-3 py-2 tabular-nums">{num(a.eval_runs)}</td>
+          <td className="px-3 py-2 font-medium text-ink">{a.name}</td>
+          <td className="px-3 py-2 text-muted">{a.owner_email}</td>
+          <td className="px-3 py-2 font-mono tabular-nums">{num(a.documents)}</td>
+          <td className="px-3 py-2 font-mono tabular-nums">{num(a.conversations)}</td>
+          <td className="px-3 py-2 font-mono tabular-nums">{num(a.queries)}</td>
+          <td className="px-3 py-2 font-mono tabular-nums">{num(a.eval_runs)}</td>
           <td className="px-3 py-2">
             <SpendCell spend={a.spend} />
           </td>
@@ -439,36 +447,40 @@ function Conversations() {
         <button
           type="button"
           onClick={() => setOpen(null)}
-          className="min-h-11 rounded border border-slate-700 px-3 text-sm font-medium hover:bg-slate-800"
+          className={BTN_QUIET}
         >
           Back to conversations
         </button>
-        <header className="rounded-lg border border-slate-800 bg-slate-900 p-4">
-          <h3 className="font-semibold text-slate-100">{open.title ?? "Untitled"}</h3>
-          <p className="text-sm text-slate-400">
+        <header className={`${CARD} p-4`}>
+          <h3 className="text-sm font-semibold text-ink">{open.title ?? "Untitled"}</h3>
+          <p className="text-sm text-muted">
             {open.user_email} &middot; {open.agent_name} &middot; {when(open.created_at)}
           </p>
-          <p className="mt-2 text-xs text-slate-400">
+          <p className="mt-2 text-xs text-muted">
             Thread cost {usd(open.spend.cost_usd)} over {num(open.spend.calls)} model
             calls. This read was recorded in the audit log.
           </p>
         </header>
         <ol className="space-y-3">
           {open.turns.map((t) => (
-            <li key={t.id} className="rounded-lg border border-slate-800 bg-slate-900 p-4">
+            <li key={t.id} className={`${CARD} p-4`}>
               <div className="flex flex-wrap items-baseline justify-between gap-2">
-                <p className="font-medium text-slate-100">{t.question}</p>
-                <span className="text-xs tabular-nums text-slate-400">
+                {/* User-supplied text in a `flex-wrap` row: without a break rule
+                    a single long token pushes the row past 320px. */}
+                <p className="min-w-0 font-medium break-words text-ink">{t.question}</p>
+                <span className="font-mono text-xs tabular-nums text-muted">
                   {/* "not measured" and "$0" are different facts. */}
                   {t.measured ? usd(t.cost_usd) : "not measured"}
                   {t.latency_ms != null ? ` -- ${(t.latency_ms / 1000).toFixed(1)}s` : ""}
                   {t.refused ? " -- refused" : ""}
                 </span>
               </div>
-              <p className="mt-2 whitespace-pre-wrap text-sm text-slate-300">
+              {/* An answer assembled out of the user's corpus, so it is set in
+                  serif -- the provenance signal the rest of the app uses. */}
+              <p className="mt-2 font-serif text-sm whitespace-pre-wrap text-muted">
                 {t.answer ?? "(no answer recorded)"}
               </p>
-              <p className="mt-2 text-xs text-slate-500">
+              <p className="mt-2 font-mono text-xs text-faint">
                 {t.model_used ?? "model not recorded"}
                 {t.prompt_tokens != null
                   ? ` -- ${num(t.prompt_tokens)}/${num(t.completion_tokens)} tokens`
@@ -484,34 +496,34 @@ function Conversations() {
   return (
     <div className="space-y-3">
       <ErrorBanner error={readError} />
-      <p className="text-xs text-slate-400">
+      <p className="text-xs text-muted">
         Opening a thread shows another person&rsquo;s questions and answers, and
         records that you read it.
       </p>
       <Table head={["Thread", "User", "Agent", "Turns", "Spend", "Updated", ""]}>
         {(data ?? []).map((c) => (
           <tr key={c.id}>
-            <td className="px-3 py-2 font-medium text-slate-100">
+            <td className="px-3 py-2 font-medium text-ink">
               {c.title ?? "Untitled"}
             </td>
-            <td className="px-3 py-2 text-slate-400">{c.user_email}</td>
-            <td className="px-3 py-2 text-slate-400">{c.agent_name}</td>
-            <td className="px-3 py-2 tabular-nums">
+            <td className="px-3 py-2 text-muted">{c.user_email}</td>
+            <td className="px-3 py-2 text-muted">{c.agent_name}</td>
+            <td className="px-3 py-2 font-mono tabular-nums">
               {num(c.turns)}
               {c.refusals > 0 ? (
-                <span className="text-xs text-slate-400"> ({c.refusals} refused)</span>
+                <span className="text-xs text-muted"> ({c.refusals} refused)</span>
               ) : null}
             </td>
             <td className="px-3 py-2">
               <SpendCell spend={c.spend} />
             </td>
-            <td className="px-3 py-2 text-xs text-slate-400">{when(c.updated_at)}</td>
+            <td className="px-3 py-2 text-xs text-muted">{when(c.updated_at)}</td>
             <td className="px-3 py-2">
               <button
                 type="button"
                 onClick={() => read(c.id)}
                 disabled={opening === c.id}
-                className="min-h-11 rounded border border-slate-700 px-3 text-sm font-medium hover:bg-slate-800 disabled:opacity-50"
+                className={`${BTN_SECONDARY} ${BTN_SM} whitespace-nowrap`}
               >
                 {opening === c.id ? "Opening..." : "Read transcript"}
               </button>
@@ -532,7 +544,23 @@ function SpendTab() {
     [groupBy],
   );
 
-  const peak = Math.max(1, ...(data?.daily ?? []).map((d) => d.cost_usd));
+  /*
+    The largest day in the window, and the scale every bar is drawn against.
+
+    It used to be `Math.max(1, ...)`. That floor is the difference between a
+    chart and a decoration: daily spend here is fractions of a cent, so a peak
+    clamped to one dollar put every bar at ~0.05% -- under the 2% minimum below,
+    which meant all of them rendered at exactly the same stub width. The bars
+    were also invisible at the time (`bg-emerald-950/500` emitted no rule), so  (palette-check: ignore -- quoting the old class)
+    fixing only the colour would have shipped a chart that is visible and still
+    conveys nothing.
+
+    The guard that remains is against division by zero, not against small
+    numbers: a window with no spend at all has no meaningful scale, and every
+    bar is then legitimately empty.
+  */
+  const costs = (data?.daily ?? []).map((d) => d.cost_usd);
+  const peak = costs.length > 0 ? Math.max(...costs) : 0;
 
   return (
     <div className="space-y-4">
@@ -541,12 +569,11 @@ function SpendTab() {
           <button
             key={g}
             type="button"
+            // The class says it LOOKS selected; the attribute says it IS. See
+            // the note on `TAB` in `lib/styles.ts`.
+            aria-pressed={groupBy === g}
             onClick={() => setGroupBy(g)}
-            className={`min-h-11 rounded border px-3 text-sm font-medium ${
-              groupBy === g
-                ? "border-emerald-500 bg-emerald-950/50 text-emerald-200"
-                : "border-slate-700 hover:bg-slate-800"
-            }`}
+            className={`${TAB} ${groupBy === g ? TAB_ACTIVE : TAB_INACTIVE}`}
           >
             {g.replace("_", " ")}
           </button>
@@ -561,17 +588,17 @@ function SpendTab() {
           <Table head={[groupBy.replace("_", " "), "Cost", "Prompt", "Completion", "Calls"]}>
             {data.groups.map((g) => (
               <tr key={g.key ?? "unattributed"}>
-                <td className="px-3 py-2 font-medium text-slate-100">
+                <td className="px-3 py-2 font-medium text-ink">
                   {/* NULL is a real answer -- an unattributed call, or one
                       metered before the provider was recoverable. Coercing it
                       to "unknown" in SQL would hide that it is a distinct case. */}
-                  {g.key ?? <span className="text-slate-500">unattributed</span>}
+                  {g.key ?? <span className="text-faint">unattributed</span>}
                 </td>
-                <td className="px-3 py-2 tabular-nums">
+                <td className="px-3 py-2 font-mono tabular-nums">
                   {g.priced_calls === 0 && g.calls > 0 ? (
                     // Cohere reports search units, not cost. Saying "$0" here
                     // would report a real expense as free.
-                    <span className="text-slate-400">
+                    <span className="text-muted">
                       not priced
                       <span className="ml-1 text-xs">({num(g.calls)} units)</span>
                     </span>
@@ -579,41 +606,51 @@ function SpendTab() {
                     usd(g.cost_usd)
                   )}
                 </td>
-                <td className="px-3 py-2 tabular-nums">
-                  {g.prompt_tokens > 0 ? num(g.prompt_tokens) : <span className="text-slate-500">--</span>}
+                <td className="px-3 py-2 font-mono tabular-nums">
+                  {g.prompt_tokens > 0 ? num(g.prompt_tokens) : <span className="text-faint">--</span>}
                 </td>
-                <td className="px-3 py-2 tabular-nums">
-                  {g.completion_tokens > 0 ? num(g.completion_tokens) : <span className="text-slate-500">--</span>}
+                <td className="px-3 py-2 font-mono tabular-nums">
+                  {g.completion_tokens > 0 ? num(g.completion_tokens) : <span className="text-faint">--</span>}
                 </td>
-                <td className="px-3 py-2 tabular-nums">{num(g.calls)}</td>
+                <td className="px-3 py-2 font-mono tabular-nums">{num(g.calls)}</td>
               </tr>
             ))}
           </Table>
 
-          <section className="rounded-lg border border-slate-800 bg-slate-900 p-4">
-            <h3 className="text-sm font-semibold text-slate-100">
+          <section className={`${CARD} p-5`}>
+            <h3 className="text-sm font-semibold text-ink">
               Daily cost, last {data.days} days
             </h3>
             {data.daily.length === 0 ? (
-              <p className="mt-2 text-sm text-slate-400">
+              <p className="mt-2 text-sm text-muted">
                 Nothing recorded yet in this window.
               </p>
             ) : (
               // A plain bar list rather than a chart library. Six rectangles do
               // not justify a dependency on a static site whose entire config
               // surface is one backend URL.
-              <ul className="mt-3 space-y-1">
+              //
+              // The bar used to carry `bg-emerald-950/500`. `/500` is not a  (palette-check: ignore -- quoting the old class, not using it)
+              // valid opacity modifier, so Tailwind emitted no rule at all and
+              // every bar on this chart rendered invisible -- a class that
+              // failed silently, which is the entire argument for the token
+              // layer. It is now a filled accent bar sitting in its own sunken
+              // track, so the bars share a baseline and an empty day is still
+              // legible as a track with nothing in it.
+              <ul className="mt-3 space-y-2">
                 {data.daily.map((d) => (
-                  <li key={d.day} className="flex items-center gap-2 text-xs">
-                    <span className="w-24 shrink-0 tabular-nums text-slate-400">
-                      {d.day}
-                    </span>
-                    <span
-                      className="h-3 rounded-sm bg-emerald-950/500"
-                      style={{ width: `${Math.max(2, (d.cost_usd / peak) * 100)}%` }}
-                    />
-                    <span className="tabular-nums text-slate-400">
-                      {usd(d.cost_usd)} / {num(d.calls)} calls
+                  <li key={d.day} className="text-xs">
+                    <div className="flex items-baseline justify-between gap-3">
+                      <span className="font-mono tabular-nums text-muted">{d.day}</span>
+                      <span className="font-mono tabular-nums text-muted">
+                        {usd(d.cost_usd)} / {num(d.calls)} calls
+                      </span>
+                    </div>
+                    <span className="mt-1 block h-2 w-full overflow-hidden rounded-full bg-sunken">
+                      <span
+                        className="block h-full rounded-full bg-accent"
+                        style={{ width: peak > 0 ? `${Math.max(2, (d.cost_usd / peak) * 100)}%` : "0%" }}
+                      />
                     </span>
                   </li>
                 ))}
@@ -636,7 +673,7 @@ function Evals() {
       {/* EVAL.md's warnings travel with these numbers. The one that has already
           misled a reader of this system is repeated here rather than left in a
           document nobody has open. */}
-      <p className="rounded border border-slate-800 bg-slate-900/60 px-3 py-2 text-xs text-slate-400">
+      <p className={`${NOTICE} ${NEUTRAL_TONE}`}>
         Read these against EVAL.md. A perfect context precision/recall on a small
         corpus means &ldquo;not yet measured&rdquo;, not excellent retrieval, and
         faithfulness scores a teaching persona&rsquo;s analogies as unsupported
@@ -645,20 +682,22 @@ function Evals() {
       <Table head={["Agent", "Owner", "Status", "Judge", "Generator", "Scored", "When"]}>
         {(data ?? []).map((r) => (
           <tr key={r.id}>
-            <td className="px-3 py-2 font-medium text-slate-100">{r.agent_name}</td>
-            <td className="px-3 py-2 text-slate-400">{r.owner_email}</td>
-            <td className="px-3 py-2">{r.status}</td>
-            <td className="px-3 py-2 text-xs text-slate-400">{r.judge_model ?? "--"}</td>
-            <td className="px-3 py-2 text-xs text-slate-400">
+            <td className="px-3 py-2 font-medium text-ink">{r.agent_name}</td>
+            <td className="px-3 py-2 text-muted">{r.owner_email}</td>
+            <td className="px-3 py-2 text-muted">{r.status}</td>
+            <td className="px-3 py-2 font-mono text-xs text-muted">
+              {r.judge_model ?? "--"}
+            </td>
+            <td className="px-3 py-2 font-mono text-xs text-muted">
               {r.generation_model ?? "--"}
             </td>
-            <td className="px-3 py-2 tabular-nums">
+            <td className="px-3 py-2 font-mono tabular-nums">
               {num(r.scored_count)}
               {r.error_count ? (
-                <span className="text-xs text-amber-300"> ({r.error_count} err)</span>
+                <span className="text-xs text-warn"> ({r.error_count} err)</span>
               ) : null}
             </td>
-            <td className="px-3 py-2 text-xs text-slate-400">{when(r.created_at)}</td>
+            <td className="px-3 py-2 text-xs text-muted">{when(r.created_at)}</td>
           </tr>
         ))}
       </Table>
@@ -706,10 +745,10 @@ function Trajectory() {
 
   return (
     <div className="space-y-4" data-testid="trajectory-panel">
-      <p className="rounded border border-slate-800 bg-slate-900/60 px-3 py-2 text-xs text-slate-400">
+      <p className={`${NOTICE} ${NEUTRAL_TONE}`}>
         Whether agents achieved what they were asked, and whether they used their
         tools the way the golden set says they should. Goal accuracy is judged by{" "}
-        <span className="text-slate-300">AgentGoalAccuracyWithReference</span> and
+        <span className="font-mono text-ink">AgentGoalAccuracyWithReference</span> and
         is binary per turn, so it is a pass rate rather than a mean -- it is not
         comparable with faithfulness. Everything else here is counted from the
         trace, not scored by a model.
@@ -717,21 +756,19 @@ function Trajectory() {
 
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <div
-          className="rounded-lg border border-slate-800 bg-slate-900 p-4"
+          className={`${CARD} p-4`}
           data-testid="trajectory-metric-card"
           data-metric="goal_accuracy"
         >
-          <div className="text-xs font-medium uppercase tracking-wide text-slate-400">
-            Goal achieved
-          </div>
-          <div className="mt-1 text-2xl font-semibold tabular-nums text-slate-100">
+          <div className={EYEBROW}>Goal achieved</div>
+          <div className="mt-1 font-mono text-2xl font-semibold tabular-nums text-ink">
             {data.goal_accuracy.measured === 0 ? (
               <span data-testid="trajectory-unmeasured">not measured</span>
             ) : (
               rate(passed(data.goal_accuracy), data.goal_accuracy.measured)
             )}
           </div>
-          <div className="mt-1 text-xs text-slate-400">
+          <div className="mt-1 text-xs text-muted">
             {data.goal_accuracy.measured === 0
               ? "no turn carried a reference answer to judge against"
               : `${num(data.goal_accuracy.measured)} of ${num(data.goal_accuracy.total)} turns judged`}
@@ -739,19 +776,17 @@ function Trajectory() {
         </div>
 
         <div
-          className="rounded-lg border border-slate-800 bg-slate-900 p-4"
+          className={`${CARD} p-4`}
           data-testid="trajectory-metric-card"
           data-metric="tool_use_ok"
         >
-          <div className="text-xs font-medium uppercase tracking-wide text-slate-400">
-            Tool use as expected
-          </div>
-          <div className="mt-1 text-2xl font-semibold tabular-nums text-slate-100">
+          <div className={EYEBROW}>Tool use as expected</div>
+          <div className="mt-1 font-mono text-2xl font-semibold tabular-nums text-ink">
             {data.tool_use_ok.measured === 0
               ? "not measured"
               : rate(passed(data.tool_use_ok), data.tool_use_ok.measured)}
           </div>
-          <div className="mt-1 text-xs text-slate-400">
+          <div className="mt-1 text-xs text-muted">
             {data.tool_use_ok.measured === 0
               ? "no golden question set expected_tool_use"
               : `${num(data.tool_use_ok.measured)} of ${num(data.tool_use_ok.total)} turns graded`}
@@ -771,34 +806,36 @@ function Trajectory() {
         />
       </div>
 
-      <section className="rounded-lg border border-slate-800 bg-slate-900 p-4">
-        <h3 className="text-sm font-semibold text-slate-100">
-          Runs by tool configuration
-        </h3>
-        <p className="mt-1 text-xs text-slate-400">
+      <section className={`${CARD} p-5`}>
+        <h3 className="text-sm font-semibold text-ink">Runs by tool configuration</h3>
+        <p className="mt-1 text-xs text-muted">
           Two runs with tools toggled between them are not comparable, and until
           change set 16 nothing recorded which was which.{" "}
-          <span className="text-slate-300">Not recorded</span> means the run
+          <span className="font-medium text-ink">Not recorded</span> means the run
           predates the column; it does not mean tools were off.
         </p>
-        <div className="mt-3 flex flex-wrap gap-2 text-sm">
-          <span className="rounded bg-emerald-900/40 px-2 py-0.5 text-emerald-300">
+        {/*
+          Three pills, three tones, and the third must stay visually distinct
+          from the second: "not recorded" is a run that cannot say, which is a
+          different fact from a run that said "off". Collapsing them is the
+          defect this panel exists to prevent, so a neutral pill and a warn pill
+          carry the two rather than one class carrying both.
+        */}
+        <div className="mt-3 flex flex-wrap gap-2">
+          <span className={`${PILL} ${OK_TONE}`}>
             tools on: {num(data.run_config.tools_on)}
           </span>
-          <span className="rounded bg-slate-800 px-2 py-0.5 text-slate-300">
+          <span className={PILL_NEUTRAL}>
             tools off: {num(data.run_config.tools_off)}
           </span>
-          <span
-            className="rounded bg-amber-950/40 px-2 py-0.5 text-amber-200"
-            data-testid="trajectory-not-recorded"
-          >
+          <span className={`${PILL} ${WARN_TONE}`} data-testid="trajectory-not-recorded">
             not recorded: {num(data.run_config.not_recorded)}
           </span>
         </div>
       </section>
 
       {data.agents.length === 0 ? (
-        <p className="text-sm text-slate-400">
+        <p className="text-sm text-muted">
           Nothing recorded yet in this window. Run an evaluation on an agent that
           has tools enabled.
         </p>
@@ -816,21 +853,17 @@ function Trajectory() {
         >
           {data.agents.map((a) => (
             <tr key={a.agent_name} data-testid="trajectory-row">
-              <td className="px-3 py-2 text-slate-100">{a.agent_name}</td>
-              <td className="px-3 py-2 text-xs text-slate-400">{a.owner_email}</td>
-              <td className="px-3 py-2 tabular-nums text-slate-300">{num(a.turns)}</td>
-              <td className="px-3 py-2 tabular-nums text-slate-300">
+              <td className="px-3 py-2 font-medium text-ink">{a.agent_name}</td>
+              <td className="px-3 py-2 text-xs text-muted">{a.owner_email}</td>
+              <td className="px-3 py-2 font-mono tabular-nums">{num(a.turns)}</td>
+              <td className="px-3 py-2 font-mono tabular-nums">
                 {rate(a.goal_ok, a.goal_measured)}
               </td>
-              <td className="px-3 py-2 tabular-nums text-slate-300">
+              <td className="px-3 py-2 font-mono tabular-nums">
                 {rate(a.tool_ok, a.tool_measured)}
               </td>
-              <td className="px-3 py-2 tabular-nums text-slate-300">
-                {num(a.searched)}
-              </td>
-              <td className="px-3 py-2 tabular-nums text-slate-300">
-                {num(a.gap_forced)}
-              </td>
+              <td className="px-3 py-2 font-mono tabular-nums">{num(a.searched)}</td>
+              <td className="px-3 py-2 font-mono tabular-nums">{num(a.gap_forced)}</td>
             </tr>
           ))}
         </Table>
@@ -846,7 +879,7 @@ function Audit() {
 
   return (
     <div className="space-y-3">
-      <p className="text-xs text-slate-400">
+      <p className="text-xs text-muted">
         Includes this console&rsquo;s own transcript reads. An admin surface that
         logs everyone else and not itself is a surveillance tool, not an
         accountability one.
@@ -854,14 +887,16 @@ function Audit() {
       <Table head={["When", "Actor", "Action", "Resource", "Detail"]}>
         {(data ?? []).map((e) => (
           <tr key={e.id}>
-            <td className="px-3 py-2 text-xs text-slate-400">{when(e.created_at)}</td>
-            <td className="px-3 py-2 text-slate-300">{e.actor_email ?? "system"}</td>
-            <td className="px-3 py-2 text-xs font-medium text-slate-100">{e.action}</td>
-            <td className="px-3 py-2 text-xs text-slate-400">
+            <td className="px-3 py-2 text-xs text-muted">{when(e.created_at)}</td>
+            <td className="px-3 py-2 text-muted">{e.actor_email ?? "system"}</td>
+            <td className="px-3 py-2 font-mono text-xs font-medium text-ink">
+              {e.action}
+            </td>
+            <td className="px-3 py-2 font-mono text-xs text-muted">
               {e.resource_type}
               {e.resource_id ? ` ${e.resource_id.slice(0, 8)}` : ""}
             </td>
-            <td className="px-3 py-2 text-xs text-slate-400">
+            <td className="px-3 py-2 font-mono text-xs text-muted">
               {e.metadata ? JSON.stringify(e.metadata) : ""}
             </td>
           </tr>
@@ -879,25 +914,25 @@ export default function Admin({ onBack }: { onBack: () => void }) {
   const [tab, setTab] = useState<Tab>("overview");
 
   return (
-    <div className="mx-auto w-full max-w-6xl space-y-5 p-4">
+    <div className="mx-auto w-full max-w-6xl space-y-6 p-4">
       <header className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h1 className="text-xl font-semibold text-slate-100">Admin</h1>
-          <p className="text-sm text-slate-400">
+          <h1 className="text-2xl font-semibold tracking-tight text-ink sm:text-3xl">
+            Admin
+          </h1>
+          <p className="mt-1 text-sm text-muted">
             Everything, across every user. Reads of other people&rsquo;s
             transcripts are recorded.
           </p>
         </div>
-        <button
-          type="button"
-          onClick={onBack}
-          className="min-h-11 rounded border border-slate-700 px-3 text-sm font-medium hover:bg-slate-800"
-        >
+        <button type="button" onClick={onBack} className={BTN_QUIET}>
           Back to agents
         </button>
       </header>
 
-      <nav className="flex flex-wrap gap-1 border-b border-slate-800" role="tablist">
+      {/* The shared tab treatment. This row used to be an emerald underline --
+          the fourth of five looks for "this one is selected" in one product. */}
+      <nav className="flex flex-wrap gap-1 border-b border-line pb-2" role="tablist">
         {TABS.map((t) => (
           <button
             key={t.id}
@@ -905,11 +940,7 @@ export default function Admin({ onBack }: { onBack: () => void }) {
             role="tab"
             aria-selected={tab === t.id}
             onClick={() => setTab(t.id)}
-            className={`min-h-11 px-3 text-sm font-medium ${
-              tab === t.id
-                ? "border-b-2 border-emerald-500 text-emerald-200"
-                : "text-slate-400 hover:text-slate-100"
-            }`}
+            className={`${TAB} ${tab === t.id ? TAB_ACTIVE : TAB_INACTIVE}`}
           >
             {t.label}
           </button>

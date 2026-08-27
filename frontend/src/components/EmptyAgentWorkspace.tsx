@@ -5,7 +5,20 @@
  * the normal composer in that state invites work the product is guaranteed to
  * refuse, so the empty workspace points at the one action that can make the
  * agent usable and leaves no misleading text box behind.
+ *
+ * `CARD_EMPTY` rather than `CARD`: the dashed edge is what makes emptiness read
+ * as a STATE rather than as a container that failed to load. This is a
+ * first-run moment -- for most people the first thing Groundwork ever says to
+ * them -- so it gets the page-section padding and the full measure, not the
+ * dense-list treatment.
+ *
+ * **The heading and the button label are asserted by accessible name**
+ * (`EmptyAgentWorkspace.test.tsx`). They are copy, not decoration; restyle
+ * freely, reword neither.
  */
+
+import { ACCENT_TONE, BTN_PRIMARY, CARD_EMPTY } from "../lib/styles.ts";
+
 export default function EmptyAgentWorkspace({
   onAddSource,
 }: {
@@ -15,12 +28,18 @@ export default function EmptyAgentWorkspace({
     <section
       data-testid="empty-agent-workspace"
       aria-labelledby="empty-agent-heading"
-      className="flex min-h-0 flex-1 items-center justify-center rounded-xl border border-slate-800 bg-slate-900/40 px-5 py-10 text-center sm:px-8"
+      className={`${CARD_EMPTY} flex min-h-0 flex-1 items-center justify-center px-5 py-12 text-center sm:px-8`}
     >
-      <div className="max-w-md">
+      <div className="mx-auto max-w-prose">
+        {/*
+          The accent, spent on exactly what it means everywhere else in this
+          app: a document, which is the only thing that can ground an answer.
+          Tone strings carry the border, the tint and the ink as one triple, so
+          the glyph cannot end up legible in one theme and not the other.
+        */}
         <span
           aria-hidden="true"
-          className="mx-auto inline-flex h-12 w-12 items-center justify-center rounded-xl border border-emerald-800/60 bg-emerald-950/40 text-emerald-300"
+          className={`mx-auto inline-flex h-12 w-12 items-center justify-center rounded-md border ${ACCENT_TONE}`}
         >
           <svg
             width="24"
@@ -39,11 +58,11 @@ export default function EmptyAgentWorkspace({
 
         <h2
           id="empty-agent-heading"
-          className="mt-5 text-xl font-semibold tracking-tight text-slate-100"
+          className="mt-5 text-lg font-semibold tracking-tight text-ink"
         >
           Add a source before you ask
         </h2>
-        <p className="mt-2 text-sm leading-relaxed text-slate-400">
+        <p className="mx-auto mt-2 max-w-prose text-sm leading-relaxed text-muted">
           Groundwork answers only from this agent&rsquo;s documents. With no sources,
           every question has to be refused instead of guessed.
         </p>
@@ -52,11 +71,11 @@ export default function EmptyAgentWorkspace({
           type="button"
           data-testid="empty-agent-add-source"
           onClick={onAddSource}
-          className="mt-6 min-h-11 rounded-md bg-emerald-500 px-4 py-2 text-sm font-semibold text-emerald-950 transition hover:bg-emerald-400"
+          className={`${BTN_PRIMARY} mt-6`}
         >
           Add your first source
         </button>
-        <p className="mt-3 text-xs text-slate-400">
+        <p className="mt-3 text-xs text-muted">
           Upload a PDF, Markdown file or plain-text document.
         </p>
       </div>

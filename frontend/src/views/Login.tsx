@@ -16,6 +16,28 @@
  * when it is wrong. So the third pillar names the four Ragas metrics rather than
  * promising quality, and the strapline says "know when it is wrong" -- which is
  * the claim the Evaluate view can actually cash.
+ *
+ * ## The specimen
+ *
+ * The page's centre is not a headline or an abstract graphic, it is a worked
+ * example of one turn: a question, an answer in the reading face, numbered
+ * markers in the prose, and the passages those markers point at, in the margin.
+ *
+ * That is the whole product in one figure, and it is the honest version of the
+ * claim above it. A visitor who reads nothing else can see that every sentence
+ * is bound to a chunk of a named file with a retrieval score -- which is the
+ * thing that would otherwise take a sign-in, an upload and a two-minute ingest
+ * to discover.
+ *
+ * **It shows a refusal as well as an answer**, and that is deliberate. The
+ * strapline promises the system will tell you when it is wrong; a landing page
+ * that then shows only successes is asking to be taken on trust for the one
+ * claim it is making. The second turn is the product declining, drawn exactly as
+ * carefully as the first.
+ *
+ * It is labelled as an example. It is illustrative -- not a recorded
+ * transcript -- and the caption says so rather than implying otherwise by
+ * omission.
  */
 
 import { useState } from "react";
@@ -24,10 +46,21 @@ import { api, API_URL } from "../lib/api.ts";
 import { signInWithGoogle } from "../lib/auth-client.ts";
 import type { User } from "../lib/types.ts";
 import { ErrorBanner, Spinner, errorMessage } from "../components/ui.tsx";
+import {
+  ACCENT_TONE,
+  BAD_TONE,
+  BTN_PRIMARY,
+  CARD,
+  EYEBROW,
+  FIELD,
+  LINK,
+  NOTICE,
+  PILL,
+  PILL_NEUTRAL,
+  WARN_TONE,
+} from "../lib/styles.ts";
 import PipelineScene from "../components/PipelineScene.tsx";
-
-/** The six stages, as text. Also drawn by `PipelineScene`, which is aria-hidden. */
-const STAGE_NAMES = ["Ingest", "Embed", "Retrieve", "Rerank", "Generate", "Measure"];
+import ThemeToggle from "../components/ThemeToggle.tsx";
 
 const PILLARS = [
   {
@@ -36,7 +69,7 @@ const PILLARS = [
   },
   {
     title: "Every turn is traceable",
-    body: "Rewrite, retrieval, rerank scores and the exact chunks that reached the prompt -- kept per query, not sampled.",
+    body: "Rewrite, retrieval, rerank scores and the exact chunks that reached the prompt — kept per query, not sampled.",
   },
   {
     title: "Scored on a golden set",
@@ -52,201 +85,396 @@ export default function Login({ onAuthenticated }: { onAuthenticated: (user: Use
   const [signInError, setSignInError] = useState<string | null>(null);
 
   return (
-    <div className="relative min-h-screen overflow-hidden bg-slate-950">
-      {/*
-        Backdrop, in two layers. Both are `fixed` and outside the perspective
-        chain in PipelineScene -- a blur anywhere between the perspective and
-        the panes would silently flatten the scene (see index.css).
-      */}
-      <div
-        aria-hidden="true"
-        className="pointer-events-none fixed inset-0 opacity-[0.55]"
-        style={{
-          backgroundImage:
-            "radial-gradient(60% 45% at 22% 12%, rgba(16,185,129,0.16), transparent 70%)," +
-            "radial-gradient(55% 45% at 82% 78%, rgba(56,189,248,0.13), transparent 70%)",
-        }}
-      />
-      {/* A faint engineering grid. Masked so it fades out rather than ending on a line. */}
-      <div
-        aria-hidden="true"
-        className="pointer-events-none fixed inset-0 opacity-[0.18]"
-        style={{
-          backgroundImage:
-            "linear-gradient(rgba(148,163,184,0.35) 1px, transparent 1px)," +
-            "linear-gradient(90deg, rgba(148,163,184,0.35) 1px, transparent 1px)",
-          backgroundSize: "56px 56px",
-          maskImage: "radial-gradient(ellipse 80% 60% at 50% 35%, black, transparent 75%)",
-          WebkitMaskImage: "radial-gradient(ellipse 80% 60% at 50% 35%, black, transparent 75%)",
-        }}
-      />
+    <div className="relative min-h-screen overflow-hidden bg-canvas">
+      <div className="relative mx-auto max-w-6xl px-5 py-10 sm:px-8 sm:py-14">
+        {/* ------------------------------------------------------- brand row */}
+        <div className="flex items-center gap-3">
+          <Wordmark />
+          <span className="text-base font-semibold tracking-tight text-ink">Groundwork</span>
+          <span className={`${PILL} ${ACCENT_TONE} hidden sm:inline-flex`}>
+            agentic RAG harness
+          </span>
+          {/* The only control on the page besides sign-in. A visitor who reads
+              dark-on-light badly should not have to sign in to fix it. */}
+          <span className="ml-auto">
+            <ThemeToggle />
+          </span>
+        </div>
 
-      <div className="relative mx-auto grid max-w-6xl gap-12 px-6 py-14 lg:grid-cols-[1.15fr_1fr] lg:items-center lg:gap-16 lg:py-20">
-        {/* ---------------------------------------------------------- Hero */}
-        <section className="gw-rise">
-          <div className="flex items-center gap-2.5">
-            <Wordmark />
-            <span className="text-lg font-semibold tracking-tight text-slate-100">
-              Groundwork
-            </span>
-            <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-0.5 text-[11px] font-medium tracking-wide text-emerald-300">
-              agentic RAG harness
-            </span>
-          </div>
+        {/* ------------------------------------------------------------ hero */}
+        <div className="mt-12 grid gap-10 lg:grid-cols-[1.25fr_1fr] lg:items-start lg:gap-16">
+          <section className="gw-rise">
+            <h1 className="max-w-2xl text-3xl font-semibold tracking-tight text-ink sm:text-4xl lg:text-5xl">
+              Retrieval over your own documents
+              <span className="block text-muted">that tells you when it is wrong.</span>
+            </h1>
 
-          <h1 className="mt-7 text-4xl font-semibold leading-[1.1] tracking-tight text-slate-50 sm:text-5xl">
-            Retrieval over your own documents
-            <span className="block bg-gradient-to-r from-emerald-300 via-emerald-200 to-sky-300 bg-clip-text text-transparent">
-              that tells you when it is wrong.
-            </span>
-          </h1>
-
-          <p className="mt-5 max-w-xl text-[15px] leading-relaxed text-slate-400">
-            Upload a corpus, get an agent that answers only from it, then run a ten-question
-            golden set and read the scorecard. Six stages, every one of them inspectable.
-          </p>
-
-          <PipelineScene />
-
-          {/*
-            The accessible copy of the scene above. `PipelineScene` is
-            aria-hidden precisely because this list exists -- so the stage names
-            are announced once, as text, in order.
-          */}
-          <ol className="-mt-2 flex flex-wrap items-center gap-x-2 gap-y-2 text-[11px] font-medium uppercase tracking-[0.14em] text-slate-400">
-            {STAGE_NAMES.map((name, index) => (
-              <li key={name} className="flex items-center gap-2">
-                <span className={index === STAGE_NAMES.length - 1 ? "text-emerald-300" : ""}>
-                  {name}
-                </span>
-                {index < STAGE_NAMES.length - 1 && (
-                  <span aria-hidden="true" className="text-slate-700">
-                    &rarr;
-                  </span>
-                )}
-              </li>
-            ))}
-          </ol>
-
-          <dl className="mt-10 grid gap-6 sm:grid-cols-3">
-            {PILLARS.map((pillar) => (
-              <div key={pillar.title} className="border-t border-slate-800 pt-4">
-                <dt className="text-sm font-medium text-slate-200">{pillar.title}</dt>
-                <dd className="mt-1.5 text-[13px] leading-relaxed text-slate-400">
-                  {pillar.body}
-                </dd>
-              </div>
-            ))}
-          </dl>
-        </section>
-
-        {/* --------------------------------------------------------- Sign in */}
-        <section className="gw-rise w-full justify-self-center lg:max-w-md" style={{ animationDelay: "0.12s" }}>
-          <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-6 shadow-2xl shadow-emerald-950/30 sm:p-8">
-            <h2 className="text-lg font-semibold tracking-tight text-slate-100">Sign in</h2>
-            <p className="mt-1.5 text-sm text-slate-400">
-              Your agents, documents and eval runs are scoped to your account.
+            <p className="mt-6 max-w-xl font-serif text-base leading-relaxed text-muted">
+              Upload a corpus, get an agent that answers only from it, then run a
+              ten-question golden set and read the scorecard.
             </p>
 
             {/*
-              A BUTTON, not a link, because Better Auth's sign-in is a POST that
-              returns the provider URL rather than a URL the page can navigate
-              to directly. `signInWithGoogle` performs the redirect itself.
-
-              The old Authlib link is kept below and is deliberately not styled
-              as an equal choice: both paths authenticate, the API accepts
-              either, and this one is the one being cut over to. It is removed
-              in the same commit that removes Authlib.
+              The pipeline sits in the hero rather than below the fold, because
+              the hero's left column is otherwise a headline and one sentence
+              against a sign-in card that is three times taller -- and in a
+              production build the dev-login box below that card is stripped, so
+              the imbalance is a real page rather than a development artefact.
+              It also puts the claim and the mechanism in one view: what this
+              does, and the six steps it does it in.
             */}
-            <button
-              type="button"
-              data-testid="login-google"
-              disabled={busy}
-              onClick={() => {
-                setBusy(true);
-                setSignInError(null);
-                // No `await`: this navigates away on success, so there is no
-                // "after" to run. The catch exists for the failure case, where
-                // the page stays put and the user is owed an explanation.
-                signInWithGoogle(window.location.pathname).catch((cause) => {
-                  setBusy(false);
-                  setSignInError(
-                    `Sign-in could not be started (${String(cause)}). ` +
-                      `If this persists, the auth service may still be starting up.`,
-                  );
-                });
-              }}
-              className="mt-6 flex w-full items-center justify-center gap-3 rounded-lg bg-slate-100 px-4 py-3 text-sm font-medium text-slate-900 transition hover:bg-white disabled:cursor-not-allowed disabled:opacity-60"
-            >
-              <GoogleMark />
-              {busy ? "Redirecting to Google..." : "Sign in with Google"}
-            </button>
+            <PipelineScene />
+          </section>
 
-            {signInError ? (
-              <p
-                data-testid="login-error"
-                role="alert"
-                className="mt-3 rounded-lg border border-rose-900/60 bg-rose-950/40 px-3 py-2 text-xs leading-relaxed text-rose-200"
-              >
-                {signInError}
+          {/* --------------------------------------------------------- sign in */}
+          <section
+            className="gw-rise w-full lg:max-w-sm lg:justify-self-end"
+            style={{ animationDelay: "0.1s" }}
+          >
+            <div className={`${CARD} p-6 shadow-sm`}>
+              <h2 className="text-lg font-semibold tracking-tight text-ink">Sign in</h2>
+              <p className="mt-1.5 text-sm text-muted">
+                Your agents, documents and eval runs are scoped to your account.
               </p>
-            ) : null}
-            <p className="mt-4 text-center text-xs leading-relaxed text-slate-400">
-              We store your Google account ID, email and name. Google&rsquo;s access and
-              refresh tokens are discarded immediately after the identity check.
-            </p>
+
+              {/*
+                A BUTTON, not a link, because Better Auth's sign-in is a POST that
+                returns the provider URL rather than a URL the page can navigate
+                to directly. `signInWithGoogle` performs the redirect itself.
+
+                The old Authlib link is kept below and is deliberately not styled
+                as an equal choice: both paths authenticate, the API accepts
+                either, and this one is the one being cut over to. It is removed
+                in the same commit that removes Authlib.
+              */}
+              <button
+                type="button"
+                data-testid="login-google"
+                disabled={busy}
+                onClick={() => {
+                  setBusy(true);
+                  setSignInError(null);
+                  // No `await`: this navigates away on success, so there is no
+                  // "after" to run. The catch exists for the failure case, where
+                  // the page stays put and the user is owed an explanation.
+                  signInWithGoogle(window.location.pathname).catch((cause) => {
+                    setBusy(false);
+                    setSignInError(
+                      `Sign-in could not be started (${String(cause)}). ` +
+                        `If this persists, the auth service may still be starting up.`,
+                    );
+                  });
+                }}
+                className={`${BTN_PRIMARY} mt-5 w-full py-3`}
+              >
+                <GoogleMark />
+                {busy ? "Redirecting to Google…" : "Sign in with Google"}
+              </button>
+
+              {signInError ? (
+                <p data-testid="login-error" role="alert" className={`${NOTICE} ${BAD_TONE} mt-3`}>
+                  {signInError}
+                </p>
+              ) : null}
+
+              <p className="mt-4 text-xs leading-relaxed text-faint">
+                We store your Google account ID, email and name. Google&rsquo;s access and
+                refresh tokens are discarded immediately after the identity check.
+              </p>
+
+              {/*
+                THE PREVIOUS SIGN-IN PATH, still live on the backend. Present so
+                that a failure in the new service is a degraded login rather than
+                no login at all, and so both can be exercised side by side while
+                the cutover is verified. Delete this together with app/auth/oauth.py.
+              */}
+              <p className="mt-3 text-xs text-faint">
+                <a
+                  data-testid="login-google-legacy"
+                  href={`${API_URL}/api/auth/google/login`}
+                  className={LINK}
+                >
+                  Having trouble? Use the previous sign-in
+                </a>
+              </p>
+            </div>
 
             {/*
-              THE PREVIOUS SIGN-IN PATH, still live on the backend. Present so
-              that a failure in the new service is a degraded login rather than
-              no login at all, and so both can be exercised side by side while
-              the cutover is verified. Delete this together with app/auth/oauth.py.
+              `import.meta.env.DEV` is replaced by Vite with a literal `false` in a
+              production build, so this entire subtree is removed by dead-code
+              elimination -- it is not merely hidden at runtime. Combined with the
+              backend's own three-way gate (opt-in flag, ENVIRONMENT=development,
+              loopback client), the bypass has to fail twice independently before it
+              could reach a deployed page.
             */}
-            <p className="mt-3 text-center text-xs text-slate-500">
-              <a
-                data-testid="login-google-legacy"
-                href={`${API_URL}/api/auth/google/login`}
-                className="underline decoration-slate-700 underline-offset-2 transition hover:text-slate-300"
-              >
-                Having trouble? Use the previous sign-in
-              </a>
-            </p>
-          </div>
+            {import.meta.env.DEV && <DevLoginBox onAuthenticated={onAuthenticated} />}
+          </section>
+        </div>
 
-          {/*
-            `import.meta.env.DEV` is replaced by Vite with a literal `false` in a
-            production build, so this entire subtree is removed by dead-code
-            elimination -- it is not merely hidden at runtime. Combined with the
-            backend's own three-way gate (opt-in flag, ENVIRONMENT=development,
-            loopback client), the bypass has to fail twice independently before it
-            could reach a deployed page.
-          */}
-          {import.meta.env.DEV && <DevLoginBox onAuthenticated={onAuthenticated} />}
-        </section>
+        {/* -------------------------------------------------------- specimen */}
+        <Specimen />
+
+        {/* --------------------------------------------------------- pillars */}
+        <dl className="mt-16 grid gap-8 sm:grid-cols-3 sm:gap-10">
+          {PILLARS.map((pillar) => (
+            <div key={pillar.title} className="border-t border-line pt-4">
+              <dt className="text-sm font-semibold text-ink">{pillar.title}</dt>
+              <dd className="mt-1.5 text-xs leading-relaxed text-muted">{pillar.body}</dd>
+            </div>
+          ))}
+        </dl>
       </div>
     </div>
   );
 }
 
+/* ========================================================================== */
+/* The specimen                                                                */
+/* ========================================================================== */
+
 /**
- * The mark: six stacked strata narrowing to a point -- ground layers, and the
- * pipeline funnelling to one answer. Inline SVG so the page makes no
- * third-party request and the logo cannot be a render-blocking fetch.
+ * Two turns, drawn the way the product draws them.
+ *
+ * This deliberately mirrors `Message.tsx` rather than importing it: that
+ * component takes a full `ChatMessage` with a query id, citations carrying
+ * chunk ids, trace wiring and a live `TracePanel` that would fetch on mount.
+ * Constructing a fake one to render a picture would couple the landing page to
+ * the chat schema, so that every future field added to a turn breaks the page
+ * that has no turns.
+ *
+ * The cost is that the two can drift, and it is bounded: both take their
+ * geometry from `.gw-apparatus` and their colours from the same tokens, so a
+ * drift is a spacing difference rather than a different-looking product.
+ */
+function Specimen() {
+  return (
+    <section className="mt-16" aria-labelledby="specimen-heading">
+      <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-2 border-b border-line pb-3">
+        <h2 id="specimen-heading" className="text-lg font-semibold tracking-tight text-ink">
+          What one turn looks like
+        </h2>
+        <p className="text-xs text-faint">
+          An example, not a recorded transcript. Markers in the prose point at the passages
+          beside them.
+        </p>
+      </div>
+
+      <div className={`${CARD} mt-6 p-5 sm:p-7`}>
+        {/* ------------------------------------------------ a grounded turn */}
+        <div className="border-l-2 border-line-strong pl-3.5">
+          <p className={EYEBROW}>Asked</p>
+          <p className="mt-1 text-sm font-medium text-ink">
+            What data rate does the Ka-band downlink hold in heavy rain?
+          </p>
+        </div>
+
+        <div className="gw-apparatus mt-4">
+          <div className="min-w-0">
+            <div className="gw-prose">
+              {/*
+                Long enough to fill the column beside two source cards. That is
+                not padding for its own sake: with `align-items: start` the row
+                is as tall as its tallest track, so a two-line answer next to a
+                two-card margin leaves a visible void that reads as a broken
+                layout rather than as a short answer. A real turn runs several
+                paragraphs; the specimen should not be the one place the
+                apparatus looks unbalanced.
+              */}
+              <p>
+                The Ka-band downlink runs at 200&nbsp;Mbps in clear sky and falls to
+                40&nbsp;Mbps under heavy rain, a drop driven by roughly 12&nbsp;dB of rain
+                fade on the link budget
+                <SpecimenMarker n={1} />.
+              </p>
+              <p>
+                That is why the operations brief schedules bulk downlink outside the
+                monsoon window rather than attempting to hold the higher rate through it
+                <SpecimenMarker n={2} />. The material does not give a per-month
+                availability figure, so this answer does not offer one.
+              </p>
+            </div>
+
+            <div className="mt-4 flex flex-wrap items-center gap-x-3 gap-y-2 border-t border-line pt-3">
+              <span className={PILL_NEUTRAL}>searched twice</span>
+              <span className="ml-auto font-mono text-xs text-faint">
+                14:32 &middot; 11.4s &middot; deepseek-v4-flash
+              </span>
+            </div>
+          </div>
+
+          <aside aria-label="Retrieved passages, example">
+            <p className={`${EYEBROW} xl:border-b xl:border-line xl:pb-2`}>Sources</p>
+            <p className="mt-1.5 mb-2.5 text-xs leading-relaxed text-muted">
+              Every claim above is numbered to one of these.
+            </p>
+            <ol className="space-y-2">
+              <SpecimenSource
+                marker={1}
+                filename="3.1-link-budget.md"
+                chunk={4}
+                rank={1}
+                score={0.87}
+                peak={0.87}
+                text="Clear-sky Ka-band throughput is 200 Mbps. Rain fade of 12 dB reduces the achievable rate to 40 Mbps."
+              />
+              <SpecimenSource
+                marker={2}
+                filename="4.2-ops-brief.md"
+                chunk={11}
+                rank={2}
+                score={0.81}
+                peak={0.87}
+                text="Bulk downlink is scheduled outside the monsoon window to avoid sustained rain fade."
+              />
+            </ol>
+          </aside>
+        </div>
+
+        {/* ------------------------------------------------------ a refusal */}
+        <div className="mt-8 border-t border-line pt-7">
+          <div className="border-l-2 border-line-strong pl-3.5">
+            <p className={EYEBROW}>Asked</p>
+            <p className="mt-1 text-sm font-medium text-ink">
+              Which launch vehicle was used?
+            </p>
+          </div>
+
+          <div className="gw-apparatus mt-4">
+            <div className="min-w-0">
+              <div className="gw-prose">
+                <p>
+                  The provided material does not state which launch vehicle was used. It
+                  covers the link budget and the operations schedule, but not the launch
+                  segment.
+                </p>
+              </div>
+
+              <p className="mt-4 border-t border-line pt-3 text-xs leading-relaxed text-muted">
+                The agent declined because the retrieved context did not support an answer.
+                That is a correct outcome, not an error.
+              </p>
+
+              <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-2">
+                <span className={`${PILL} ${WARN_TONE}`}>refused</span>
+                <span className="ml-auto font-mono text-xs text-faint">
+                  14:36 &middot; 6.2s
+                </span>
+              </div>
+            </div>
+
+            <aside aria-label="Passages checked, example">
+              <p className={`${EYEBROW} xl:border-b xl:border-line xl:pb-2`}>Passages checked</p>
+              <p className="mt-1.5 mb-2.5 text-xs leading-relaxed text-muted">
+                The closest passages the agent checked. They did not support an answer.
+              </p>
+              <ol className="space-y-2">
+                <SpecimenSource
+                  marker={1}
+                  filename="3.1-link-budget.md"
+                  chunk={2}
+                  rank={1}
+                  score={0.54}
+                  peak={0.54}
+                  text="Spacecraft mass at separation is 1,180 kg, including 240 kg of propellant."
+                />
+              </ol>
+            </aside>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+/** A citation marker, drawn exactly as `Message.tsx` draws it -- minus the
+ *  button, because there is nothing here to open. `<sup>` rather than
+ *  `align-super` on a span, so it is a real superscript to a screen reader. */
+function SpecimenMarker({ n }: { n: number }) {
+  return (
+    <sup className="ml-0.5 inline-flex h-5 min-w-5 items-center justify-center rounded-sm border border-accent-line bg-accent-soft px-1 font-mono text-xs font-semibold text-accent">
+      {n}
+    </sup>
+  );
+}
+
+/** One apparatus entry. Mirrors `CitationCard`'s resting state. */
+function SpecimenSource({
+  marker,
+  filename,
+  chunk,
+  rank,
+  score,
+  peak,
+  text,
+}: {
+  marker: number;
+  filename: string;
+  chunk: number;
+  rank: number;
+  score: number;
+  /** The best score in this turn's own set. The bar is a within-turn
+   *  comparison, exactly as `CitationCard` draws it -- see the measurement
+   *  note there. Passing it explicitly keeps the specimen honest about what
+   *  the product actually renders. */
+  peak: number;
+  text: string;
+}) {
+  return (
+    <li className="rounded-md border border-line bg-surface p-3">
+      <div className="flex items-baseline gap-2">
+        <span
+          aria-hidden="true"
+          className="inline-flex h-5 min-w-5 shrink-0 items-center justify-center rounded-sm border border-accent-line bg-accent-soft px-1 font-mono text-xs font-semibold text-accent"
+        >
+          {marker}
+        </span>
+        <span className="min-w-0 flex-1 truncate text-xs font-medium text-ink">{filename}</span>
+      </div>
+      <p className="mt-1.5 font-mono text-xs text-faint">
+        chunk {chunk} &middot; rank {rank}
+      </p>
+      <div className="mt-2 flex items-center gap-2">
+        <span className="h-0.5 min-w-0 flex-1 rounded-full bg-line" aria-hidden="true">
+          <span className="gw-strata" style={{ width: `${Math.round((score / peak) * 100)}%` }} />
+        </span>
+        <span className="shrink-0 font-mono text-xs tabular-nums text-muted">
+          {score.toFixed(2)}
+        </span>
+      </div>
+      <p className="mt-2 line-clamp-2 border-t border-line pt-2 font-serif text-xs leading-relaxed text-muted">
+        {text}
+      </p>
+    </li>
+  );
+}
+
+/* ========================================================================== */
+
+/**
+ * The mark: six strata narrowing to a point -- ground layers, and the pipeline
+ * funnelling to one answer. Inline SVG so the page makes no third-party request
+ * and the logo cannot be a render-blocking fetch.
+ *
+ * `currentColor` at descending opacity rather than a gradient with two hex
+ * stops. The gradient was emerald-to-sky, which is a fixed pair of values and
+ * therefore the one element on the page that could not follow the theme; as
+ * `currentColor` the mark inherits `text-ink` and is correct in both without a
+ * second definition.
  */
 function Wordmark() {
   return (
-    <svg width="26" height="26" viewBox="0 0 24 24" aria-hidden="true" className="shrink-0">
-      <defs>
-        <linearGradient id="gw-mark" x1="0" y1="0" x2="1" y2="1">
-          <stop offset="0%" stopColor="#6ee7b7" />
-          <stop offset="100%" stopColor="#38bdf8" />
-        </linearGradient>
-      </defs>
-      <g fill="none" stroke="url(#gw-mark)" strokeWidth="1.6" strokeLinecap="round">
+    <svg
+      width="24"
+      height="24"
+      viewBox="0 0 24 24"
+      aria-hidden="true"
+      className="shrink-0 text-ink"
+    >
+      <g fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round">
         <path d="M3 6.5h18" opacity="0.95" />
-        <path d="M4.6 10.5h14.8" opacity="0.8" />
-        <path d="M6.2 14.5h11.6" opacity="0.65" />
-        <path d="M8 18.5h8" opacity="0.5" />
+        <path d="M4.6 10.5h14.8" opacity="0.78" />
+        <path d="M6.2 14.5h11.6" opacity="0.58" />
+        <path d="M8 18.5h8" opacity="0.4" />
       </g>
     </svg>
   );
@@ -255,13 +483,15 @@ function Wordmark() {
 /**
  * The gated bypass, styled to look like what it is.
  *
- * Amber everywhere, a hazard-striped header, a literal "DEV ONLY" badge and a
- * sentence naming it an authentication bypass. This is not decoration: the one
- * genuine risk of a dev-login affordance is that it stops reading as
- * exceptional and someone starts using it as the convenient way in, or copies
- * the pattern into a screenshot that ends up in a deployment. It should be
- * impossible to confuse with the button above it, at a glance, from across a
- * room.
+ * A hazard border, a literal "DEV ONLY" badge and a sentence naming it an
+ * authentication bypass. This is not decoration: the one genuine risk of a
+ * dev-login affordance is that it stops reading as exceptional and someone
+ * starts using it as the convenient way in, or copies the pattern into a
+ * screenshot that ends up in a deployment. It should be impossible to confuse
+ * with the button above it, at a glance, from across a room.
+ *
+ * It is the one surface in the app allowed to look worse than everything around
+ * it, and the redesign deliberately did not tidy it up.
  */
 function DevLoginBox({ onAuthenticated }: { onAuthenticated: (user: User) => void }) {
   const [email, setEmail] = useState("simoraj@gmail.com");
@@ -295,22 +525,22 @@ function DevLoginBox({ onAuthenticated }: { onAuthenticated: (user: User) => voi
   return (
     <form
       onSubmit={submit}
-      className="mt-6 rounded-xl border-2 border-dashed border-amber-500/70 bg-amber-950/20 p-5"
+      className="mt-6 rounded-lg border-2 border-dashed border-warn bg-warn-soft p-5"
     >
       <div className="mb-3 flex items-center gap-2">
-        <span className="rounded bg-amber-500 px-2 py-0.5 text-xs font-bold tracking-wider text-amber-950">
+        <span className="rounded-sm bg-warn px-2 py-0.5 text-xs font-bold tracking-wider text-inverse">
           DEV ONLY
         </span>
-        <span className="text-sm font-medium text-amber-200">Skip Google sign-in</span>
+        <span className="text-sm font-medium text-warn">Skip Google sign-in</span>
       </div>
 
-      <p className="mb-4 text-xs leading-relaxed text-amber-200/80">
+      <p className="mb-4 text-xs leading-relaxed text-warn">
         This is an <strong>authentication bypass</strong>. It exists so the flow can be
-        driven end to end without a human at a consent screen. It is disabled outside
-        local development and stripped from production builds. Never rely on it.
+        driven end to end without a human at a consent screen. It is disabled outside local
+        development and stripped from production builds. Never rely on it.
       </p>
 
-      <label className="block text-xs font-medium text-amber-200/90" htmlFor="dev-login-email">
+      <label className="text-xs font-medium text-warn" htmlFor="dev-login-email">
         Email to sign in as
       </label>
       <input
@@ -320,14 +550,14 @@ function DevLoginBox({ onAuthenticated }: { onAuthenticated: (user: User) => voi
         required
         value={email}
         onChange={(event) => setEmail(event.target.value)}
-        className="mt-1 w-full rounded-md border border-amber-700/60 bg-slate-950 px-3 py-2 text-sm text-amber-100 outline-none focus:border-amber-500"
+        className={`${FIELD} mt-1`}
       />
 
       <button
         type="submit"
         data-testid="dev-login-submit"
         disabled={busy}
-        className="mt-3 w-full rounded-md bg-amber-500 px-4 py-2 text-sm font-semibold text-amber-950 transition hover:bg-amber-400 disabled:opacity-50"
+        className="mt-3 inline-flex min-h-11 w-full items-center justify-center rounded-md bg-warn px-4 py-2 text-sm font-semibold text-inverse transition hover:opacity-90 disabled:opacity-50"
       >
         {busy ? "Signing in…" : "Dev login"}
       </button>
@@ -344,7 +574,10 @@ function DevLoginBox({ onAuthenticated }: { onAuthenticated: (user: User) => voi
   );
 }
 
-/** Google's mark, inlined as SVG so the page makes no third-party request. */
+/** Google's mark, inlined as SVG so the page makes no third-party request.
+ *  These four hex values are Google's brand colours and are deliberately NOT
+ *  tokens -- they are not ours to theme, and a themed Google mark is a wrong
+ *  Google mark. */
 function GoogleMark() {
   return (
     <svg width="16" height="16" viewBox="0 0 48 48" aria-hidden="true">

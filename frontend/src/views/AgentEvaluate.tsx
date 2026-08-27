@@ -25,8 +25,31 @@ import { evaluation } from "../lib/api.ts";
 import type { Agent, EvalRun, EvalRunDetail, GoldenQuestion } from "../lib/types.ts";
 import { formatTimestamp } from "../lib/format.ts";
 import { ConfirmDeleteButton, ErrorBanner, Spinner, errorMessage } from "../components/ui.tsx";
+import {
+  BAD_TONE,
+  BTN_PRIMARY,
+  BTN_SECONDARY,
+  BTN_SM,
+  CARD,
+  CARD_EMPTY,
+  FIELD,
+  NEUTRAL_TONE,
+  NOTICE,
+  OK_TONE,
+  PILL,
+  ROW,
+  ROW_ACTIVE,
+  ROW_INACTIVE,
+  WARN_TONE,
+  WELL,
+} from "../lib/styles.ts";
 import GoldenSetEditor from "../components/GoldenSetEditor.tsx";
 import Scorecard from "../components/Scorecard.tsx";
+
+/** The one heading treatment for a page section on this view. Written once
+ *  rather than inline at each `<h2>`, because the audit's finding about this
+ *  file was that its structure was implicit. */
+const SECTION_HEADING = "text-lg font-semibold tracking-tight text-ink";
 
 /** The statuses that mean "this run has stopped moving". Anything else keeps
  *  the poll loop alive, including a status this frontend does not recognise --
@@ -288,11 +311,9 @@ export default function AgentEvaluate({
       button now holds the full `tab-evaluate`, symmetric with its two siblings.
     */
     <div data-testid="evaluate-panel" className="space-y-8">
-      <section className="rounded-xl border border-slate-800 bg-slate-900/30 p-5">
-        <h2 className="text-sm font-medium tracking-wide text-slate-400 uppercase">
-          Run an evaluation
-        </h2>
-        <p className="mt-2 max-w-3xl text-sm leading-relaxed text-slate-400">
+      <section className={`${CARD} p-5`}>
+        <h2 className={SECTION_HEADING}>Run an evaluation</h2>
+        <p className="mt-2 max-w-3xl text-sm leading-relaxed text-muted">
           Each active question is put to {agent?.name ?? "this agent"} as a real turn, and
           the answer plus the chunks that produced it are scored by a judge model on four
           Ragas metrics. The output is not a grade — it is a pointer at whichever metric is
@@ -305,8 +326,8 @@ export default function AgentEvaluate({
           minutes; quoting seconds here would be a promise the system cannot
           keep, and the user would conclude it had hung long before it had.
         */}
-        <p className="mt-3 max-w-3xl rounded-lg border border-slate-800 bg-slate-950/50 px-3 py-2 text-xs leading-relaxed text-slate-400">
-          <span className="font-medium text-slate-300">This takes several minutes.</span> Every
+        <p className={`${WELL} mt-3 max-w-3xl px-3 py-2 text-xs leading-relaxed text-muted`}>
+          <span className="font-medium text-ink">This takes several minutes.</span> Every
           question is a complete agent turn — 15 s for a terse agent, 30-60 s for a coaching
           persona, because generation is token-bound and is 89% of a turn — and then four
           more judged calls on top. A ten-question run is comfortably five to fifteen
@@ -321,7 +342,7 @@ export default function AgentEvaluate({
               248px of usable width at 320px (320 - 32 page padding - 40 card
               padding), so unconditionally it forces the card wider than the
               viewport and the whole document scrolls sideways. */}
-          <label className="flex-1 text-xs text-slate-400 sm:min-w-[18rem]">
+          <label className="flex-1 text-xs text-muted sm:min-w-[18rem]">
             What changed since the last run?
             <input
               type="text"
@@ -329,7 +350,7 @@ export default function AgentEvaluate({
               value={notes}
               onChange={(event) => setNotes(event.target.value)}
               placeholder="e.g. rerank on, retrieve_k 20 -> 30"
-              className="mt-1 min-h-11 w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 outline-none focus:border-slate-500"
+              className={`${FIELD} mt-1`}
             />
           </label>
 
@@ -338,7 +359,7 @@ export default function AgentEvaluate({
             data-testid="eval-run"
             disabled={starting || running || activeCount === 0}
             onClick={() => void startRun()}
-            className="min-h-11 rounded-md bg-emerald-500 px-4 py-2 text-sm font-semibold text-emerald-950 transition hover:bg-emerald-400 disabled:opacity-50"
+            className={BTN_PRIMARY}
           >
             {starting ? "Starting…" : running ? "Run in progress" : "Run evaluation"}
           </button>
@@ -347,14 +368,14 @@ export default function AgentEvaluate({
         {activeCount === 0 && !loadingRuns && (
           // Said out loud. A disabled button with no explanation is
           // indistinguishable from a broken one.
-          <p className="mt-3 text-xs text-amber-300">
+          <p className={`${NOTICE} ${WARN_TONE} mt-3`}>
             Nothing to run: this agent has no active golden questions. Suggest ten below, or
             add one by hand.
           </p>
         )}
 
         {activeCount > 0 && !running && (
-          <p className="mt-3 text-xs text-slate-400">
+          <p className="mt-3 text-xs leading-relaxed text-muted">
             {activeCount} active {activeCount === 1 ? "question" : "questions"} ready to
             score. Notes are how two runs become an experiment rather than two numbers.
           </p>
@@ -367,7 +388,7 @@ export default function AgentEvaluate({
         {detail && running && (
           <div
             data-testid="eval-progress"
-            className="mt-4 rounded-lg border border-slate-800 bg-slate-950/50 p-4"
+            className={`${WELL} mt-4 p-4`}
           >
             <div className="flex flex-wrap items-center justify-between gap-2">
               <Spinner
@@ -377,14 +398,19 @@ export default function AgentEvaluate({
                     : "Running — asking, then judging, one question at a time"
                 }
               />
-              <span className="font-mono text-sm text-slate-300">
+              <span className="font-mono text-sm tabular-nums text-ink">
                 {detail.progress.done} of {detail.progress.total || "?"}
               </span>
             </div>
 
-            <div className="mt-3 h-2 overflow-hidden rounded-full bg-slate-800">
+            {/* The track is `bg-sunken` per the shared contract, and it sits
+                INSIDE a `WELL`, which is also `bg-sunken` -- so it carries a
+                hairline as well, or it would be an invisible groove on an
+                identically coloured ground. `border-box` sizing keeps the whole
+                control 8px tall. */}
+            <div className="mt-3 h-2 overflow-hidden rounded-full border border-line bg-sunken">
               <div
-                className="h-full rounded-full bg-emerald-500 transition-all"
+                className="h-full rounded-full bg-accent transition-all"
                 style={{
                   // `progress_total` defaults to 0 rather than NULL so a queued
                   // run renders honestly as "0 of 0". Dividing by it would give
@@ -398,13 +424,13 @@ export default function AgentEvaluate({
             </div>
 
             {stalled && (
-              <div className="mt-3 flex flex-wrap items-center gap-3 text-xs text-amber-300">
+              <div className={`${NOTICE} ${WARN_TONE} mt-3 flex flex-wrap items-center gap-3`}>
                 <span>Stopped watching after 45 minutes. The run may still be going.</span>
                 <button
                   type="button"
                   data-testid="eval-recheck"
                   onClick={checkAgain}
-                  className="min-h-11 rounded-md border border-slate-700 bg-slate-900 px-2.5 py-1 font-medium text-slate-300 transition hover:border-slate-600"
+                  className={`${BTN_SECONDARY} ${BTN_SM}`}
                 >
                   Check again
                 </button>
@@ -418,90 +444,105 @@ export default function AgentEvaluate({
 
       {detail && <Scorecard run={detail} />}
 
-      <section>
-        <h3 className="mb-3 text-sm font-medium tracking-wide text-slate-400 uppercase">
-          Run history
-        </h3>
+      <section className={`${CARD} p-5`}>
+        {/* Kept an `<h3>` deliberately. It reads as a page section and is
+            styled as one, but promoting it to `<h2>` would change the document
+            outline, and this pass is visual. See the summary note. */}
+        <h3 className={SECTION_HEADING}>Run history</h3>
+        <p className="mt-2 max-w-3xl text-sm leading-relaxed text-muted">
+          A score means little on its own and a great deal beside the score before it. Pick a
+          run to read its scorecard.
+        </p>
 
-        {loadingRuns && <Spinner label="Loading runs" />}
+        <div className="mt-4 space-y-3">
+          {loadingRuns && <Spinner label="Loading runs" />}
 
-        {!loadingRuns && runs.length === 0 && (
-          <p className="rounded-lg border border-dashed border-slate-800 px-4 py-8 text-center text-sm text-slate-400">
-            No runs yet. The first one is the baseline every later run is read against.
-          </p>
-        )}
+          {!loadingRuns && runs.length === 0 && (
+            <p className={`${CARD_EMPTY} px-4 py-8 text-center text-sm text-muted`}>
+              No runs yet. The first one is the baseline every later run is read against.
+            </p>
+          )}
 
-        {runs.length > 0 && (
-          /*
-            Newest first, which is the order the API returns and the reason
-            `eval_runs` is persisted at all: a score is only meaningful beside
-            the score before it (PRD 4.4, "what changed since last run").
-          */
-          <ol data-testid="eval-run-history" className="space-y-2">
-            {runs.map((row) => {
-              const active = row.id === selectedId;
-              return (
-                <li
-                  key={row.id}
-                  data-testid="eval-run-row"
-                  data-run-id={row.id}
-                  data-status={row.status}
-                  className={`flex flex-wrap items-center gap-3 rounded-lg border px-4 py-3 ${
-                    active
-                      ? "border-slate-600 bg-slate-800/50"
-                      : "border-slate-800 bg-slate-900/30"
-                  }`}
-                >
-                  <button
-                    type="button"
-                    onClick={() => setSelectedId(row.id)}
-                    className="min-w-0 flex-1 text-left"
+          {runs.length > 0 && (
+            /*
+              Newest first, which is the order the API returns and the reason
+              `eval_runs` is persisted at all: a score is only meaningful beside
+              the score before it (PRD 4.4, "what changed since last run").
+            */
+            <ol data-testid="eval-run-history" className="space-y-2">
+              {runs.map((row) => {
+                const active = row.id === selectedId;
+                return (
+                  <li
+                    key={row.id}
+                    data-testid="eval-run-row"
+                    data-run-id={row.id}
+                    data-status={row.status}
+                    className={`${ROW} ${active ? ROW_ACTIVE : ROW_INACTIVE} flex flex-wrap items-center gap-3`}
                   >
-                    <span className="flex flex-wrap items-center gap-2">
-                      <RunStatusPill status={row.status} />
-                      <span className="text-sm text-slate-200">
-                        {formatTimestamp(row.started_at ?? row.finished_at)}
+                    <button
+                      type="button"
+                      onClick={() => setSelectedId(row.id)}
+                      // `min-h-11` because this button is the row's whole
+                      // selectable surface and its resting content -- a pill
+                      // and a timestamp -- is about 22px tall. It carried no
+                      // height floor before, which is the 44px convention
+                      // silently not applying to the largest hit area on the
+                      // page.
+                      className="min-h-11 min-w-0 flex-1 text-left"
+                    >
+                      <span className="flex flex-wrap items-center gap-2">
+                        <RunStatusPill status={row.status} />
+                        <span className="text-sm text-ink">
+                          {formatTimestamp(row.started_at ?? row.finished_at)}
+                        </span>
+                        {/* A finding, not an alarm -- so it is set as a fact
+                            with its number in mono, not tinted amber. The
+                            scorecard below is where the finding is argued. */}
+                        {row.summary?.weakest_metric && (
+                          <span className="text-xs text-muted">
+                            weakest:{" "}
+                            <span className="font-mono tabular-nums text-ink">
+                              {row.summary.weakest_metric}
+                              {row.summary.weakest_score !== null
+                                ? ` ${row.summary.weakest_score.toFixed(2)}`
+                                : ""}
+                            </span>
+                          </span>
+                        )}
+                        {!TERMINAL_RUN_STATUSES.has(row.status) && (
+                          <span className="font-mono text-xs tabular-nums text-muted">
+                            {row.progress.done}/{row.progress.total || "?"}
+                          </span>
+                        )}
                       </span>
-                      {row.summary?.weakest_metric && (
-                        <span className="text-xs text-amber-300">
-                          weakest: {row.summary.weakest_metric}{" "}
-                          {row.summary.weakest_score !== null
-                            ? row.summary.weakest_score.toFixed(2)
-                            : ""}
+
+                      {row.notes && (
+                        <span className="mt-1 block truncate text-xs text-muted">
+                          {row.notes}
                         </span>
                       )}
-                      {!TERMINAL_RUN_STATUSES.has(row.status) && (
-                        <span className="font-mono text-xs text-slate-400">
-                          {row.progress.done}/{row.progress.total || "?"}
+
+                      {row.error && (
+                        <span className="mt-1 block truncate text-xs text-bad">
+                          {row.error}
                         </span>
                       )}
-                    </span>
+                    </button>
 
-                    {row.notes && (
-                      <span className="mt-1 block truncate text-xs text-slate-400">
-                        {row.notes}
-                      </span>
-                    )}
-
-                    {row.error && (
-                      <span className="mt-1 block truncate text-xs text-rose-300">
-                        {row.error}
-                      </span>
-                    )}
-                  </button>
-
-                  <ConfirmDeleteButton
-                    testId="eval-run-delete"
-                    label="Delete"
-                    confirmLabel="Confirm"
-                    size="sm"
-                    onConfirm={() => void removeRun(row.id)}
-                  />
-                </li>
-              );
-            })}
-          </ol>
-        )}
+                    <ConfirmDeleteButton
+                      testId="eval-run-delete"
+                      label="Delete"
+                      confirmLabel="Confirm"
+                      size="sm"
+                      onConfirm={() => void removeRun(row.id)}
+                    />
+                  </li>
+                );
+              })}
+            </ol>
+          )}
+        </div>
       </section>
 
       <GoldenSetEditor
@@ -518,19 +559,23 @@ export default function AgentEvaluate({
  * "failed", where the shared `StatusPill` speaks the document and agent one
  * ("ready" / "indexed" / "indexing"). Mapping "completed" onto "ready" would
  * put a word on screen that appears nowhere in this feature's API.
+ *
+ * What is NOT its own any more is the LOOK. This map used to hold four
+ * hand-written class triples -- a fourth status palette in a product that had
+ * three already, and the audit's example of why `lib/styles.ts` exists. The
+ * words stay local; the tones come from the one place tones are decided, so a
+ * `completed` run and a `ready` document are now the same green by
+ * construction rather than by coincidence.
  */
-const RUN_STATUS_STYLES: Record<string, string> = {
-  completed: "border-emerald-800/60 bg-emerald-950/40 text-emerald-300",
-  running: "border-amber-800/60 bg-amber-950/40 text-amber-300",
-  pending: "border-slate-700 bg-slate-900 text-slate-400",
-  failed: "border-rose-800/60 bg-rose-950/40 text-rose-300",
+const RUN_STATUS_TONES: Record<string, string> = {
+  completed: OK_TONE,
+  running: WARN_TONE,
+  pending: NEUTRAL_TONE,
+  failed: BAD_TONE,
 };
 
 function RunStatusPill({ status }: { status: string }) {
-  const style = RUN_STATUS_STYLES[status] ?? "border-slate-700 bg-slate-900 text-slate-400";
   return (
-    <span className={`inline-block rounded-full border px-2 py-0.5 text-xs font-medium ${style}`}>
-      {status}
-    </span>
+    <span className={`${PILL} ${RUN_STATUS_TONES[status] ?? NEUTRAL_TONE}`}>{status}</span>
   );
 }

@@ -36,6 +36,7 @@
 
 import { useId } from "react";
 import type { ReactNode } from "react";
+import { BTN_QUIET, PILL_NEUTRAL } from "../lib/styles.ts";
 
 export default function HandoutDock({
   count,
@@ -54,7 +55,7 @@ export default function HandoutDock({
     <div
       data-testid="handout-dock"
       data-open={open}
-      className="shrink-0 border-t border-slate-800"
+      className="shrink-0 border-t border-line"
     >
       <button
         type="button"
@@ -62,7 +63,16 @@ export default function HandoutDock({
         aria-expanded={open}
         aria-controls={bodyId}
         onClick={onToggle}
-        className="flex min-h-11 w-full items-center gap-2 px-3 text-left text-sm text-slate-300 transition hover:text-slate-100"
+        // Quiet, and deliberately so. A handout is produced BY a turn; the dock
+        // is a place to find one afterwards, not a thing competing with the
+        // composer above it.
+        //
+        // `justify-start` overrides `BTN_QUIET`'s centring, and that override is
+        // safe rather than lucky: Tailwind emits `.justify-center` before
+        // `.justify-start`, so the later rule wins. The reverse pairing does NOT
+        // hold -- `px-2` cannot narrow a `px-3` the same way -- so nothing here
+        // tries to.
+        className={`${BTN_QUIET} w-full justify-start text-left`}
       >
         {/* Rotates to point the way the panel will move. Decoration -- the state
             is carried by `aria-expanded`, and the global reduced-motion rule
@@ -73,13 +83,14 @@ export default function HandoutDock({
         >
           &#9650;
         </span>
-        <span className="font-medium">Handouts</span>
+        <span className="font-medium text-ink">Handouts</span>
         {/* Inside the label rather than beside it, so the accessible name
             carries the number too -- while the dock is shut this count is the
             only signal that a handout exists at all. */}
-        <span className="rounded-full border border-slate-700 bg-slate-950 px-2 py-0.5 font-mono text-xs text-slate-300">
-          {count}
-        </span>
+        {/* `font-mono` because it is a COUNT -- the same rule every number in
+            this app follows. `PILL_NEUTRAL` because it is a measurement rather
+            than a state: nothing about a handout count is good or bad. */}
+        <span className={`${PILL_NEUTRAL} font-mono`}>{count}</span>
       </button>
 
       {/*
@@ -113,7 +124,7 @@ export default function HandoutDock({
         // `p-3` is not only spacing: the global focus ring is `outline: 3px`
         // at `outline-offset: 3px`, so a control flush against the edge of an
         // `overflow-y-auto` box loses six pixels of its ring to the clip.
-        className={`max-h-[min(45vh,24rem)] overflow-y-auto border-t border-slate-800 p-3 ${
+        className={`max-h-[min(45vh,24rem)] overflow-y-auto border-t border-line p-3 ${
           open ? "" : "hidden"
         }`}
       >

@@ -36,6 +36,18 @@ import { handouts } from "../lib/api.ts";
 import type { Handout, HandoutRecipe } from "../lib/types.ts";
 import { EmptyState, ErrorBanner, Reveal, Spinner, errorMessage } from "./ui.tsx";
 import HandoutCard from "./HandoutCard.tsx";
+import {
+  BTN_PRIMARY,
+  BTN_SECONDARY,
+  BTN_SM,
+  EYEBROW,
+  FIELD,
+  HELP,
+  LABEL,
+  NOTICE,
+  TEXTAREA,
+  WARN_TONE,
+} from "../lib/styles.ts";
 
 /**
  * The four recipes, as client-side copy.
@@ -379,9 +391,7 @@ export default function HandoutsPanel({
   return (
     <div data-testid="handouts-panel" className="flex min-w-0 flex-col gap-5">
       <section className="min-w-0">
-        <h3 className="text-xs font-medium tracking-wide text-slate-400 uppercase">
-          Make a handout
-        </h3>
+        <h3 className={EYEBROW}>Make a handout</h3>
 
         {/*
           One control, not four cards, and this is the single change that stops
@@ -415,7 +425,7 @@ export default function HandoutsPanel({
               const next = event.target.value;
               setRecipe(next === "" ? null : next);
             }}
-            className="min-h-11 min-w-0 flex-1 rounded-md border border-slate-700 bg-slate-900 px-3 text-sm text-slate-200 outline-none transition hover:border-slate-600 focus:border-slate-500 sm:flex-none"
+            className={`${FIELD} min-w-0 flex-1 sm:flex-none sm:w-auto`}
           >
             {/* The empty option is the closed state, and it is what preserves the
                 old "press the selected recipe again to close the composer"
@@ -434,7 +444,7 @@ export default function HandoutsPanel({
               indistinguishable until you know one is a .csv for a spreadsheet
               and the other is markdown. It just no longer needs a card each. */}
           {selectedRecipe && (
-            <span className="min-w-0 text-xs text-slate-400">{selectedRecipe.blurb}</span>
+            <span className="min-w-0 text-xs text-muted">{selectedRecipe.blurb}</span>
           )}
         </div>
 
@@ -451,7 +461,7 @@ export default function HandoutsPanel({
             tree -- so the flag goes on now, while it costs nothing.
           */
           <form onSubmit={onSubmit} noValidate className="mt-3 min-w-0 space-y-2">
-            <label htmlFor={briefId} className="block text-xs text-slate-400">
+            <label htmlFor={briefId} className={`block ${LABEL}`}>
               What should it cover?
             </label>
             <textarea
@@ -462,12 +472,14 @@ export default function HandoutsPanel({
               value={brief}
               onChange={(event) => setBrief(event.target.value)}
               placeholder="e.g. the power budget by subsystem, as discussed above"
-              className="min-h-11 w-full min-w-0 resize-y rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 outline-none focus:border-slate-500"
+              // `TEXTAREA`, not `TEXTAREA_MONO`: a brief is a sentence the user
+              // writes in their own words, not machine text.
+              className={`${TEXTAREA} min-w-0`}
             />
             {/* The brief is not only a prompt -- it is what searches the corpus.
                 Saying so is what stops "make me a deck" arriving as a brief with
                 nothing in it for retrieval to work from. */}
-            <p className="text-[0.7rem] leading-snug text-slate-400">
+            <p className={HELP}>
               This also searches the corpus, so name the material.
               {conversationId
                 ? " The recent turns in this conversation are included too."
@@ -478,7 +490,7 @@ export default function HandoutsPanel({
                 type="submit"
                 data-testid="handout-create"
                 disabled={creating || brief.trim() === ""}
-                className="min-h-11 rounded-md bg-emerald-500 px-4 py-2 text-sm font-semibold text-emerald-950 transition hover:bg-emerald-400 disabled:opacity-50"
+                className={BTN_PRIMARY}
               >
                 {creating ? "Starting…" : "Make it"}
               </button>
@@ -489,7 +501,7 @@ export default function HandoutsPanel({
                   setRecipe(null);
                   setBrief("");
                 }}
-                className="min-h-11 rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-300 transition hover:border-slate-600"
+                className={BTN_SECONDARY}
               >
                 Cancel
               </button>
@@ -501,13 +513,13 @@ export default function HandoutsPanel({
       <ErrorBanner error={error} />
 
       {stalled && (
-        <div className="flex flex-wrap items-center gap-3 rounded-lg border border-amber-800/60 bg-amber-950/20 px-3 py-2 text-xs text-amber-300">
+        <div className={`${NOTICE} ${WARN_TONE} flex flex-wrap items-center gap-3`}>
           <span>Stopped watching after five minutes. The job may still be running.</span>
           <button
             type="button"
             data-testid="handouts-recheck"
             onClick={checkAgain}
-            className="min-h-11 rounded-md border border-slate-700 bg-slate-900 px-2.5 py-1 font-medium text-slate-300 transition hover:border-slate-600"
+            className={`${BTN_SECONDARY} ${BTN_SM}`}
           >
             Check again
           </button>
@@ -531,9 +543,9 @@ export default function HandoutsPanel({
 
       {conversationId && scoped.length > 0 && (
         <section className="min-w-0">
-          <h3 className="mb-2 flex items-baseline justify-between gap-2 text-xs font-medium tracking-wide text-slate-400 uppercase">
+          <h3 className={`${EYEBROW} mb-2 flex items-baseline justify-between gap-2`}>
             <span>In this conversation</span>
-            <span className="font-mono text-slate-500">{scoped.length}</span>
+            <span className="font-mono tabular-nums">{scoped.length}</span>
           </h3>
           <ol data-testid="handouts-list-conversation" className="space-y-2">
             {scoped.map((row) => (
@@ -573,9 +585,9 @@ export default function HandoutsPanel({
           </Reveal>
         ) : (
           <section className="min-w-0">
-            <h3 className="mb-2 flex items-baseline justify-between gap-2 text-xs font-medium tracking-wide text-slate-400 uppercase">
+            <h3 className={`${EYEBROW} mb-2 flex items-baseline justify-between gap-2`}>
               <span>All handouts</span>
-              <span className="font-mono text-slate-500">{rest.length}</span>
+              <span className="font-mono tabular-nums">{rest.length}</span>
             </h3>
             <ol data-testid="handouts-list-all" className="space-y-2">
               {rest.map((row) => (

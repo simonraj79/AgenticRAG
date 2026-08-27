@@ -30,7 +30,31 @@ import {
   Spinner,
   StatusPill,
 } from "../components/ui.tsx";
+import {
+  BAD_TONE,
+  BTN_PRIMARY,
+  BTN_SECONDARY,
+  BTN_SM,
+  CARD,
+  CARD_EMPTY,
+  EYEBROW,
+  HELP,
+  NOTICE,
+  WARN_TONE,
+} from "../lib/styles.ts";
 import DuplicatePrompt from "../components/DuplicatePrompt.tsx";
+
+/**
+ * The drag-active look SWAPS the resting string rather than appending to it.
+ *
+ * `border-line-strong` (inside `CARD_EMPTY`) and `border-accent` are both
+ * border-colour utilities of equal specificity, so which one wins is decided by
+ * their order in the GENERATED STYLESHEET rather than by their order in a
+ * template literal -- the same coin-flip this codebase already documents for
+ * `contents` / `hidden`. Two complete strings, one of which is `CARD_EMPTY`
+ * unmodified, has no such ambiguity.
+ */
+const DROPZONE_ACTIVE = "rounded-lg border border-dashed border-accent bg-accent-soft";
 
 export default function AgentDocuments({
   agentId,
@@ -126,16 +150,21 @@ export default function AgentDocuments({
           const dropped = event.dataTransfer.files[0];
           if (dropped) setFile(dropped);
         }}
-        className={`rounded-xl border-2 border-dashed p-6 transition ${
-          dragging ? "border-emerald-500 bg-emerald-950/20" : "border-slate-800 bg-slate-900/40"
-        }`}
+        className={`${dragging ? DROPZONE_ACTIVE : CARD_EMPTY} p-6 transition`}
       >
-        <p className="text-sm text-slate-300">Drop a file here, or pick one:</p>
+        <p className="text-sm text-muted">Drop a file here, or pick one:</p>
 
         {/*
           A real, visible file input rather than a hidden one behind a styled
           button. Hidden inputs are awkward for keyboard users and invisible to
           automation that sets files on the element directly.
+
+          The `file:` half is `BTN_PRIMARY`'s treatment respelled as pseudo-
+          element variants -- ink fill, inverse label, the same radius, padding
+          and type size. It cannot literally BE `BTN_PRIMARY`, because that
+          string styles the element it sits on and this styles a pseudo-element
+          inside it; what matters is that there is now ONE primary look on this
+          screen rather than the two the audit found.
         */}
         <input
           ref={fileInputRef}
@@ -143,28 +172,29 @@ export default function AgentDocuments({
           type="file"
           accept={ACCEPTED_UPLOAD_TYPES}
           onChange={(event) => setFile(event.target.files?.[0] ?? null)}
-          className="mt-3 block w-full text-sm text-slate-400 file:mr-3 file:rounded-md file:border-0 file:bg-slate-100 file:px-3 file:py-1.5 file:text-sm file:font-medium file:text-slate-900 hover:file:bg-white"
+          className="mt-3 block w-full text-sm text-muted file:mr-3 file:min-h-11 file:rounded-md file:border-0 file:bg-ink file:px-4 file:py-2 file:text-sm file:font-medium file:text-inverse file:transition hover:file:bg-ink-hover"
         />
 
-        <p className="mt-2 text-xs text-slate-400">
+        <p className={`${HELP} mt-2`}>
           Markdown, plain text or PDF, up to {MAX_UPLOAD_BYTES / (1024 * 1024)} MB. Text is
           chunked into Postgres and embedded into this agent&rsquo;s namespace; the original
           file is kept in private object storage.
         </p>
 
-        <div className="mt-4 flex items-center gap-3">
+        <div className="mt-4 flex flex-wrap items-center gap-3">
           <button
             type="button"
             data-testid="doc-upload-submit"
             disabled={uploading || !file}
             onClick={() => void submitUpload()}
-            className="min-h-11 rounded-md bg-emerald-500 px-4 py-2 text-sm font-semibold text-emerald-950 transition hover:bg-emerald-400 disabled:opacity-50"
+            className={BTN_PRIMARY}
           >
             {uploading ? "Uploading…" : "Upload and index"}
           </button>
           {file && !uploading && (
-            <span className="text-xs text-slate-400">
-              {file.name} · {formatBytes(file.size)}
+            <span className="min-w-0 text-xs text-muted">
+              <span className="text-ink">{file.name}</span> ·{" "}
+              <span className="font-mono tabular-nums">{formatBytes(file.size)}</span>
             </span>
           )}
           {uploading && <Spinner label="Sending — indexing then continues in the background" />}
@@ -188,9 +218,7 @@ export default function AgentDocuments({
 
       <div>
         <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
-          <h3 className="text-sm font-medium tracking-wide text-slate-400 uppercase">
-            Corpus ({documents.length})
-          </h3>
+          <h3 className={EYEBROW}>Corpus ({documents.length})</h3>
 
           {indexing && !stalled && (
             <Spinner
@@ -202,13 +230,13 @@ export default function AgentDocuments({
               itself takes its own warning off the screen rather than leaving a
               worry about a corpus that is in fact finished. */}
           {indexing && stalled && (
-            <div className="flex items-center gap-3 text-xs text-amber-300">
+            <div className={`${NOTICE} ${WARN_TONE} flex flex-wrap items-center gap-3`}>
               <span>Stopped refreshing after 10 minutes.</span>
               <button
                 type="button"
                 data-testid="doc-refresh"
                 onClick={() => void refresh()}
-                className="min-h-11 rounded-md border border-slate-700 bg-slate-900 px-2.5 py-1 font-medium text-slate-300 transition hover:border-slate-600"
+                className={`${BTN_SECONDARY} ${BTN_SM}`}
               >
                 Check again
               </button>
@@ -253,10 +281,10 @@ export default function AgentDocuments({
                 key={doc.id}
                 data-testid="doc-card"
                 data-document-id={doc.id}
-                className="rounded-lg border border-slate-800 bg-slate-900/40 p-3"
+                className={`${CARD} p-4`}
               >
                 <div className="flex items-start justify-between gap-3">
-                  <span className="min-w-0 flex-1 break-words text-sm text-slate-200">
+                  <span className="min-w-0 flex-1 text-sm break-words text-ink">
                     {doc.filename}
                   </span>
                   <span data-testid="doc-card-status" data-status={doc.status}>
@@ -267,15 +295,17 @@ export default function AgentDocuments({
                 {doc.error && (
                   <p
                     data-testid="doc-card-error"
-                    className="mt-2 text-xs whitespace-pre-wrap text-rose-300"
+                    className={`${NOTICE} ${BAD_TONE} mt-2 whitespace-pre-wrap`}
                   >
                     {doc.error}
                   </p>
                 )}
 
-                <p className="mt-2 text-xs text-slate-400">
-                  {doc.chunk_count} {doc.chunk_count === 1 ? "chunk" : "chunks"} ·{" "}
-                  {formatBytes(doc.byte_size)} · {formatTimestamp(doc.created_at)}
+                <p className="mt-2 text-xs text-muted">
+                  <span className="font-mono tabular-nums">{doc.chunk_count}</span>{" "}
+                  {doc.chunk_count === 1 ? "chunk" : "chunks"} ·{" "}
+                  <span className="font-mono tabular-nums">{formatBytes(doc.byte_size)}</span> ·{" "}
+                  {formatTimestamp(doc.created_at)}
                 </p>
 
                 {/* First-class on the card rather than tucked into a corner:
@@ -296,16 +326,16 @@ export default function AgentDocuments({
         )}
 
         {documents.length > 0 && (
-          <div className="hidden overflow-x-auto rounded-lg border border-slate-800 sm:block">
+          <div className={`${CARD} hidden overflow-x-auto sm:block`}>
             <table className="w-full text-left text-sm">
-              <thead className="bg-slate-900/60 text-xs tracking-wide text-slate-400 uppercase">
+              <thead className="bg-sunken text-xs font-semibold text-faint">
                 <tr>
-                  <th className="px-4 py-2 font-medium">Filename</th>
-                  <th className="px-4 py-2 font-medium">Status</th>
-                  <th className="px-4 py-2 font-medium">Chunks</th>
-                  <th className="px-4 py-2 font-medium">Size</th>
-                  <th className="px-4 py-2 font-medium">Uploaded</th>
-                  <th className="px-4 py-2" />
+                  <th className="px-4 py-2.5">Filename</th>
+                  <th className="px-4 py-2.5">Status</th>
+                  <th className="px-4 py-2.5">Chunks</th>
+                  <th className="px-4 py-2.5">Size</th>
+                  <th className="px-4 py-2.5">Uploaded</th>
+                  <th className="px-4 py-2.5" />
                 </tr>
               </thead>
               <tbody>
@@ -314,10 +344,18 @@ export default function AgentDocuments({
                     key={doc.id}
                     data-testid="doc-row"
                     data-document-id={doc.id}
-                    className="border-t border-slate-800"
+                    className="border-t border-line"
                   >
                     <td className="px-4 py-3">
-                      <span className="text-slate-200">{doc.filename}</span>
+                      {/* `truncate` needs a width to truncate AGAINST -- it is
+                          `overflow-hidden` plus `whitespace-nowrap`, and a
+                          table cell sizes to its content, so without a cap the
+                          column simply grows and the ellipsis never appears.
+                          `title` keeps the whole name reachable; the card list
+                          above, which is the phone's copy, shows it in full. */}
+                      <span title={doc.filename} className="block max-w-sm truncate text-ink">
+                        {doc.filename}
+                      </span>
                       {/*
                         The reason a row failed, in the row that failed. Ingest
                         runs out of band now, so this string is the only account
@@ -329,7 +367,7 @@ export default function AgentDocuments({
                       {doc.error && (
                         <p
                           data-testid="doc-error"
-                          className="mt-1 max-w-md text-xs whitespace-pre-wrap text-rose-300"
+                          className={`${NOTICE} ${BAD_TONE} mt-1.5 max-w-md whitespace-pre-wrap`}
                         >
                           {doc.error}
                         </p>
@@ -338,9 +376,13 @@ export default function AgentDocuments({
                     <td className="px-4 py-3" data-testid="doc-status" data-status={doc.status}>
                       <StatusPill status={doc.status} />
                     </td>
-                    <td className="px-4 py-3 text-slate-300">{doc.chunk_count}</td>
-                    <td className="px-4 py-3 text-slate-400">{formatBytes(doc.byte_size)}</td>
-                    <td className="px-4 py-3 text-xs text-slate-400">
+                    <td className="px-4 py-3 font-mono text-xs tabular-nums text-muted">
+                      {doc.chunk_count}
+                    </td>
+                    <td className="px-4 py-3 font-mono text-xs tabular-nums text-muted">
+                      {formatBytes(doc.byte_size)}
+                    </td>
+                    <td className="px-4 py-3 text-xs text-muted">
                       {formatTimestamp(doc.created_at)}
                     </td>
                     <td className="px-4 py-3 text-right">

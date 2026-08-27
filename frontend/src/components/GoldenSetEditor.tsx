@@ -29,6 +29,25 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { evaluation } from "../lib/api.ts";
 import type { GoldenQuestion, GoldenSetFileQuestion } from "../lib/types.ts";
 import { ConfirmDeleteButton, EmptyState, ErrorBanner, Spinner, errorMessage } from "./ui.tsx";
+import {
+  ACCENT_TONE,
+  BTN_PRIMARY,
+  BTN_SECONDARY,
+  BTN_SM,
+  CARD,
+  EYEBROW,
+  FIELD,
+  HELP,
+  LABEL,
+  NEUTRAL_TONE,
+  NOTICE,
+  PILL,
+  PILL_NEUTRAL,
+  TEXTAREA,
+  TEXTAREA_MONO,
+  WARN_TONE,
+  WELL,
+} from "../lib/styles.ts";
 
 /**
  * `source` is a plain `String(16)` column, not an enum, so that adding a
@@ -43,16 +62,25 @@ const SOURCE_LABELS: Record<string, string> = {
   imported: "imported",
 };
 
+/**
+ * Provenance, in the three tones the design has -- not the five hues this map
+ * used to hold. Amber/emerald/sky/violet/slate was a fifth private colour scheme
+ * competing with four others for the same small set of meanings; the question a
+ * reader actually asks of this badge is "has a human been through this row",
+ * which has two answers and a caveat.
+ */
 const SOURCE_STYLES: Record<string, string> = {
-  // Amber, because it is the one value that means "not yet vetted". The badge
-  // is a prompt to read the question, not a neutral label.
-  ai_suggested: "border-amber-800/60 bg-amber-950/40 text-amber-300",
-  edited: "border-emerald-800/60 bg-emerald-950/40 text-emerald-300",
-  manual: "border-sky-800/60 bg-sky-950/40 text-sky-300",
-  imported: "border-violet-800/60 bg-violet-950/40 text-violet-300",
+  // The one value that means "not yet vetted". A warn pill is a prompt to read
+  // the question, not a neutral label.
+  ai_suggested: `${PILL} ${WARN_TONE}`,
+  // The accent means "evidence, or a way to reach some" -- a human has been
+  // through this row, which is what makes it worth grading against.
+  edited: `${PILL} ${ACCENT_TONE}`,
+  manual: PILL_NEUTRAL,
+  imported: PILL_NEUTRAL,
 };
 
-const UNKNOWN_SOURCE = "border-slate-700 bg-slate-900 text-slate-400";
+const UNKNOWN_SOURCE = PILL_NEUTRAL;
 
 /** Suggestion runs as a background job, so the list is polled until it grows.
  *  Ten questions written from retrieved chunks is one generation call, but a
@@ -345,10 +373,8 @@ export default function GoldenSetEditor({
     <section className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h3 className="text-sm font-medium tracking-wide text-slate-400 uppercase">
-            Golden set ({questions.length})
-          </h3>
-          <p className="mt-1 text-xs text-slate-400">
+          <h3 className={EYEBROW}>Golden set ({questions.length})</h3>
+          <p className="mt-1 text-xs text-muted">
             {activeCount} active {activeCount === 1 ? "question" : "questions"} will be run.
           </p>
         </div>
@@ -359,7 +385,7 @@ export default function GoldenSetEditor({
             data-testid="golden-suggest"
             disabled={suggesting}
             onClick={() => void suggest()}
-            className="min-h-11 rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-sm text-slate-200 transition hover:border-slate-600 disabled:opacity-50"
+            className={BTN_SECONDARY}
           >
             {suggesting ? "Suggesting…" : "Suggest 10 questions"}
           </button>
@@ -388,24 +414,24 @@ export default function GoldenSetEditor({
                 .catch((cause) => setError(errorMessage(cause)))
                 .finally(() => setExporting(false));
             }}
-            className="inline-flex min-h-11 items-center rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-sm text-slate-200 transition hover:border-slate-600 disabled:cursor-not-allowed disabled:opacity-60"
+            className={BTN_SECONDARY}
           >
             {exporting ? "Preparing..." : "Export JSON"}
           </button>
         </div>
       </div>
 
-      <p className="text-xs leading-relaxed text-slate-400">
+      <p className={HELP}>
         Suggestions are written from this agent&rsquo;s own indexed chunks, so they can only
         ask what its corpus actually contains. That is the point and also the limit: a set
         drawn from the corpus cannot, on its own, test what the corpus is missing. Add a
         question the documents <em>cannot</em> answer and set it to{" "}
-        <span className="text-slate-300">refuse</span> — declining is a correct outcome, and
-        it is the only way to measure whether this agent stays inside its evidence.
+        <span className="font-medium text-ink">refuse</span> — declining is a correct outcome,
+        and it is the only way to measure whether this agent stays inside its evidence.
       </p>
 
       {runInFlight && (
-        <p className="rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2 text-xs text-slate-400">
+        <p className={`${NOTICE} ${NEUTRAL_TONE}`}>
           A run is in flight. It read the golden set when it started, so edits made now
           apply to the next run rather than to that one.
         </p>
@@ -413,11 +439,7 @@ export default function GoldenSetEditor({
 
       <ErrorBanner error={error} />
 
-      {notice && (
-        <p className="rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2 text-xs text-slate-300">
-          {notice}
-        </p>
-      )}
+      {notice && <p className={`${NOTICE} ${NEUTRAL_TONE}`}>{notice}</p>}
 
       {missingReference > 0 && (
         /*
@@ -426,10 +448,7 @@ export default function GoldenSetEditor({
           be computed" is the reason anybody should care, and it is the fact
           that makes a complete-looking scorecard quietly a quarter empty.
         */
-        <p
-          data-testid="golden-reference-warning"
-          className="rounded-lg border border-amber-800/60 bg-amber-950/30 px-3 py-2 text-xs text-amber-200"
-        >
+        <p data-testid="golden-reference-warning" className={`${NOTICE} ${WARN_TONE}`}>
           {missingReference} active{" "}
           {missingReference === 1 ? "question has" : "questions have"} no reference answer.
           Ragas scores <span className="font-medium">context_recall</span> by checking a
@@ -463,15 +482,11 @@ export default function GoldenSetEditor({
                 data-question-id={row.id}
                 data-source={row.source}
                 data-behaviour={behaviour}
-                className={`rounded-lg border px-4 py-3 ${
-                  row.is_active
-                    ? "border-slate-800 bg-slate-900/40"
-                    : "border-slate-800/60 bg-slate-950/40 opacity-70"
-                }`}
+                className={`${CARD} p-4 ${row.is_active ? "" : "opacity-70"}`}
               >
                 {editing ? (
                   <div className="space-y-3">
-                    <label className="block text-xs text-slate-400">
+                    <label className={`${LABEL} block`}>
                       Question
                       <textarea
                         autoFocus
@@ -480,14 +495,16 @@ export default function GoldenSetEditor({
                         onChange={(event) =>
                           setDraft({ ...draft, question: event.target.value })
                         }
-                        className="mt-1 w-full resize-y rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 outline-none focus:border-slate-500"
+                        className={`${TEXTAREA} mt-1`}
                       />
                     </label>
 
-                    <label className="block text-xs text-slate-400">
+                    <label className={`${LABEL} block`}>
                       Reference answer{" "}
                       {draft.expected_behaviour === "answer" && (
-                        <span className="text-amber-400">— needed for context_recall</span>
+                        <span className="font-normal text-warn">
+                          — needed for context_recall
+                        </span>
                       )}
                       <textarea
                         rows={3}
@@ -500,33 +517,33 @@ export default function GoldenSetEditor({
                             ? "Not needed — this question is expected to be declined."
                             : "What a correct answer contains. Ragas checks the retrieved context against this."
                         }
-                        className="mt-1 w-full resize-y rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 outline-none focus:border-slate-500"
+                        className={`${TEXTAREA} mt-1`}
                       />
                     </label>
 
                     <div className="flex flex-wrap items-center gap-4">
-                      <label className="text-xs text-slate-400">
+                      <label className={LABEL}>
                         Expected behaviour
                         <select
                           value={draft.expected_behaviour}
                           onChange={(event) =>
                             setDraft({ ...draft, expected_behaviour: event.target.value })
                           }
-                          className="ml-2 min-h-11 rounded-md border border-slate-700 bg-slate-950 px-2 py-1 text-sm text-slate-100 outline-none"
+                          className={`${FIELD} ml-2 w-auto`}
                         >
                           <option value="answer">answer</option>
                           <option value="refuse">refuse</option>
                         </select>
                       </label>
 
-                      <label className="flex items-center gap-2 text-xs text-slate-400">
+                      <label className="flex items-center gap-2 text-sm text-muted">
                         <input
                           type="checkbox"
                           checked={draft.is_active}
                           onChange={(event) =>
                             setDraft({ ...draft, is_active: event.target.checked })
                           }
-                          className="h-3.5 w-3.5 accent-emerald-500"
+                          className="h-4 w-4 accent-accent"
                         />
                         Active (retire without deleting history)
                       </label>
@@ -538,50 +555,57 @@ export default function GoldenSetEditor({
                         data-testid="golden-save"
                         disabled={savingId === row.id}
                         onClick={() => void saveEdit(row.id)}
-                        className="min-h-11 rounded-md bg-emerald-500 px-3 py-1.5 text-sm font-semibold text-emerald-950 transition hover:bg-emerald-400 disabled:opacity-50"
+                        className={BTN_PRIMARY}
                       >
                         {savingId === row.id ? "Saving…" : "Save"}
                       </button>
                       <button
                         type="button"
                         onClick={() => setEditingId(null)}
-                        className="min-h-11 rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-sm text-slate-300 transition hover:border-slate-600"
+                        className={BTN_SECONDARY}
                       >
                         Cancel
                       </button>
-                      <span className="text-xs text-slate-600">
+                      <span className="text-xs text-faint">
                         Saving marks this question &ldquo;human edited&rdquo;.
                       </span>
                     </div>
                   </div>
                 ) : (
                   <div className="flex items-start gap-3">
-                    <span className="mt-0.5 w-5 shrink-0 text-right text-xs text-slate-600">
+                    <span className="mt-0.5 w-5 shrink-0 text-right font-mono text-xs text-faint">
                       {index + 1}
                     </span>
 
                     <div className="min-w-0 flex-1">
-                      <p className="text-sm text-slate-100">{row.question}</p>
+                      <p className="text-sm break-words text-ink">{row.question}</p>
 
                       <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
                         <SourceBadge source={row.source} />
                         <BehaviourBadge behaviour={behaviour} />
                         {!row.is_active && (
-                          <span className="rounded-full border border-slate-700 bg-slate-900 px-2 py-0.5 text-[0.65rem] font-medium tracking-wide text-slate-400 uppercase">
+                          <span className={`${PILL_NEUTRAL} tracking-[0.04em] uppercase`}>
                             inactive
                           </span>
                         )}
                       </div>
 
+                      {/*
+                        Serif, because a reference answer is corpus-derived prose
+                        -- the thing the scorecard is graded against, and the one
+                        text on this surface that has to be read rather than
+                        scanned. Sans everywhere else here is the harness talking
+                        about it.
+                      */}
                       {row.reference_answer && (
-                        <p className="mt-2 border-l-2 border-slate-800 pl-3 text-xs leading-relaxed text-slate-400">
-                          <span className="text-slate-400">Reference: </span>
+                        <p className="mt-2 border-l-2 border-accent-line pl-3 font-serif text-sm leading-relaxed break-words text-muted">
+                          <span className="font-sans text-xs text-faint">Reference: </span>
                           {row.reference_answer}
                         </p>
                       )}
 
                       {needsReference && (
-                        <p className="mt-2 text-xs text-amber-300">
+                        <p className="mt-2 text-xs text-warn">
                           No reference answer — context_recall will be null for this row.
                         </p>
                       )}
@@ -596,7 +620,7 @@ export default function GoldenSetEditor({
                         // characters at `text-xs`, so height alone would leave
                         // a 44x28 target -- the note at CreateAgentWizard's
                         // ReviewRow makes the same point about the same word.
-                        className="min-h-11 min-w-11 rounded-md border border-slate-700 bg-slate-900 px-2.5 py-1 text-xs text-slate-300 transition hover:border-slate-600"
+                        className={`${BTN_SECONDARY} ${BTN_SM} min-w-11`}
                       >
                         Edit
                       </button>
@@ -617,10 +641,8 @@ export default function GoldenSetEditor({
         </ol>
       )}
 
-      <div className="rounded-lg border border-slate-800 bg-slate-900/30 p-4">
-        <h4 className="text-xs font-medium tracking-wide text-slate-400 uppercase">
-          Add a question
-        </h4>
+      <div className={`${CARD} p-5`}>
+        <h4 className={EYEBROW}>Add a question</h4>
 
         <textarea
           rows={2}
@@ -628,7 +650,7 @@ export default function GoldenSetEditor({
           value={newDraft.question}
           onChange={(event) => setNewDraft({ ...newDraft, question: event.target.value })}
           placeholder="A question this agent should be able to answer — or one it should decline."
-          className="mt-2 w-full resize-y rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 outline-none focus:border-slate-500"
+          className={`${TEXTAREA} mt-2`}
         />
 
         <textarea
@@ -643,11 +665,11 @@ export default function GoldenSetEditor({
               ? "Reference answer not needed for a refusal question."
               : "Reference answer — without one, context_recall cannot be computed."
           }
-          className="mt-2 w-full resize-y rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 outline-none focus:border-slate-500"
+          className={`${TEXTAREA} mt-2`}
         />
 
         <div className="mt-3 flex flex-wrap items-center gap-4">
-          <label className="text-xs text-slate-400">
+          <label className={LABEL}>
             Expected behaviour
             <select
               data-testid="golden-add-behaviour"
@@ -655,7 +677,7 @@ export default function GoldenSetEditor({
               onChange={(event) =>
                 setNewDraft({ ...newDraft, expected_behaviour: event.target.value })
               }
-              className="ml-2 min-h-11 rounded-md border border-slate-700 bg-slate-950 px-2 py-1 text-sm text-slate-100 outline-none"
+              className={`${FIELD} ml-2 w-auto`}
             >
               <option value="answer">answer</option>
               <option value="refuse">refuse</option>
@@ -667,20 +689,18 @@ export default function GoldenSetEditor({
             data-testid="golden-add"
             disabled={adding || newDraft.question.trim() === ""}
             onClick={() => void addQuestion()}
-            className="min-h-11 rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-sm text-slate-200 transition hover:border-slate-600 disabled:opacity-50"
+            className={BTN_SECONDARY}
           >
             {adding ? "Adding…" : "Add question"}
           </button>
         </div>
       </div>
 
-      <div className="rounded-lg border border-slate-800 bg-slate-900/30 p-4">
-        <h4 className="text-xs font-medium tracking-wide text-slate-400 uppercase">
-          Import a golden set
-        </h4>
-        <p className="mt-1 text-xs text-slate-400">
+      <div className={`${CARD} p-5`}>
+        <h4 className={EYEBROW}>Import a golden set</h4>
+        <p className="mt-1 text-xs text-muted">
           Paste or load a JSON file. A bare list works, the exported{" "}
-          <code className="rounded bg-slate-950 px-1 py-0.5 font-mono text-[0.85em] text-emerald-200">
+          <code className={`${WELL} px-1 py-0.5 font-mono text-ink`}>
             {"{ questions: [...] }"}
           </code>{" "}
           wrapper works, and unknown keys are ignored — this file is meant to be edited in a
@@ -692,7 +712,7 @@ export default function GoldenSetEditor({
           accept=".json,application/json"
           data-testid="golden-import-file"
           onChange={(event) => onFileChosen(event.target.files?.[0] ?? null)}
-          className="mt-3 block w-full text-sm text-slate-400 file:mr-3 file:rounded-md file:border-0 file:bg-slate-100 file:px-3 file:py-1.5 file:text-sm file:font-medium file:text-slate-900 hover:file:bg-white"
+          className="mt-3 block w-full text-sm text-muted file:mr-3 file:rounded-md file:border-0 file:bg-ink file:px-3 file:py-1.5 file:text-sm file:font-medium file:text-inverse hover:file:bg-ink-hover"
         />
 
         <textarea
@@ -701,7 +721,7 @@ export default function GoldenSetEditor({
           value={importText}
           onChange={(event) => setImportText(event.target.value)}
           placeholder='{"questions": [{"question": "...", "reference_answer": "...", "expected_behaviour": "answer"}]}'
-          className="mt-3 w-full resize-y rounded-md border border-slate-700 bg-slate-950 px-3 py-2 font-mono text-xs text-slate-100 outline-none focus:border-slate-500"
+          className={`${TEXTAREA_MONO} mt-3`}
         />
 
         <button
@@ -709,7 +729,7 @@ export default function GoldenSetEditor({
           data-testid="golden-import"
           disabled={importing || importText.trim() === ""}
           onClick={() => void importQuestions(importText)}
-          className="mt-3 min-h-11 rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-sm text-slate-200 transition hover:border-slate-600 disabled:opacity-50"
+          className={`${BTN_SECONDARY} mt-3`}
         >
           {importing ? "Importing…" : "Import"}
         </button>
@@ -726,24 +746,24 @@ function SourceBadge({ source }: { source: string }) {
   const label = SOURCE_LABELS[source] ?? source ?? "unknown";
   const style = SOURCE_STYLES[source] ?? UNKNOWN_SOURCE;
   return (
-    <span
-      data-testid="golden-source"
-      className={`inline-block rounded-full border px-2 py-0.5 text-[0.65rem] font-medium tracking-wide uppercase ${style}`}
-    >
+    <span data-testid="golden-source" className={`${style} tracking-[0.04em] uppercase`}>
       {label}
     </span>
   );
 }
 
+/**
+ * The accent, not a warning colour.
+ *
+ * A planted gap is a deliberate property of the set -- PRD section 4.4 -- and the
+ * only way to measure whether this agent stays inside its evidence. The old
+ * fuchsia badge made the row look like a mistake somebody had left in.
+ */
 function BehaviourBadge({ behaviour }: { behaviour: string }) {
   const refuse = behaviour === "refuse";
   return (
     <span
-      className={`inline-block rounded-full border px-2 py-0.5 text-[0.65rem] font-medium tracking-wide uppercase ${
-        refuse
-          ? "border-fuchsia-800/60 bg-fuchsia-950/40 text-fuchsia-300"
-          : "border-slate-700 bg-slate-900 text-slate-400"
-      }`}
+      className={`${refuse ? `${PILL} ${ACCENT_TONE}` : PILL_NEUTRAL} tracking-[0.04em] uppercase`}
     >
       {refuse ? "expect refusal" : "expect answer"}
     </span>

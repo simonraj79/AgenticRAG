@@ -13,8 +13,8 @@
  * | `pending` | spinner, elapsed seconds, and NO download link -- the bytes   |
  * |           | do not exist yet and the route answers 409                    |
  * | `ready`   | thumbnail (charts only), size, download, the code, delete     |
- * | `failed`  | rose border, a chip naming the failure class, the error text |
- * |           | verbatim, and "Try again"                                    |
+ * | `failed`  | a bad-tone rule, a chip naming the failure class, the error  |
+ * |           | text verbatim, and "Try again"                               |
  *
  * Anything else renders as itself. `status`, `kind` and `origin` are `String(16)`
  * columns rather than enums precisely so a fifth recipe costs a seed row instead
@@ -29,6 +29,14 @@ import type { Handout, HandoutDetail } from "../lib/types.ts";
 import { formatBytes } from "../lib/format.ts";
 import { Markdown } from "../lib/markdown.tsx";
 import { ConfirmDeleteButton, ErrorBanner, Reveal, Spinner, errorMessage } from "./ui.tsx";
+import {
+  BAD_TONE,
+  BTN_QUIET,
+  BTN_SECONDARY,
+  CARD,
+  PILL,
+  WELL,
+} from "../lib/styles.ts";
 
 /**
  * Read with `??` at the call site, so a recipe this build has never heard of
@@ -236,11 +244,12 @@ export default function HandoutCard({
       data-handout-id={handout.id}
       data-status={handout.status}
       data-kind={handout.kind}
-      className={`min-w-0 rounded-lg border p-3 ${
-        handout.status === "failed"
-          ? "border-rose-800/60 bg-rose-950/20"
-          : "border-slate-800 bg-slate-900/40"
-      }`}
+      // A failed row differs by its RULE, not by a tinted fill. The chip and the
+      // error prose below already carry the bad tone as filled colour, and a
+      // washed background under them would put the same signal on the card
+      // twice while making the verbatim error text harder to read -- which is
+      // the one thing on a failed card that has to be legible.
+      className={`${CARD} min-w-0 p-4 ${handout.status === "failed" ? "border-bad-line" : ""}`}
     >
       <div className="flex min-w-0 items-start gap-3">
         {/*
@@ -265,25 +274,31 @@ export default function HandoutCard({
             alt={handout.title}
             loading="lazy"
             onError={() => setThumbFailed(true)}
-            className="h-14 w-14 shrink-0 rounded border border-slate-800 bg-slate-950 object-cover"
+            className={`${WELL} h-14 w-14 shrink-0 object-cover`}
           />
         )}
 
         <div className="min-w-0 flex-1">
-          <p className="truncate text-sm text-slate-200" title={handout.title}>
+          <p className="truncate text-sm font-medium text-ink" title={handout.title}>
             {handout.title}
           </p>
-          <p className="mt-0.5 text-xs text-slate-400">
+          <p className="mt-1 text-xs text-muted">
             {kindLabel}
             {handout.status === "ready" && (
               <>
-                <span className="text-slate-600"> &middot; </span>
-                {formatBytes(handout.byte_size)}
+                <span className="text-faint"> &middot; </span>
+                {/* A byte count is a measurement, so it is set in mono like
+                    every other number in the app. `tabular-nums` keeps a
+                    column of cards from jittering as sizes change under the
+                    poll. */}
+                <span className="font-mono tabular-nums">
+                  {formatBytes(handout.byte_size)}
+                </span>
               </>
             )}
-            <span className="text-slate-600"> &middot; </span>
+            <span className="text-faint"> &middot; </span>
             {relativeTime(handout.created_at, now)}
-            <span className="text-slate-600"> &middot; </span>
+            <span className="text-faint"> &middot; </span>
             {originLabel}
           </p>
         </div>
@@ -299,7 +314,7 @@ export default function HandoutCard({
         */
         <div role="status" aria-live="polite" className="mt-2 flex flex-wrap items-center gap-2">
           <Spinner label="Making this…" />
-          <span className="font-mono text-xs text-slate-400">
+          <span className="font-mono text-xs tabular-nums text-muted">
             {elapsedSeconds(handout.created_at, now)}s
           </span>
         </div>
@@ -325,7 +340,9 @@ export default function HandoutCard({
           // The raw value alongside the label, so a browser-level check can
           // assert on the class without depending on the copy.
           data-error-kind={handout.error_kind}
-          className="mt-2 inline-block rounded-full border border-rose-800/70 bg-rose-950/40 px-2 py-0.5 text-xs font-medium text-rose-200"
+          // A STATE, so `PILL` plus a tone -- the same filled, tinted shape
+          // `StatusPill` uses for `failed`, rather than a fourth badge look.
+          className={`${PILL} ${BAD_TONE} mt-2`}
         >
           {errorKindLabel}
         </span>
@@ -334,7 +351,7 @@ export default function HandoutCard({
       {handout.status === "failed" && (
         <p
           data-testid="handout-error"
-          className="mt-2 text-xs whitespace-pre-wrap text-rose-200"
+          className="mt-2 text-xs leading-relaxed whitespace-pre-wrap text-bad"
         >
           {/* Verbatim. Without it a failure is a red card with no way to find
               out what went wrong short of reading the server log, which a
@@ -379,7 +396,7 @@ export default function HandoutCard({
                 .catch((cause) => setDownloadError(errorMessage(cause)))
                 .finally(() => setDownloading(false));
             }}
-            className="inline-flex min-h-11 items-center rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-300 transition hover:border-slate-600 hover:text-slate-100 disabled:cursor-not-allowed disabled:opacity-60"
+            className={BTN_SECONDARY}
           >
             {downloading ? "Preparing..." : "Download"}
           </button>
@@ -390,7 +407,10 @@ export default function HandoutCard({
             type="button"
             data-testid="handout-retry"
             onClick={onRetry}
-            className="min-h-11 rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-300 transition hover:border-slate-600 hover:text-slate-100"
+            // Quiet rather than bordered: on a failed card the thing to read is
+            // the error, and a second outlined control beside Delete would make
+            // the row look like a choice between two equal actions.
+            className={BTN_QUIET}
           >
             Try again
           </button>
@@ -482,7 +502,12 @@ export default function HandoutCard({
                 {detail.preview_text && (
                   <div
                     data-testid="handout-preview"
-                    className="min-w-0 text-sm leading-relaxed break-words text-slate-300"
+                    // A recessed well, and no font utility on the wrapper: what
+                    // is inside came out of the corpus, so `Markdown` sets it in
+                    // serif through `.gw-prose`. A `font-mono` here would be
+                    // overridden by that rule and read, wrongly, as though this
+                    // block were machine text.
+                    className={`${WELL} min-w-0 p-3 break-words`}
                   >
                     {/* Through the shared map, never a second copy of it: a
                         study sheet is mostly tables, and tables are a GFM
@@ -500,14 +525,18 @@ export default function HandoutCard({
                      block the trace panel uses for the same reason. */
                   <pre
                     data-testid="handout-source"
-                    className="max-h-64 overflow-auto rounded bg-slate-950 p-2 font-mono text-xs leading-relaxed whitespace-pre text-emerald-200"
+                    // `text-ink` on a well, not a coloured face. Syntax
+                    // colouring by fiat -- one hue for the whole program --
+                    // says nothing about the code and spends the accent on
+                    // something that is not evidence.
+                    className={`${WELL} max-h-64 overflow-auto p-3 font-mono text-xs leading-relaxed whitespace-pre text-ink`}
                   >
                     {detail.source_code}
                   </pre>
                 )}
 
                 {!detail.preview_text && !detail.source_code && (
-                  <p className="text-xs text-slate-400">
+                  <p className="text-xs text-muted">
                     This handout recorded no source code or preview text.
                   </p>
                 )}

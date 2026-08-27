@@ -34,6 +34,38 @@
 import { useState } from "react";
 import type { EvalResult, EvalRunDetail } from "../lib/types.ts";
 import { formatTimestamp } from "../lib/format.ts";
+import {
+  BAD_TONE,
+  BTN_SECONDARY,
+  BTN_SM,
+  CARD,
+  CARD_EMPTY,
+  EYEBROW,
+  NEUTRAL_TONE,
+  NOTICE,
+  OK_TONE,
+  PILL,
+  PROSE,
+  WARN_TONE,
+  WELL,
+} from "../lib/styles.ts";
+
+/**
+ * The hero card and the weakest metric card, spelled out rather than composed.
+ *
+ * `CARD` is `border-line`; these two want `border-line-strong`, and appending
+ * one border-colour utility to another leaves the winner to be decided by their
+ * order in the GENERATED STYLESHEET rather than by their order in a template
+ * literal -- the coin-flip this codebase already documents for `contents` /
+ * `hidden`. One complete string has no such ambiguity.
+ *
+ * The stronger EDGE is how prominence is expressed here, and that is the point
+ * of the change: the weakest metric used to be the largest card on the page in
+ * the WARNING hue, so the page's central FINDING read as a fault. It is not a
+ * fault. It is the answer to "what should I work on next", which is what this
+ * whole screen exists to produce.
+ */
+const CARD_STRONG = "rounded-lg border border-line-strong bg-surface";
 
 /**
  * What each metric measures, and where the next hour of work goes if it is the
@@ -150,22 +182,21 @@ export default function Scorecard({ run }: { run: EvalRunDetail }) {
     <section data-testid="scorecard" className="space-y-5">
       <div className="flex flex-wrap items-baseline justify-between gap-3">
         <div>
-          <h3 className="text-sm font-medium tracking-wide text-slate-400 uppercase">
-            Scorecard
-          </h3>
-          <p className="mt-1 text-xs text-slate-400">
+          <h3 className="text-lg font-semibold tracking-tight text-ink">Scorecard</h3>
+          <p className="mt-1 text-xs text-muted">
             {formatTimestamp(run.started_at ?? null)}
             {run.finished_at ? ` — finished ${formatTimestamp(run.finished_at)}` : ""}
           </p>
         </div>
-        <p className="text-xs text-slate-400">
-          {run.results.length} {run.results.length === 1 ? "question" : "questions"} in this run
+        <p className="text-xs text-muted">
+          <span className="font-mono tabular-nums text-ink">{run.results.length}</span>{" "}
+          {run.results.length === 1 ? "question" : "questions"} in this run
         </p>
       </div>
 
       {run.notes && (
-        <p className="rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2 text-xs text-slate-300">
-          <span className="text-slate-400">What changed: </span>
+        <p className={`${WELL} px-3 py-2 text-xs text-ink`}>
+          <span className="text-muted">What changed: </span>
           {run.notes}
         </p>
       )}
@@ -173,7 +204,7 @@ export default function Scorecard({ run }: { run: EvalRunDetail }) {
       {run.error && (
         // Run-level failure, distinct from a single question's error below. This
         // is the reason a run ended with no summary at all.
-        <p className="rounded-lg border border-rose-800/60 bg-rose-950/40 px-3 py-2 text-sm whitespace-pre-wrap text-rose-200">
+        <p className={`${NOTICE} ${BAD_TONE} text-sm whitespace-pre-wrap`}>
           The run failed: {run.error}
         </p>
       )}
@@ -187,32 +218,40 @@ export default function Scorecard({ run }: { run: EvalRunDetail }) {
         <div
           data-testid="weakest-metric"
           data-metric={weakest.key}
-          className="rounded-xl border border-amber-700/50 bg-amber-950/20 p-5"
+          className={`${CARD_STRONG} p-5`}
         >
-          <p className="text-[0.65rem] font-medium tracking-widest text-amber-500/80 uppercase">
-            Weakest metric — your next investment
-          </p>
+          <p className={EYEBROW}>Weakest metric — your next investment</p>
           <p className="mt-2 flex flex-wrap items-baseline gap-3">
-            <span className="text-2xl font-semibold text-amber-100">{weakest.label}</span>
-            <span className="font-mono text-2xl text-amber-300">
+            <span className="text-2xl font-semibold tracking-tight text-ink">
+              {weakest.label}
+            </span>
+            <span className="font-mono text-2xl tabular-nums text-ink">
               {formatMetric(summary.weakest_score)}
             </span>
+            {/*
+              The ONE tinted thing on this card, and it names the band rather
+              than the mood. A weakest metric of 0.91 is a good scorecard, and
+              the old card said "warning" about it in 40 square centimetres of
+              amber. Tone follows the band, so the alarming colour appears only
+              when the number is actually alarming.
+            */}
+            <span className={`${PILL} ${bandTone(summary.weakest_score)}`}>
+              {bandLabel(summary.weakest_score)}
+            </span>
           </p>
-          <p className="mt-3 text-sm font-medium text-amber-100">{weakest.investmentFor}</p>
-          <p className="mt-2 max-w-3xl text-sm leading-relaxed text-amber-200/80">
-            {weakest.why}
-          </p>
+          <p className="mt-3 text-sm font-medium text-ink">{weakest.investmentFor}</p>
+          <p className="mt-2 max-w-3xl text-sm leading-relaxed text-muted">{weakest.why}</p>
           <ul className="mt-3 space-y-1.5">
             {weakest.knobs.map((knob) => (
-              <li key={knob} className="flex gap-2 text-sm text-amber-100/90">
-                <span aria-hidden="true" className="text-amber-500">
+              <li key={knob} className="flex gap-2 text-sm text-muted">
+                <span aria-hidden="true" className="text-accent">
                   &rsaquo;
                 </span>
                 <span>{knob}</span>
               </li>
             ))}
           </ul>
-          <p className="mt-4 border-t border-amber-800/40 pt-3 text-xs text-amber-200/60">
+          <p className="mt-4 border-t border-line pt-3 text-xs leading-relaxed text-muted">
             Change one thing, re-run the same golden set, and write what you changed in the
             notes. Two runs that differ in one parameter are an experiment; two that differ
             in five are a story.
@@ -221,7 +260,7 @@ export default function Scorecard({ run }: { run: EvalRunDetail }) {
       )}
 
       {!summary && (
-        <p className="rounded-lg border border-slate-800 bg-slate-900/40 px-4 py-3 text-sm text-slate-400">
+        <p className={`${WELL} px-4 py-3 text-sm text-muted`}>
           {run.status === "failed"
             ? "This run has no summary because it did not finish."
             : "No summary yet — the aggregate is written once every question has been scored."}
@@ -240,36 +279,33 @@ export default function Scorecard({ run }: { run: EvalRunDetail }) {
       </div>
 
       {summary && (
-        <div className="rounded-lg border border-slate-800 bg-slate-900/30 p-4">
-          <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
-            <span className="text-slate-300">
-              <span className="text-slate-400">Means rest on </span>
-              <span data-testid="scored-count" className="font-medium text-slate-100">
+        <div className={`${CARD} p-5`}>
+          <div className="flex flex-wrap items-center gap-x-6 gap-y-3 text-sm text-muted">
+            <span className="inline-flex flex-wrap items-center gap-2">
+              Means rest on
+              <span data-testid="scored-count" className="font-mono tabular-nums text-ink">
                 {summary.scored_count}
               </span>
-              <span className="text-slate-400">
-                {" "}
-                scored {summary.scored_count === 1 ? "question" : "questions"}
-              </span>
+              scored {summary.scored_count === 1 ? "question" : "questions"}
             </span>
 
-            <span className="text-slate-300">
-              <span className="text-slate-400">Refusals </span>
+            <span className="inline-flex flex-wrap items-center gap-2">
+              Refusals
               <span
                 data-testid="refusal-tally"
-                className={`font-medium ${
+                className={`${PILL} font-mono tabular-nums ${
                   summary.refusal_total > 0 && summary.refusal_pass < summary.refusal_total
-                    ? "text-rose-300"
-                    : "text-emerald-300"
+                    ? BAD_TONE
+                    : OK_TONE
                 }`}
               >
                 {summary.refusal_pass} / {summary.refusal_total}
               </span>
-              <span className="text-slate-400"> correctly declined</span>
+              correctly declined
             </span>
           </div>
 
-          <p className="mt-2 text-xs leading-relaxed text-slate-400">
+          <p className="mt-3 text-xs leading-relaxed text-muted">
             Refusal questions are graded pass/fail on behaviour and excluded from all four
             means: a correct refusal has no useful context and an answer that deliberately
             does not follow from it, so scoring it would punish the agent for being right.
@@ -283,50 +319,102 @@ export default function Scorecard({ run }: { run: EvalRunDetail }) {
         judge is independent -- and that distinction is invisible unless it is
         stated.
       */}
-      <div className="rounded-lg border border-slate-800 bg-slate-900/30 p-4 text-sm">
-        <div className="flex flex-wrap gap-x-8 gap-y-2">
-          <span className="text-slate-400">
-            Answers written by{" "}
-            <span data-testid="generation-model" className="font-mono text-xs text-slate-200">
+      <div className={`${CARD} p-5 text-sm`}>
+        <div className="flex flex-wrap gap-x-8 gap-y-3">
+          <span className="inline-flex flex-wrap items-center gap-2 text-muted">
+            Answers written by
+            <span
+              data-testid="generation-model"
+              className={`${WELL} inline-block px-2 py-0.5 font-mono text-xs text-ink`}
+            >
               {run.generation_model ?? "unrecorded"}
             </span>
           </span>
-          <span className="text-slate-400">
-            Judged by{" "}
-            <span data-testid="judge-model" className="font-mono text-xs text-slate-200">
+          <span className="inline-flex flex-wrap items-center gap-2 text-muted">
+            Judged by
+            <span
+              data-testid="judge-model"
+              className={`${WELL} inline-block px-2 py-0.5 font-mono text-xs text-ink`}
+            >
               {run.judge_model ?? "unrecorded"}
             </span>
           </span>
         </div>
 
-        {run.judge_is_generator && (
-          <p
-            data-testid="self-judged"
-            className="mt-3 rounded-md border border-amber-800/60 bg-amber-950/30 px-3 py-2 text-xs leading-relaxed text-amber-200"
-          >
+        {run.judge_is_generator ? (
+          <p data-testid="self-judged" className={`${NOTICE} ${WARN_TONE} mt-3`}>
             The judge and the generator are the same model, so{" "}
             <span className="font-medium">faithfulness is self-assessed</span>: this run
             asked the model whether its own answer followed from its own context. Treat the
             number as a smoke test rather than as an independent measurement, and point{" "}
-            <code className="rounded bg-amber-950/60 px-1 font-mono">EVAL_JUDGE_MODEL</code>{" "}
-            at a different model before quoting it.
+            <code className={`${WELL} px-1 font-mono`}>EVAL_JUDGE_MODEL</code> at a different
+            model before quoting it.
+          </p>
+        ) : (
+          /*
+            The reassuring half, which had no rendering at all before -- an
+            independent judge was communicated by the ABSENCE of a warning,
+            which is not communication. This is the single property that makes
+            the four numbers above quotable, and it is the one thing on a
+            scorecard worth stating in the affirmative.
+          */
+          <p className={`${NOTICE} ${OK_TONE} mt-3`}>
+            The judge is a different model from the one that answered, so{" "}
+            <span className="font-medium">faithfulness is measured independently</span>{" "}
+            rather than self-assessed. This is what makes the four numbers above worth
+            quoting outside this page.
           </p>
         )}
       </div>
 
       <div>
         <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
-          <h4 className="text-xs font-medium tracking-wide text-slate-400 uppercase">
-            Per question
-          </h4>
+          <h4 className={EYEBROW}>Per question</h4>
           {failing.length > 0 && (
-            <label className="flex items-center gap-2 text-xs text-slate-400">
+            /*
+              `min-h-11` on the LABEL, not on the box: a 44px checkbox would be
+              a different control, and the label is what the finger lands on.
+
+              The input itself is `sr-only` and the box is drawn by the span
+              beside it, which is the same arrangement `Segmented` uses in
+              `ui.tsx`. That is not styling preference -- a native checkbox is
+              14px, and `ui_check.py` A8 measures every `input` on the page and
+              fails anything under 43.5px. It does not currently drive the
+              Evaluate tab, so this control was one coverage change away from
+              reding a suite it had always violated. `sr-only` is in A8's own
+              exclusion list, so the assertion now measures the 44px label,
+              which is the thing a finger actually hits.
+
+              The real checkbox is still the state: it keeps the checked
+              semantics, the keyboard behaviour and the accessible name from the
+              label wrapping it. Only the painting moved.
+            */
+            <label className="flex min-h-11 cursor-pointer items-center gap-2 text-xs text-muted">
               <input
                 type="checkbox"
                 checked={showOnlyFailures}
                 onChange={(event) => setShowOnlyFailures(event.target.checked)}
-                className="h-3.5 w-3.5 accent-rose-500"
+                className="peer sr-only"
               />
+              {/* `text-transparent` -> `peer-checked:text-inverse` rather than
+                  toggling the tick's own opacity: Tailwind's `peer-*` selector
+                  matches following SIBLINGS, not their descendants, so a rule
+                  aimed at the svg inside would never fire. Colouring the box and
+                  letting `currentColor` carry the tick keeps it to one rule. */}
+              <span
+                aria-hidden="true"
+                className="flex h-4 w-4 shrink-0 items-center justify-center rounded-sm border border-line-strong bg-field text-transparent transition peer-checked:border-accent peer-checked:bg-accent peer-checked:text-inverse"
+              >
+                <svg width="10" height="10" viewBox="0 0 12 12" fill="none">
+                  <path
+                    d="M2.5 6.2l2.3 2.3L9.5 3.8"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+              </span>
               Show only the {failing.length} {failing.length === 1 ? "row" : "rows"} that
               need attention
             </label>
@@ -334,30 +422,30 @@ export default function Scorecard({ run }: { run: EvalRunDetail }) {
         </div>
 
         {run.results.length === 0 ? (
-          <p className="rounded-lg border border-dashed border-slate-800 px-4 py-8 text-center text-sm text-slate-400">
+          <p className={`${CARD_EMPTY} px-4 py-8 text-center text-sm text-muted`}>
             No per-question results yet.
           </p>
         ) : (
-          <div className="overflow-x-auto rounded-lg border border-slate-800">
+          <div className={`${CARD} overflow-x-auto`}>
             <table className="w-full text-left text-sm">
-              <thead className="bg-slate-900/60 text-xs tracking-wide text-slate-400 uppercase">
+              <thead className="bg-sunken text-xs font-semibold text-faint">
                 <tr>
-                  <th className="px-3 py-2 font-medium">Question</th>
-                  <th className="px-3 py-2 font-medium">Expected</th>
-                  <th className="px-3 py-2 font-medium">Behaviour</th>
-                  <th className="px-3 py-2 text-right font-medium" title="Faithfulness">
+                  <th className="px-3 py-2.5">Question</th>
+                  <th className="px-3 py-2.5">Expected</th>
+                  <th className="px-3 py-2.5">Behaviour</th>
+                  <th className="px-3 py-2.5 text-right" title="Faithfulness">
                     Faith
                   </th>
-                  <th className="px-3 py-2 text-right font-medium" title="Answer relevance">
+                  <th className="px-3 py-2.5 text-right" title="Answer relevance">
                     Rel
                   </th>
-                  <th className="px-3 py-2 text-right font-medium" title="Context precision">
+                  <th className="px-3 py-2.5 text-right" title="Context precision">
                     Prec
                   </th>
-                  <th className="px-3 py-2 text-right font-medium" title="Context recall">
+                  <th className="px-3 py-2.5 text-right" title="Context recall">
                     Rec
                   </th>
-                  <th className="px-3 py-2" />
+                  <th className="px-3 py-2.5" />
                 </tr>
               </thead>
               <tbody>
@@ -406,17 +494,13 @@ function MetricCard({
       data-testid="metric-card"
       data-metric={metric.key}
       data-value={scored ? value.toFixed(2) : "null"}
-      className={`rounded-xl border p-4 ${
-        weakest
-          ? "border-amber-700/60 bg-amber-950/20"
-          : "border-slate-800 bg-slate-900/40"
-      }`}
+      // The weakest card echoes the hero's stronger EDGE rather than taking a
+      // hue. Same reasoning as `CARD_STRONG`: this is emphasis, not alarm.
+      className={`${weakest ? CARD_STRONG : CARD} p-5`}
     >
-      <p className="text-xs font-medium tracking-wide text-slate-400 uppercase">
-        {metric.label}
-      </p>
+      <p className={EYEBROW}>{metric.label}</p>
 
-      <p className="mt-2 font-mono text-3xl text-slate-100">
+      <p className="mt-2 font-mono text-3xl font-semibold tabular-nums text-ink">
         {scored ? (
           value.toFixed(2)
         ) : (
@@ -426,14 +510,17 @@ function MetricCard({
             context_recall uncomputable while everything else scores fine. Zero
             would claim the opposite: that it WAS computed and the answer was
             unsupported.
+
+            Set in SANS, because "not scored" is the harness speaking about the
+            absence of a measurement; everything mono on this page IS one.
           */
-          <span className="text-base text-slate-400 italic">not scored</span>
+          <span className="font-sans text-base text-muted italic">not scored</span>
         )}
       </p>
 
       {/* The bar is drawn only for a real number, for the same reason. An
           empty track next to "not scored" reads as a zero. */}
-      <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-slate-800">
+      <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-sunken">
         {scored && (
           <div
             className={`h-full rounded-full ${barColour(value)}`}
@@ -442,7 +529,7 @@ function MetricCard({
         )}
       </div>
 
-      <p className="mt-3 text-xs leading-relaxed text-slate-400">{metric.measures}</p>
+      <p className="mt-3 text-xs leading-relaxed text-muted">{metric.measures}</p>
     </div>
   );
 }
@@ -466,21 +553,21 @@ function ResultRow({
         data-testid="eval-result-row"
         data-behaviour-ok={String(result.behaviour_ok)}
         data-failed={String(failed)}
-        className={`border-t border-slate-800 ${failed ? "bg-rose-950/20" : ""}`}
+        className={`border-t border-line ${failed ? "bg-bad-soft" : ""}`}
       >
         <td className="max-w-md px-3 py-3">
-          <span className={failed ? "text-rose-100" : "text-slate-200"}>{result.question}</span>
+          <span className="text-ink">{result.question}</span>
           {result.error && (
             // One question failing inside an otherwise good run. Shown in the
             // row rather than at the top, because it voids this row's numbers
             // and nothing else's.
-            <p className="mt-1 text-xs whitespace-pre-wrap text-rose-300">{result.error}</p>
+            <p className={`${NOTICE} ${BAD_TONE} mt-1.5 whitespace-pre-wrap`}>
+              {result.error}
+            </p>
           )}
         </td>
 
-        <td className="px-3 py-3 text-xs text-slate-400">
-          {refusalRow ? "refuse" : "answer"}
-        </td>
+        <td className="px-3 py-3 text-xs text-muted">{refusalRow ? "refuse" : "answer"}</td>
 
         <td className="px-3 py-3">
           <BehaviourResult ok={result.behaviour_ok} refused={result.refused} />
@@ -492,7 +579,7 @@ function ResultRow({
             Four dashes would read as "the judge failed on this row"; this row
             was never sent to the judge at all, and that is by design.
           */
-          <td colSpan={4} className="px-3 py-3 text-center text-xs text-slate-400 italic">
+          <td colSpan={4} className="px-3 py-3 text-center text-xs text-muted italic">
             graded pass/fail — excluded from the means
           </td>
         ) : (
@@ -509,7 +596,7 @@ function ResultRow({
             type="button"
             aria-expanded={open}
             onClick={onToggle}
-            className="min-h-11 rounded-md border border-slate-700 bg-slate-900 px-2.5 py-1 text-xs text-slate-300 transition hover:border-slate-600"
+            className={`${BTN_SECONDARY} ${BTN_SM}`}
           >
             {open ? "Hide" : "Answer"}
           </button>
@@ -517,14 +604,21 @@ function ResultRow({
       </tr>
 
       {open && (
-        <tr className="border-t border-slate-800/60 bg-slate-950/40">
+        <tr className="border-t border-line bg-sunken">
           <td colSpan={8} className="px-3 py-3">
-            <p className="text-xs tracking-wide text-slate-400 uppercase">Answer given</p>
-            <p className="mt-1.5 max-w-4xl text-sm leading-relaxed whitespace-pre-wrap text-slate-300">
+            <p className={EYEBROW}>Answer given</p>
+            {/*
+              Serif, because this is the only text on the page that came out of
+              the corpus -- the model's own answer, assembled from the user's
+              documents. Everything around it is the harness talking ABOUT that
+              answer, and is set in sans. `PROSE` also supplies the 65ch measure,
+              which is what makes a long answer readable rather than a wall.
+            */}
+            <p className={`${PROSE} mt-1.5 whitespace-pre-wrap`}>
               {result.answer?.trim() || "(no answer recorded)"}
             </p>
             {result.refused && (
-              <p className="mt-2 text-xs text-amber-300">
+              <p className={`${NOTICE} ${NEUTRAL_TONE} mt-3`}>
                 The agent declined. For a refusal question that is the correct outcome; for
                 an answer question it means the retrieved context did not support one.
               </p>
@@ -540,8 +634,8 @@ function ScoreCell({ value }: { value: number | null }) {
   const scored = value !== null && value !== undefined;
   return (
     <td
-      className={`px-3 py-3 text-right font-mono text-xs ${
-        scored ? textColour(value) : "text-slate-600"
+      className={`px-3 py-3 text-right font-mono text-xs tabular-nums ${
+        scored ? textColour(value) : "text-faint"
       }`}
     >
       {scored ? value.toFixed(2) : "—"}
@@ -551,16 +645,10 @@ function ScoreCell({ value }: { value: number | null }) {
 
 function BehaviourResult({ ok, refused }: { ok: boolean | null; refused: boolean }) {
   if (ok === null || ok === undefined) {
-    return <span className="text-xs text-slate-400">unknown</span>;
+    return <span className={`${PILL} ${NEUTRAL_TONE}`}>unknown</span>;
   }
   return (
-    <span
-      className={`inline-block rounded-full border px-2 py-0.5 text-[0.65rem] font-medium tracking-wide uppercase ${
-        ok
-          ? "border-emerald-800/60 bg-emerald-950/40 text-emerald-300"
-          : "border-rose-800/60 bg-rose-950/40 text-rose-300"
-      }`}
-    >
+    <span className={`${PILL} ${ok ? OK_TONE : BAD_TONE}`}>
       {ok ? "as expected" : refused ? "refused" : "answered"}
     </span>
   );
@@ -586,14 +674,45 @@ function formatMetric(value: number | null | undefined): string {
   return value === null || value === undefined ? "not scored" : value.toFixed(2);
 }
 
+/**
+ * The three bands, and the ONE place their boundaries are written.
+ *
+ * 0.80 and 0.60 are unchanged from the original -- this is a re-mapping of hue
+ * onto the state tokens, not a re-calibration. `barColour`, `textColour` and
+ * `bandTone` must agree, or a bar and the number beside it would disagree about
+ * the same value, which is the sort of thing nobody notices and nobody trusts
+ * once they do.
+ */
 function barColour(value: number): string {
-  if (value >= 0.8) return "bg-emerald-500";
-  if (value >= 0.6) return "bg-amber-500";
-  return "bg-rose-500";
+  if (value >= 0.8) return "bg-ok";
+  if (value >= 0.6) return "bg-warn";
+  return "bg-bad";
 }
 
 function textColour(value: number): string {
-  if (value >= 0.8) return "text-emerald-300";
-  if (value >= 0.6) return "text-amber-300";
-  return "text-rose-300";
+  if (value >= 0.8) return "text-ok";
+  if (value >= 0.6) return "text-warn";
+  return "text-bad";
+}
+
+/**
+ * The band as a WORD, for the one pill on the weakest-metric card.
+ *
+ * A hero card that says "0.91" and is tinted like a warning is telling the
+ * reader two different things, and the tint is the louder one. Naming the band
+ * lets the number carry the finding and the colour carry only the severity --
+ * which, on a good run, is none.
+ */
+function bandLabel(value: number | null | undefined): string {
+  if (value === null || value === undefined) return "not scored";
+  if (value >= 0.8) return "strong";
+  if (value >= 0.6) return "moderate";
+  return "weak";
+}
+
+function bandTone(value: number | null | undefined): string {
+  if (value === null || value === undefined) return NEUTRAL_TONE;
+  if (value >= 0.8) return OK_TONE;
+  if (value >= 0.6) return WARN_TONE;
+  return BAD_TONE;
 }

@@ -43,7 +43,17 @@
  * because a filename may offer no break opportunity, and every control at the
  * 44px minimum (`scripts/ui_check.py` A7 asserts zero horizontal overflow at
  * 320px and A8 asserts the 44px floor).
+ *
+ * **A caution, not a failure, so it is `NOTICE` + `WARN_TONE`** -- the same
+ * strip a pending eval or an indexing corpus uses, at paragraph scale. The
+ * server refused an upload and is asking a question; nothing has gone wrong.
+ * The confirm is `BTN_SECONDARY` and the cancel `BTN_QUIET`, which is the right
+ * way round for a prompt whose safe answer is "no": neither reads as the
+ * affirmative action of the page, and the one that writes data is the one that
+ * looks like a control.
  */
+
+import { BTN_QUIET, BTN_SECONDARY, BTN_SM, NOTICE, WARN_TONE } from "../lib/styles.ts";
 
 export default function DuplicatePrompt({
   testId,
@@ -65,11 +75,12 @@ export default function DuplicatePrompt({
   onDismiss: () => void;
 }) {
   return (
-    <div
-      data-testid={`${testId}-prompt`}
-      className="min-w-0 rounded-lg border border-amber-800/60 bg-amber-950/30 px-3 py-3"
-    >
-      <p role="status" className="text-xs leading-relaxed break-words text-amber-200">
+    <div data-testid={`${testId}-prompt`} className={`${NOTICE} ${WARN_TONE} min-w-0`}>
+      {/* Size, leading and colour all come from the strip. `break-words` is the
+          one thing left, and it is here rather than in `NOTICE` because a
+          filename with no break opportunity is this message's problem and not
+          every notice's. */}
+      <p role="status" className="break-words">
         {message}
       </p>
 
@@ -79,7 +90,7 @@ export default function DuplicatePrompt({
           data-testid={`${testId}-confirm`}
           disabled={busy}
           onClick={onConfirm}
-          className="min-h-11 rounded-md border border-amber-600/70 bg-amber-900/40 px-3 py-2 text-xs font-medium text-amber-100 transition hover:border-amber-500 hover:bg-amber-900/60 disabled:opacity-50"
+          className={`${BTN_SECONDARY} ${BTN_SM}`}
         >
           {busy ? "Uploading…" : "Upload it again anyway"}
         </button>
@@ -88,7 +99,7 @@ export default function DuplicatePrompt({
           type="button"
           data-testid={`${testId}-dismiss`}
           onClick={onDismiss}
-          className="min-h-11 rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-xs font-medium text-slate-300 transition hover:border-slate-600 hover:text-slate-100"
+          className={`${BTN_QUIET} ${BTN_SM}`}
         >
           Cancel
         </button>

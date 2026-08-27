@@ -47,6 +47,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { agents } from "../lib/api.ts";
+import { BTN_PRIMARY } from "../lib/styles.ts";
 import type { Agent } from "../lib/types.ts";
 import { ErrorBanner, Spinner, errorMessage } from "../components/ui.tsx";
 import AgentBar from "../components/AgentBar.tsx";
@@ -178,10 +179,11 @@ export default function AgentDetail({
         <button
           type="button"
           onClick={onBack}
-          // `min-h-11`: this is the ONLY control on the page when an agent fails
-          // to load -- the one screen where a missed tap leaves the user with no
-          // way forward at all.
-          className="min-h-11 rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-300 transition hover:border-slate-600"
+          // `BTN_PRIMARY` rather than a secondary: this is the ONLY control on
+          // the page when an agent fails to load -- the one screen where a
+          // missed tap leaves the user with no way forward at all -- and the
+          // 44px target it carries is the whole reason that matters.
+          className={BTN_PRIMARY}
         >
           Back to agents
         </button>
