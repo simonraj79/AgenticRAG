@@ -150,6 +150,42 @@ pattern:
 > distinguish a call from a comment about the call, and the file most likely to discuss a
 > hazard is the file that handles it.
 
+### 4c. A feature change can invalidate a distant case WITHOUT failing it
+
+A case focused a control near the bottom of a tall panel, to prove that focusing something low
+cannot displace a dialog. A later change put that control inside a collapsed `<details>`. The
+content of a closed `<details>` is in the DOM but **not rendered**, so `.focus()` silently becomes
+a no-op — and the case went on passing while no longer exercising its own premise. Nothing went
+red. Nothing could have.
+
+This is §4 with the arrow reversed: not a test written unable to fail, but a **working test
+disarmed from a distance**, by an edit in a different file that never mentions it. The two share
+one remedy. **A case must own the conditions it needs**, and where it cannot own them it must
+assert them — "the control I am about to focus is on screen" is one line, and it is the line that
+turns this from silence into a red row.
+
+The general form, worth asking on any change that hides, defers, virtualises or lazily mounts
+something: **which existing assertions reach into what I just made unreachable?** Grep the
+selectors, not the feature.
+
+### 4d. Never ask a rect whether something is visible
+
+A case decided a collapsed section was closed by reading
+`getBoundingClientRect().height > 0`, on the reasonable-sounding premise that closed `<details>`
+content measures 0x0. Measured in the browser actually running the suite, it does not — closed
+content reported **60x1280** with `checkVisibility()` false. The harness then contradicted itself
+on the same nodes in the same drive: a sibling case gated on `innerText`, which *is*
+rendering-aware, and got the same page right.
+
+A bounding rect answers "what box does layout give this", which is not the same question as "can a
+person see it", and the two diverge for `content-visibility`, closed disclosures, `visibility:
+hidden` subtrees and clipped ancestors. Ask `checkVisibility()`, or ask for the text.
+
+**And note which way this fails.** The rect said *visible* when nothing was: a false GREEN on the
+"it is expanded" reading and a false RED on the "it is collapsed" one, in the same predicate,
+depending only on which way the case was phrased. A predicate whose error direction flips with
+the phrasing is not a predicate you can reason about — replace it, do not tune it.
+
 ### 5. A harness proves the instrumentation it was HANDED works — never that it is COMPLETE
 
 Two levels of this, learned separately:
@@ -584,6 +620,32 @@ An audit's deliverables are not prose about intent. They are: **what exists**, a
 signatures copied in so the plan is checkable later; **what is closed, and by which invariant** —
 not "we decided not to", because that is the entry that stops the idea returning in six weeks; and
 **what the change reduces to** once the first two are subtracted.
+
+### 25b. Let the acceptance criteria overrule you, including when you are the one they are overruling
+
+A judgement call — collapse the section of settings that no code path reads, because the screen is
+long — shipped, and the criterion written earlier in the same change set went red **by name** on the
+two parameters it hid. The criterion asserted that every parameter carries a visible explanation *in
+the mode the user lands in*. Collapsing a group is precisely the act of removing explanations from
+the arrival screen. The two were never both satisfiable.
+
+**The criterion encoded the request; the change was polish about length.** That is the whole test,
+and it is worth applying explicitly rather than by feel: when a criterion and a later idea conflict,
+ask which of them is the thing that was asked for. Polish loses.
+
+Two properties made this work, and neither is automatic:
+
+- **It asserted the OUTCOME the user asked for, not the implementation that delivered it.** A case
+  pinning "the ten parameters render in three groups" would have stayed green through the collapse
+  and caught nothing.
+- **It was written before the code and watched failing.** It had already demonstrated it could go
+  red, so a red row was information rather than a suspected harness fault — which is the state most
+  green-by-construction cases can never reach.
+
+There is also a disposal rule. When a criterion wins, the case for the reverted behaviour has no
+subject left: **delete it, do not skip it.** A case that cannot pass is noise; a skipped one claims
+the behaviour is merely unmeasured when it was in fact decided against. Move whatever it taught to
+where it stood.
 
 ### 26. A contract stated twice drifts, and the copy that drifted is never the one you are reading
 
