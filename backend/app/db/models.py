@@ -65,6 +65,15 @@ class User(Base):
     # Google's stable subject id. NOT email - Google reassigns emails within a
     # Workspace domain but never reuses `sub`.
     google_sub: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
+    # Better Auth's own user id. A LINK, never the identity -- `google_sub`
+    # remains the key, so this stays nullable and carries no uniqueness meaning
+    # beyond "two app users may not share one Better Auth account". Nullable
+    # because every row predates the cutover and because `dev-login` rows never
+    # acquire one: that shim mints an app session directly and never passes
+    # through Better Auth at all.
+    better_auth_id: Mapped[str | None] = mapped_column(
+        String(255), unique=True, index=True
+    )
     email: Mapped[str] = mapped_column(String(320), nullable=False)
     name: Mapped[str | None] = mapped_column(String(255))
     avatar_url: Mapped[str | None] = mapped_column(Text)

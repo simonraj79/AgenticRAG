@@ -68,6 +68,29 @@ import type {
  * readable in git. Every credential (Gemini, Pinecone, Cohere, the OAuth client
  * secret) stays in FastAPI. See PRD section 7.
  */
+import { getAuthToken } from "./auth-client";
+
+/**
+ * Attach the Better Auth bearer token, if there is one.
+ *
+ * A HEADER RATHER THAN A COOKIE, and that is the point of the whole cutover.
+ * `onrender.com` is on the Public Suffix List, so the SPA and this API are
+ * different SITES; the session cookie is third-party on every call here and
+ * browsers that block third-party cookies drop it. A header has no site and no
+ * partition, so it always arrives.
+ *
+ * Silent when there is no token. That is correct in three situations, none of
+ * them an error: nobody is signed in, the request is deliberately anonymous, or
+ * the user is still on the old Authlib cookie session that `credentials:
+ * "include"` below carries. The API tries Bearer first and falls back to the
+ * cookie, so an absent header costs nothing during the cutover.
+ */
+async function authorize(headers: Headers): Promise<Headers> {
+  const token = await getAuthToken();
+  if (token) headers.set("Authorization", `Bearer ${token}`);
+  return headers;
+}
+
 const CONFIGURED_API_URL = import.meta.env.VITE_API_URL as string | undefined;
 
 // Trailing slash stripped so `${API_URL}/api/...` never produces a double slash;
@@ -158,13 +181,17 @@ export async function api<T>(path: string, init: ApiInit = {}): Promise<T> {
     body = JSON.stringify(json);
   }
 
+  await authorize(headers);
+
   let response: Response;
   try {
     response = await fetch(`${API_URL}${path}`, {
       ...rest,
       body,
       headers,
-      // See the module docstring. This line is why this wrapper exists.
+      // Still sent, and still load-bearing until Authlib is removed: a user
+      // signed in before the cutover has a cookie and no Better Auth session,
+      // so this is the only credential their requests carry.
       credentials: "include",
     });
   } catch (cause) {
@@ -436,15 +463,23 @@ async function apiStream(
 ): Promise<AskResult> {
   let response: Response;
   try {
-    response = await fetch(`${API_URL}${path}`, {
-      method: "POST",
-      headers: {
+    // Built as a Headers object rather than a literal so `authorize` can add
+    // the bearer token. The streaming path needs it for the same reason every
+    // other call does -- it is a cross-site request, and the cookie may not
+    // survive the trip.
+    const streamHeaders = await authorize(
+      new Headers({
         "Content-Type": "application/json",
         // Not content negotiation -- the route speaks SSE whatever this says.
         // Sent because an intermediary that inspects it has one more reason not
         // to buffer the response in order to compress it.
         Accept: SSE_CONTENT_TYPE,
-      },
+      }),
+    );
+
+    response = await fetch(`${API_URL}${path}`, {
+      method: "POST",
+      headers: streamHeaders,
       body: JSON.stringify({ question }),
       credentials: "include",
       signal,
@@ -748,6 +783,17 @@ export const evaluation = {
    * viewer sandbox, which blocks downloads a page starts itself. A normal link
    * is a navigation the browser owns, and it carries the session cookie because
    * that cookie is `SameSite=None; Secure` (PRD section 6.5).
+   * COOKIE-DEPENDENT, AND THE ONLY SURFACE LEFT THAT IS. This is a URL handed
+   * to the browser, not a fetch -- a navigation or an <img src>. A browser
+   * navigation cannot carry an `Authorization` header, so the bearer token that
+   * authenticates every other call in this file cannot authenticate this one.
+   * It works today because the Authlib cookie is still live.
+   *
+   * REMOVING AUTHLIB BREAKS THIS, for exactly the users the cutover was for:
+   * anyone whose browser blocks third-party cookies. Fix before that removal by
+   * fetching the bytes through `api()` and handing the user a blob URL, or by
+   * having the route accept a short-lived token as a query parameter. Do not
+   * discover it by deleting the cookie path first.
    */
   exportUrl: (agentId: string) =>
     `${API_URL}/api/agents/${encodeURIComponent(agentId)}/golden-questions/export`,
@@ -889,6 +935,17 @@ export const handouts = {
    * The same URL is the `src` of a chart's thumbnail. **Only once `status` is
    * "ready"**: pointed at a pending row it answers 409 and the `<img>` renders
    * broken.
+   * COOKIE-DEPENDENT, AND THE ONLY SURFACE LEFT THAT IS. This is a URL handed
+   * to the browser, not a fetch -- a navigation or an <img src>. A browser
+   * navigation cannot carry an `Authorization` header, so the bearer token that
+   * authenticates every other call in this file cannot authenticate this one.
+   * It works today because the Authlib cookie is still live.
+   *
+   * REMOVING AUTHLIB BREAKS THIS, for exactly the users the cutover was for:
+   * anyone whose browser blocks third-party cookies. Fix before that removal by
+   * fetching the bytes through `api()` and handing the user a blob URL, or by
+   * having the route accept a short-lived token as a query parameter. Do not
+   * discover it by deleting the cookie path first.
    */
   downloadUrl: (agentId: string, handoutId: string) =>
     `${API_URL}/api/agents/${encodeURIComponent(agentId)}/handouts/${encodeURIComponent(handoutId)}/download`,

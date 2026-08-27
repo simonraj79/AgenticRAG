@@ -21,6 +21,7 @@
 import { useState } from "react";
 import type { FormEvent } from "react";
 import { api, API_URL } from "../lib/api.ts";
+import { signInWithGoogle } from "../lib/auth-client.ts";
 import type { User } from "../lib/types.ts";
 import { ErrorBanner, Spinner, errorMessage } from "../components/ui.tsx";
 import PipelineScene from "../components/PipelineScene.tsx";
@@ -44,6 +45,12 @@ const PILLARS = [
 ];
 
 export default function Login({ onAuthenticated }: { onAuthenticated: (user: User) => void }) {
+  // Local to THIS component. `DevLoginBox` further down declares its own `busy`
+  // and `error`; they are different concerns on the same page and sharing them
+  // would let a failed dev-login disable the Google button.
+  const [busy, setBusy] = useState(false);
+  const [signInError, setSignInError] = useState<string | null>(null);
+
   return (
     <div className="relative min-h-screen overflow-hidden bg-slate-950">
       {/*
@@ -141,17 +148,68 @@ export default function Login({ onAuthenticated }: { onAuthenticated: (user: Use
               Your agents, documents and eval runs are scoped to your account.
             </p>
 
-            <a
+            {/*
+              A BUTTON, not a link, because Better Auth's sign-in is a POST that
+              returns the provider URL rather than a URL the page can navigate
+              to directly. `signInWithGoogle` performs the redirect itself.
+
+              The old Authlib link is kept below and is deliberately not styled
+              as an equal choice: both paths authenticate, the API accepts
+              either, and this one is the one being cut over to. It is removed
+              in the same commit that removes Authlib.
+            */}
+            <button
+              type="button"
               data-testid="login-google"
-              href={`${API_URL}/api/auth/google/login`}
-              className="mt-6 flex w-full items-center justify-center gap-3 rounded-lg bg-slate-100 px-4 py-3 text-sm font-medium text-slate-900 transition hover:bg-white"
+              disabled={busy}
+              onClick={() => {
+                setBusy(true);
+                setSignInError(null);
+                // No `await`: this navigates away on success, so there is no
+                // "after" to run. The catch exists for the failure case, where
+                // the page stays put and the user is owed an explanation.
+                signInWithGoogle(window.location.pathname).catch((cause) => {
+                  setBusy(false);
+                  setSignInError(
+                    `Sign-in could not be started (${String(cause)}). ` +
+                      `If this persists, the auth service may still be starting up.`,
+                  );
+                });
+              }}
+              className="mt-6 flex w-full items-center justify-center gap-3 rounded-lg bg-slate-100 px-4 py-3 text-sm font-medium text-slate-900 transition hover:bg-white disabled:cursor-not-allowed disabled:opacity-60"
             >
               <GoogleMark />
-              Sign in with Google
-            </a>
+              {busy ? "Redirecting to Google..." : "Sign in with Google"}
+            </button>
+
+            {signInError ? (
+              <p
+                data-testid="login-error"
+                role="alert"
+                className="mt-3 rounded-lg border border-rose-900/60 bg-rose-950/40 px-3 py-2 text-xs leading-relaxed text-rose-200"
+              >
+                {signInError}
+              </p>
+            ) : null}
             <p className="mt-4 text-center text-xs leading-relaxed text-slate-400">
               We store your Google account ID, email and name. Google&rsquo;s access and
               refresh tokens are discarded immediately after the identity check.
+            </p>
+
+            {/*
+              THE PREVIOUS SIGN-IN PATH, still live on the backend. Present so
+              that a failure in the new service is a degraded login rather than
+              no login at all, and so both can be exercised side by side while
+              the cutover is verified. Delete this together with app/auth/oauth.py.
+            */}
+            <p className="mt-3 text-center text-xs text-slate-500">
+              <a
+                data-testid="login-google-legacy"
+                href={`${API_URL}/api/auth/google/login`}
+                className="underline decoration-slate-700 underline-offset-2 transition hover:text-slate-300"
+              >
+                Having trouble? Use the previous sign-in
+              </a>
             </p>
           </div>
 

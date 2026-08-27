@@ -81,3 +81,16 @@ eval_results/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# The Better Auth service. `public/` is the SPA's build output copied in at
+# deploy time -- a build artefact of a DIFFERENT package, so committing it would
+# mean two sources of truth for the same bytes.
+auth/node_modules/
+auth/dist/
+auth/public/
+auth/.env
+
+# Skill packs installed by `npx skills add`. The real files live in
+# .agents/skills/ and ARE tracked. This directory holds ABSOLUTE symlinks into
+# one developer's checkout, so committing it would break every other clone.
+.claude/skills/

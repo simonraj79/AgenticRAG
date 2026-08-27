@@ -71,6 +71,31 @@ class Settings(BaseSettings):
     # --- Frontend ---
     frontend_url: str = "http://localhost:5173"
 
+    # --- Better Auth ---
+    # The ORIGIN the Better Auth Node service answers on. It is the SPA's origin
+    # too, and that is the entire point rather than an implementation detail:
+    # co-locating them is what makes the session cookie FIRST-PARTY. Split them
+    # onto two hosts and `onrender.com` being on the Public Suffix List makes
+    # them different SITES, which reproduces the exact login-bounce this
+    # arrangement exists to fix (CLAUDE.md, Google OAuth).
+    #
+    # Locally this is the Vite dev server, which proxies /api/auth through to
+    # the Node process -- same reason, same effect, no extra host.
+    better_auth_url: str = "http://localhost:5173"
+
+    # Empty means "do not verify `aud`", which is correct and is NOT a weakened
+    # check: `iss` is verified unconditionally and is what identifies the issuer.
+    # Setting this to a guess would be strictly worse than leaving it off --
+    # pyjwt would reject every valid token, and the symptom is a 401 on a
+    # correct login, which reads as a broken key rather than a wrong string.
+    better_auth_audience: str = ""
+
+    # Overridable only because `iss` is whatever Better Auth's `baseURL` was at
+    # sign-in time, and a deploy that changes the host mints tokens under the new
+    # one while old tokens still carry the old. Left empty it follows
+    # `better_auth_url`, which is right in every case except that migration.
+    better_auth_issuer: str = ""
+
     # --- Uploads and ingest ---
     # `app/api/documents.py` argued against exactly this setting, and it was
     # right: "a limit that can be raised by an environment variable will be
@@ -974,9 +999,30 @@ class Settings(BaseSettings):
         return {"ssl": ctx}
 
     @property
+    def better_auth_jwks_url(self) -> str:
+        """Where the public keys live. Derived, never configured separately.
+
+        A second setting here would be a second thing to get wrong, and the
+        failure is silent in the worst way: keys fetched from one deployment
+        verifying tokens minted by another means every login 401s while both
+        services report healthy.
+        """
+        return f"{self.better_auth_url.rstrip('/')}/api/auth/jwks"
+
+    @property
+    def better_auth_expected_issuer(self) -> str:
+        """The `iss` a token must carry. Falls back to the base URL."""
+        return (self.better_auth_issuer or self.better_auth_url).rstrip("/")
+
+    @property
     def cors_origins(self) -> list[str]:
         origins = {self.frontend_url.rstrip("/")}
         origins.add("http://localhost:5173")
+        # The Better Auth origin serves the SPA, so it is the origin every
+        # authenticated XHR now comes FROM. Usually identical to frontend_url;
+        # added explicitly so that configuring them apart does not silently
+        # produce a CORS failure that reads as "the API is down".
+        origins.add(self.better_auth_url.rstrip("/"))
         return sorted(o for o in origins if o)
 
 
