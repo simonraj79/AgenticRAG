@@ -234,22 +234,64 @@ Each was found by measuring or by looking, not by reading source, and each is no
    and the code comment asserted this worked. `FOCUS_PROXY` in `lib/styles.ts` moves the ring
    to the element you can see.
 
-## 10. Honest remainders
+## 10. Remainders — all closed, 2026-08-28
 
-- **`ui_check.py` A10 fails intermittently** with a 502 on `/api/auth/*`. Environmental: the
-  Better Auth Node service on `:3000` is not running in local development
-  (`curl localhost:5173/api/auth/session` → 502 while the backend answers 200). Seen both
-  passing and failing on unchanged code. `wizard_check.py` buckets this as NOT MEASURED naming
-  the service; `ui_check.py` predates that distinction. **Not fixed here on purpose** — editing
-  a shared regression harness so this branch reads greener is the wrong instinct.
-- **`Drawer`'s `subheader` region is unused.** It was built for the step rail, and the rail
-  ended up `sticky` inside the scrolling body instead, because using the region would have
-  meant lifting `step`, `furthest` and `goTo` out of the wizard and into the dashboard so a
-  generic layout primitive could own a wizard's navigation state. Kept rather than deleted: it
-  is a reasonable affordance and the next drawer with fixed chrome will want it. If nothing
-  claims it, delete it — an unused prop named for a purpose solved another way misleads.
-- **`topNWarning` exists in the wizard and not in the settings sheet.** That is behaviour, not
-  copy, so wiring the sheet to `tunables.ts` did not change it. Worth a decision; not taken here.
-- **The persona grid still clamps 6 of 9 pedagogy paragraphs to three lines.** Now deliberate
-  rather than incidental: the clamp lifts on the selected card, so it is progressive disclosure
-  at 297px rather than truncation at 159px.
+The six items §10 originally listed, and what each became.
+
+| # | remainder | outcome |
+|---|---|---|
+| 1 | The reset notice never announced | **Fixed.** One `role="status" aria-live="polite"` element, always mounted in the form, whose CONTENT changes. It is the first child of the always-mounted step body, outside every step conditional, so it survives the 3 -> 2 -> 3 round trip the notice is written during. `wizard_check.py` W15 |
+| 2 | `Drawer.subheader` was dead code | **Deleted** — prop, type member, render branch and testId. The wizard's rail comment stays, reworded to past tense: it records that the region existed and was removed for want of a caller, so the decision survives without naming a prop |
+| 3 | `ui_check.py` A10 misreported an environment failure | **Fixed**, by porting `wizard_check.py`'s console handling: capture the message URL, and bucket a 5xx on `/api/auth/*` as NOT MEASURED naming the service. Proven in BOTH directions — green on an injected 502, still red on an injected `console.error` |
+| 4 | Step 3 in Customize runs to ~2.9 screens | **Attempted and REVERSED.** See §11 |
+| 5 | `shortlistWarning` existed in the wizard and not the sheet | **Fixed**, and more than the remainder claimed: both predicates moved into `lib/tunables.ts` as `overlapWarning` / `shortlistWarning`, interpolating `TUNABLES` labels so a relabel cannot leave a message naming a control nobody can see. Both surfaces read them; six unit cases pin them |
+| 6 | Below `sm` the dialog was a centred card | **Fixed.** `h-full w-full` with the cap, radius and border as `sm:`-only, so below the breakpoint they do not exist rather than being overridden — there is no specificity tie to lose. Measured 390x844 and 320x844: full-bleed, radius 0. `wizard_check.py` W16 |
+
+The persona grid's three-line clamp on unselected cards is unchanged and deliberate: it lifts on
+the selected card, so at 297px it is progressive disclosure rather than the truncation it was at
+159px.
+
+## 11. The one that was reversed, and why that is the interesting entry
+
+**Collapsing the "Recorded, but changes nothing today" group was my judgement call, it shipped,
+and the acceptance criteria killed it within one run.**
+
+The reasoning for it was that two controls no code path reads are the safest thing in the flow to
+tuck away, and that the step runs to nearly three screens with the controls shown. `wizard_check.py`
+W7 answered immediately and by name: it asserts that every one of the ten parameters carries a
+visible explanation **in the mode the user lands in**, and it went red on `score_threshold` and
+`max_rewrites`. The two criteria are not both satisfiable, because collapsing a group is *precisely*
+the act of taking its explanations off the arrival screen — which is the defect this step was
+rebuilt to fix, and which W7 exists to prevent returning.
+
+W7 encodes the request the change set was made for. The collapse was polish about length. Requirement
+beat polish, and `07-workspace-shell.md` had already ruled on these two specific controls anyway:
+*"Hiding them would be tidier and worse: the trace panel prints `score_threshold` on every turn."*
+A disclosure is a softer hiding in the same direction, so the collapse was reversing a measured
+decision on the strength of a length somebody disliked.
+
+**Three things fall out that are worth more than the fix.**
+
+- **The criterion did its job against its own author.** W7 was written earlier in this change set,
+  watched failing ten times over, and then refused a later change by the same person that would have
+  partially undone it. That is what an acceptance criterion is for, and it only worked because it
+  asserts the OUTCOME the user asked for rather than the implementation that delivered it.
+- **The collapse would have silently blunted W6, with nothing going red.** W6 focuses
+  `param-max-rewrites-number` to prove that focusing a control low in a tall panel cannot displace
+  the dialog. That control moved inside the collapsed group, and the content of a closed `<details>`
+  is in the DOM but not rendered — so `.focus()` becomes a no-op and W6 keeps passing while no longer
+  testing its own premise. **A feature change can invalidate a distant case without failing it.**
+- **A rect is not a visibility test.** W17's predicate read `getBoundingClientRect().height > 0` on
+  the stated premise that closed `<details>` content measures 0x0. Measured in the Chromium bundled
+  here (148.0.7778.96) it does not — closed content reported 60x1280 with `checkVisibility()` false,
+  while W7's `innerText` gate got the same page right in the same drive. Use `checkVisibility()` or
+  text, never a rect.
+
+W17 is **deleted** rather than skipped or left red: a case that cannot pass is noise, and a skipped
+one claims the behaviour is merely unmeasured when it was in fact decided against. The record of
+what it found lives where it stood, in `scripts/wizard_check.py`.
+
+**Length was not otherwise addressed, and that is the accepted cost.** The long measured prose
+already sits behind a per-parameter "Why this matters", and the mode people actually land in shows
+facts rather than controls. Nine-tenths of the three screens is ten controls each carrying a real
+explanation, which is the thing that was asked for.

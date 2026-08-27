@@ -4,8 +4,8 @@ Every row names a harness file and a case id. Cases marked **caught a real defec
 watched failing before the code that satisfies them existed; that is the difference between
 a criterion and a wish.
 
-**Final state:** `scripts/wizard_check.py --live` **43 passed, 0 failed, 1 not measured**.
-`npm test` **73 passed** (was 68). `scripts/ui_check.py` **14 passed, 0 failed, 1 not
+**Final state, 2026-08-28:** `scripts/wizard_check.py --live` **50 passed, 0 failed, 1 not
+measured**. `npm test` **79 passed** (was 68). `scripts/ui_check.py` **14 passed, 0 failed, 1 not
 measured**. `scripts/palette_check.py` PASS. `tsc --noEmit` and `npm run build` clean.
 
 ---
@@ -23,6 +23,9 @@ measured**. `scripts/palette_check.py` PASS. `tsc --noEmit` and `npm run build` 
 | W10 | the ten values shown on Review are the ten values STORED on the row, read back over the API | 10/10 columns agree |
 | W12 | every control >= 44px tall, >= 44px wide when icon-only, at 1440/390/320 on all four steps | **caught a real defect** — the step-rail buttons were 36px wide below `sm`, on the flow's primary navigation, on phones |
 | W13 | zero console errors across the whole drive | 0 errors |
+| W14 | the selected persona is filled AND outlined differently from an unselected one | **caught a real defect** — `${CARD} border-accent bg-accent-soft` tied on specificity with `CARD`'s own `border-line` and `bg-surface`, so NEITHER rendered and choosing a persona changed nothing visible. Asserting the two halves **separately** then caught a half-fix: it went green on the fill while still red on the border |
+| W15 | a live region is mounted in the wizard BEFORE the reset notice has text, and the same element later carries it | **failed twice** against the old code — no region existed until the notice did, so it arrived already containing its text and would never have announced |
+| W16 | full-bleed sheet below `sm`, centred card at 1440 | **failed at 390 and 320.** Its 1440 row is green today and is a guard, not evidence: without it, "make every viewport full-bleed" satisfies the case and deletes the centred dialog |
 
 W2's limitation is recorded rather than papered over: **a green W2 is not evidence that
 container queries shipped.** The width change alone lifted every track over the floor. The
@@ -44,6 +47,25 @@ were all invisible to a green suite in this very file.
 | CW5 | the two inert parameters stay visible, and no longer claim to do anything | asserts the absence of the two false sentences specifically |
 | CW6 | Review's `data-value` carries the unformatted stored value | asserts raw, not formatted text — a case matching "640 tokens" breaks the next time a unit is pluralised, and fails as though data were lost |
 
+## A case that was written, went green, and was then DELETED
+
+**W17** asserted that the "recorded, but changes nothing today" group arrived collapsed. That
+behaviour shipped and was reversed within one run — see [PLAN.md §11](PLAN.md). W7 and a collapsed
+group are not both satisfiable, because collapsing is precisely the act of taking explanations off
+the arrival screen.
+
+It is deleted rather than skipped or left red: a case that cannot pass is noise, and a skipped one
+claims the behaviour is unmeasured when it was decided against. Two findings from its short life
+are kept in `scripts/wizard_check.py` where it stood, because both are about harnesses generally:
+
+- **Its first draft went green against code with no group disclosure at all**, by finding the first
+  per-parameter "Why this matters" `Reveal` and opening that instead. A structural assertion must
+  resolve the SPECIFIC element it means, never the first of its kind in the subtree.
+- **Its visibility predicate used a bounding rect**, on the premise that closed `<details>` content
+  measures 0x0. In the Chromium bundled here it reported 60x1280 with `checkVisibility()` false,
+  while W7's `innerText` gate got the same page right in the same drive. Use `checkVisibility()` or
+  text, never a rect.
+
 ## Cases that were considered and NOT written
 
 - **A case asserting `overflow-clip` on the panel.** It would pass a future refactor that kept
@@ -56,7 +78,9 @@ were all invisible to a green suite in this very file.
 
 ## Known not-measured, with the reason
 
-- **W13 / `ui_check.py` A10, the Better Auth proxy.** `vite.config.ts` forwards `/api/auth/*`
+- **W13, the Better Auth proxy.** (`ui_check.py` A10 now buckets this the same way — fixed
+  2026-08-28, and proven in both directions: NOT MEASURED on an injected 502, still FAIL on an
+  injected `console.error`.) `vite.config.ts` forwards `/api/auth/*`
   to the Node service on `:3000`, which is not running in local development, so Vite answers
   502 and the SPA logs it. Verified environmental, not a regression:
   `curl localhost:5173/api/auth/session` → **502** while `curl localhost:8000/api/health` →

@@ -1220,6 +1220,455 @@ def evaluate_selection(results: "Results", seen) -> None:
     )
 
 
+#: W15. The reset notice ANNOUNCES.
+#:
+#: No harness can hear a screen reader, so this asserts the one structural fact
+#: that decides whether anything is spoken: an `aria-live` region announces a
+#: CHANGE to its contents, and a region that arrives on the page already
+#: holding its text has changed nothing. A notice rendered as
+#: `{resetNotice && <p role="status">...}` is mounted and populated in the same
+#: commit and is therefore silent -- which means the sentence explaining that
+#: customised tuning was discarded has almost certainly never been spoken once,
+#: and that notice exists precisely to stop a silent reset.
+#:
+#: Two reads, and the second is only meaningful because of what the first
+#: leaves behind. The first stamps every live region in the wizard with a
+#: PROPERTY on the DOM node -- never a `data-` attribute, which React owns and
+#: overwrites on its next commit. A property dies with the NODE, so "the same
+#: element later carries the text" and "a new element appeared holding the
+#: text" come back as different answers instead of both reading as a live
+#: region with a notice in it.
+#:
+#: The two failures are reported apart on purpose. "No live region present
+#: before the notice" sends its reader to add one; "a live region appeared with
+#: the text already in it" sends them to lift the region out of the conditional
+#: it is trapped in. Collapsing them into "the notice does not announce" would
+#: name the symptom and neither cause.
+LIVE_REGION_STAMP = "wizard-check-w15"
+
+#: The sentence the wizard writes when a persona change discards tuning. It is
+#: the SECOND road to the element, never the first -- see the JS below.
+RESET_NOTICE_PATTERN = r"tuning reset to"
+
+LIVE_REGION_STAMP_JS = r"""
+({ stamp }) => {
+  const wizard = document.querySelector('[data-testid="create-agent-wizard"]');
+  if (!wizard) return null;
+
+  // Scanned wide, judged narrow. An assertive region would announce too, and
+  // would be the wrong choice for this notice for the reason `ParamSlider`
+  // already writes down about the overlap warning -- a value-driven message
+  // re-renders on every step of a drag, and an assertive region interrupts for
+  // the length of the gesture. Finding one anyway is a different bug from
+  // finding none, and a scan that looked only for `polite` would report the
+  // two identically.
+  const found = [...wizard.querySelectorAll('[role="status"], [role="alert"], [aria-live]')];
+
+  return {
+    regions: found.map((el) => {
+      // An expando property, not `dataset`. React writes the attributes it
+      // renders and would wipe a `data-` marker on its next commit; a property
+      // on the node survives every re-render and dies with the node. That is
+      // the whole discrimination this case rests on.
+      el.__wizardCheckLiveRegion = stamp;
+      const r = el.getBoundingClientRect();
+      return {
+        testid: el.dataset.testid || null,
+        tag: el.tagName.toLowerCase(),
+        role: el.getAttribute('role'),
+        ariaLive: el.getAttribute('aria-live'),
+        chars: (el.innerText || '').trim().length,
+        // Reported rather than asserted. An empty live region must not draw a
+        // bordered box, and the honest floor for "draws nothing" is not a
+        // number this file can pick -- an `sr-only` region is 1px tall and
+        // correct. A height printed beside a zero character count is enough
+        // for a reader to see a box that should not be there.
+        height: +r.height.toFixed(1),
+      };
+    }),
+  };
+}
+"""
+
+LIVE_REGION_READ_JS = r"""
+({ stamp, pattern }) => {
+  const wizard = document.querySelector('[data-testid="create-agent-wizard"]');
+  if (!wizard) return null;
+  const re = new RegExp(pattern, 'i');
+
+  // The testid is the first road and the copy is the second, because the two
+  // fail in opposite directions. A rewrite that keeps the testid and rewrites
+  // the sentence breaks the regex; a rewrite that moves the notice into a
+  // region carrying a different testid breaks the selector. With both, "no
+  // notice appeared" is a finding about the product rather than about which
+  // string this file happened to hardcode.
+  let notice = wizard.querySelector('[data-testid="tuning-reset-notice"]');
+  if (!notice || !re.test((notice.innerText || '').trim())) {
+    const hits = [...wizard.querySelectorAll('*')].filter((el) => {
+      const r = el.getBoundingClientRect();
+      return r.height > 0 && re.test((el.innerText || '').trim());
+    });
+    // Smallest by descendant count. Every ancestor of the notice contains the
+    // same sentence and matches the same regex, and an ancestor is the wrong
+    // element to ask "is this the live region" of -- a region wrapped around
+    // the whole step would answer yes while announcing the entire form.
+    hits.sort((a, b) =>
+      a.getElementsByTagName('*').length - b.getElementsByTagName('*').length);
+    if (hits.length) notice = hits[0];
+  }
+  if (!notice || !re.test((notice.innerText || '').trim())) {
+    return { noticeFound: false };
+  }
+
+  // Climb to the nearest live region, the notice itself included, and stop at
+  // the wizard. A region ABOVE the wizard belongs to the drawer or the page and
+  // would announce every step change as well as this sentence -- a second
+  // announcement for something the focus move to each step's heading already
+  // says.
+  let region = null;
+  for (let node = notice; node; node = node.parentElement) {
+    if (node.matches('[role="status"], [role="alert"], [aria-live]')) { region = node; break; }
+    if (node === wizard) break;
+  }
+
+  return {
+    noticeFound: true,
+    noticeText: (notice.innerText || '').trim().slice(0, 72).replace(/\s+/g, ' '),
+    noticeTestid: notice.dataset.testid || null,
+    region: region
+      ? {
+          stamped: region.__wizardCheckLiveRegion === stamp,
+          testid: region.dataset.testid || null,
+          tag: region.tagName.toLowerCase(),
+          role: region.getAttribute('role'),
+          ariaLive: region.getAttribute('aria-live'),
+          isWizard: region === wizard,
+        }
+      : null,
+  };
+}
+"""
+
+
+def produce_reset_notice(page: Page) -> dict:
+    """Drive the one sequence that writes the notice, stamping first.
+
+    Every step of it is required and none of it is a shortcut. The notice is
+    gated on `tuningTouched`, which only a real edit sets -- deliberately, so
+    that browsing personas with the toggle left on does not announce a loss to
+    somebody who has customised nothing. And it is gated on the PREVIOUS
+    render's flags, so the edit has to happen before the persona changes rather
+    than after. Hence: land on the tuning step in Customize, move a control, go
+    back a step, choose a different persona, come forward again.
+
+    Both preconditions are verified rather than assumed. If the slider did not
+    move or the persona did not change, no notice was ever owed and its absence
+    says nothing -- a fixture failure, reported as NOT MEASURED. If both held
+    and no notice appeared, the reset happened silently, which is the defect
+    itself and is reported as a FAIL. Trigger on the absence of the outcome,
+    never on the presence of an error.
+    """
+    seen: dict = {"blocked": None, "before": None, "after": None}
+
+    page.set_viewport_size({"width": DESKTOP[0], "height": DESKTOP[1]})
+    go_to_step(page, 3)
+    set_tuning_mode(page, True)
+    page.wait_for_timeout(200)
+
+    seen["before"] = page.evaluate(LIVE_REGION_STAMP_JS, {"stamp": LIVE_REGION_STAMP})
+    if seen["before"] is None:
+        seen["blocked"] = "the wizard was not on screen"
+        return seen
+
+    # `retrieve_k`, and not the overlap, for two reasons that both outlive this
+    # run: the overlap is the one control whose rule BLOCKS Next, so moving it
+    # can strand the drive on step 3; and `retrieve_k` sits in the group that
+    # takes effect on the next answer, which is a group that stays expanded.
+    param = page.locator('[data-testid="param-retrieve-k"]')
+    if param.count() == 0:
+        seen["blocked"] = "no retrieve_k control in Customize mode"
+        return seen
+    was = param.get_attribute("data-value")
+
+    # `focus()` and an arrow key, never a click. Clicking a range input sets it
+    # to the position clicked, so a click is an edit whose size depends on where
+    # the track happens to be -- and one that lands on the value already
+    # selected changes nothing at all while looking like an interaction.
+    page.focus('[data-testid="param-retrieve-k-range"]')
+    page.keyboard.press("ArrowRight")
+    page.wait_for_timeout(150)
+    if param.get_attribute("data-value") == was:
+        page.keyboard.press("ArrowLeft")
+        page.wait_for_timeout(150)
+    now = param.get_attribute("data-value")
+    if now == was:
+        seen["blocked"] = f"the retrieve_k slider did not move off {was!r}"
+        return seen
+    seen["edit"] = f"retrieve_k {was} -> {now}"
+
+    go_to_step(page, 2)
+    cards = page.locator('[data-testid="template-card"]')
+    count = cards.count()
+    if count < 2:
+        seen["blocked"] = f"{count} persona card(s); a change needs two"
+        return seen
+    chosen = -1
+    for index in range(count):
+        if cards.nth(index).get_attribute("data-selected") == "true":
+            chosen = index
+            break
+    target = 0 if chosen != 0 else 1
+    cards.nth(target).click()
+    page.wait_for_timeout(300)
+    if cards.nth(target).get_attribute("data-selected") != "true":
+        seen["blocked"] = f"clicking persona {target} did not select it"
+        return seen
+    seen["persona"] = f"persona {chosen} -> {target}"
+
+    go_to_step(page, 3)
+    page.wait_for_timeout(250)
+    seen["after"] = page.evaluate(
+        LIVE_REGION_READ_JS,
+        {"stamp": LIVE_REGION_STAMP, "pattern": RESET_NOTICE_PATTERN},
+    )
+    return seen
+
+
+def evaluate_live_region(results: "Results", seen: dict) -> None:
+    """W15, the two halves of "it is able to announce"."""
+    print("\n== W15  the reset notice announces ==")
+
+    if seen.get("blocked"):
+        for half in (
+            "W15 a live region is mounted before the notice has text",
+            "W15 the notice's text lands in that same live region",
+        ):
+            results.unmeasured(half, f"no notice was owed: {seen['blocked']}")
+        return
+
+    before = seen["before"]["regions"]
+    empty = [r for r in before if r["chars"] == 0]
+    shape = ", ".join(
+        f"{r['testid'] or r['tag']}(role={r['role']}, live={r['ariaLive']}, "
+        f"{r['chars']}ch, {r['height']}px)"
+        for r in before
+    )
+    # Polite, and stated as an accepted SET rather than read off `role` alone:
+    # `role="status"` carries an implicit `aria-live="polite"`, so the two
+    # spellings are one promise and only one of them is visible in the markup.
+    polite = [
+        r
+        for r in empty
+        if r["role"] == "status" or (r["ariaLive"] or "").lower() == "polite"
+    ]
+    results.check(
+        "W15 a live region is mounted before the notice has text",
+        bool(polite),
+        (
+            f"{len(before)} live region(s) in the wizard, {len(empty)} of them empty"
+            + (f": {shape}" if before else "; nothing carries role=status or aria-live")
+        ),
+    )
+
+    after = seen.get("after")
+    if not after or not after.get("noticeFound"):
+        results.check(
+            "W15 the notice's text lands in that same live region",
+            False,
+            f"the tuning WAS reset ({seen.get('edit')}, {seen.get('persona')}) "
+            "and no notice appeared anywhere: the reset was silent",
+        )
+        return
+
+    region = after.get("region")
+    if region is None:
+        results.check(
+            "W15 the notice's text lands in that same live region",
+            False,
+            # `ascii()` on anything read off the page: this sentence is written
+            # by the product and a curly apostrophe in it would be mangled by
+            # the console codepage into a row nobody can read.
+            f"the notice rendered in {after['noticeTestid'] or 'an untagged element'} "
+            f"({ascii(after['noticeText'])}) with no live region anywhere above it",
+        )
+        return
+
+    results.check(
+        "W15 the notice's text lands in that same live region",
+        bool(region["stamped"]) and not region["isWizard"],
+        (
+            f"region {region['testid'] or region['tag']} "
+            f"(role={region['role']}, live={region['ariaLive']}) "
+            + (
+                "was on the page before the notice was"
+                if region["stamped"]
+                else "was NOT on the page before the notice was, so it arrived "
+                "already containing its text and announces nothing"
+            )
+            + (
+                "; it is the whole wizard, which would announce every step change"
+                if region["isWizard"]
+                else ""
+            )
+        ),
+    )
+
+
+#: W16. Below `sm` the dialog is a full-bleed SHEET, not a centred card.
+#:
+#: `17-create-agent-ux/PLAN.md` section 2 defends centring against the inline-page
+#: measurement in `05-ui-ux-overhaul.md` with the sentence "below sm the panel
+#: stays full-bleed, so the phone case 05 fixed is bit-identical". The panel is
+#: `h-fit max-h-[...] rounded-lg border`, so a short step renders as a floating
+#: card on a phone and the claim is not true. A defence resting on a property
+#: nothing asserts is a defence that expires quietly.
+#:
+#: Measured on step 1, which is the SHORTEST step, and that choice is the case.
+#: On the tuning step the content is taller than a phone, the panel hits its cap
+#: and covers nearly the whole viewport whatever its sizing rules say -- so a
+#: full-bleed assertion taken there would pass a floating card on the strength
+#: of how much text happened to be inside it.
+#:
+#: The desktop half asserts the OPPOSITE, and without it the case has a trivial
+#: satisfying answer: make every viewport full-bleed and lose the centred dialog
+#: this whole change set exists to build.
+SHEET_JS = r"""
+() => {
+  const panel = document.querySelector('[data-testid="create-agent-panel"]');
+  if (!panel) return null;
+  const r = panel.getBoundingClientRect();
+  const s = getComputedStyle(panel);
+  const px = (v) => +parseFloat(v || '0').toFixed(1);
+  return {
+    top: +r.top.toFixed(1),
+    left: +r.left.toFixed(1),
+    right: +r.right.toFixed(1),
+    bottom: +r.bottom.toFixed(1),
+    width: +r.width.toFixed(1),
+    height: +r.height.toFixed(1),
+    vw: innerWidth,
+    vh: innerHeight,
+    radii: [
+      px(s.borderTopLeftRadius), px(s.borderTopRightRadius),
+      px(s.borderBottomRightRadius), px(s.borderBottomLeftRadius),
+    ],
+    // Reported, not asserted. A border-box panel is exactly `innerWidth` wide
+    // with or without a border, so the rect cannot see one -- and the sheet is
+    // specified with no outer border, so the number is printed where a reader
+    // will notice a stray one.
+    borders: [
+      px(s.borderTopWidth), px(s.borderRightWidth),
+      px(s.borderBottomWidth), px(s.borderLeftWidth),
+    ],
+  };
+}
+"""
+
+#: One pixel of slack, the tolerance every other geometric assertion in this
+#: file already carries. Sub-pixel layout rounding is not a defect, and a case
+#: that fails on 0.4px teaches its reader to re-run rather than to read.
+SHEET_SLACK = 1.0
+
+
+def measure_sheet(page: Page) -> dict:
+    """The panel's box at three viewports, always on step 1. See SHEET_JS."""
+    seen: dict = {}
+    for vp in (PHONE, NARROW, DESKTOP):
+        page.set_viewport_size({"width": vp[0], "height": vp[1]})
+        go_to_step(page, 1)
+        # The panel's transition is on `transform` and `opacity` for the centred
+        # placement, and a resize re-runs the layout underneath it. Measured
+        # during that, the rect is a real box in the wrong place.
+        page.wait_for_timeout(350)
+        seen[vp] = page.evaluate(SHEET_JS)
+    return seen
+
+
+def evaluate_sheet(results: "Results", seen: dict) -> None:
+    """W16, the sheet below `sm` and the card above it."""
+    print("\n== W16  below sm the dialog is a full-bleed sheet ==")
+
+    for vp in (PHONE, NARROW):
+        blob = seen.get(vp)
+        label = f"W16 full-bleed sheet at {vp[0]}x{vp[1]}"
+        if not blob:
+            results.unmeasured(label, "the panel was not on screen")
+            continue
+        gaps = {
+            "top": blob["top"],
+            "left": blob["left"],
+            "width": blob["width"] - blob["vw"],
+            "height": blob["height"] - blob["vh"],
+        }
+        covers = all(abs(v) <= SHEET_SLACK for v in gaps.values())
+        radius = max(blob["radii"])
+        results.check(
+            label,
+            covers and radius <= 0.5,
+            f"rect {blob['width']}x{blob['height']} at ({blob['left']},{blob['top']}) "
+            f"of {blob['vw']}x{blob['vh']}, radius {blob['radii']}, "
+            f"border {blob['borders']}"
+            + (
+                ""
+                if covers
+                else "; off by "
+                + ", ".join(
+                    f"{k} {v:+.1f}" for k, v in gaps.items() if abs(v) > SHEET_SLACK
+                )
+            ),
+        )
+
+    blob = seen.get(DESKTOP)
+    label = f"W16 centred card at {DESKTOP[0]}x{DESKTOP[1]}"
+    if not blob:
+        results.unmeasured(label, "the panel was not on screen")
+        return
+    inset = {
+        "top": blob["top"],
+        "left": blob["left"],
+        "right": blob["vw"] - blob["right"],
+        "bottom": blob["vh"] - blob["bottom"],
+    }
+    boxed = all(v > SHEET_SLACK for v in inset.values())
+    radius = min(blob["radii"])
+    results.check(
+        label,
+        boxed and radius > 0.5,
+        f"gaps { {k: round(v, 1) for k, v in inset.items()} }, radius {blob['radii']}"
+        + ("" if boxed else "; the card is touching an edge, so it is not centred"),
+    )
+
+
+#: W17 WAS HERE, and it is gone because the behaviour it asserted was reversed.
+#:
+#: It checked that the "recorded, but changes nothing today" group arrived
+#: collapsed. That shipped, and W7 -- which asserts that every one of the ten
+#: parameters carries a visible explanation IN THE MODE THE USER LANDS IN --
+#: went red on `score_threshold` and `max_rewrites` the moment it did. The two
+#: criteria are not both satisfiable: collapsing a group is precisely the act of
+#: taking its explanations off the arrival screen, and W7 is the case that
+#: encodes what this whole step was rebuilt to fix.
+#:
+#: W7 won, so the collapse was reverted and W17 has no subject left. It is
+#: DELETED rather than skipped or left red -- a case that cannot pass is noise,
+#: and a skipped one is a claim that the behaviour is merely unmeasured when in
+#: fact it was decided against.
+#:
+#: Two things it found before it died are worth keeping, because both are about
+#: this harness rather than about the product:
+#:
+#: - Its first draft asked "is there a <summary> here, and does clicking it
+#:   reveal something". That went GREEN against code with no group disclosure at
+#:   all, because it found the first per-parameter "Why this matters" Reveal and
+#:   opened that instead. A structural assertion has to resolve the SPECIFIC
+#:   element it means, never the first one of its kind in the subtree.
+#: - Its visibility predicate read `getBoundingClientRect().height > 0`, on the
+#:   stated premise that a closed <details>'s content measures 0x0. Measured in
+#:   the Chromium bundled here (148.0.7778.96), it does NOT -- closed content
+#:   reported 60x1280 with `checkVisibility()` false. W7's own gate is
+#:   `innerText`, which is rendering-aware and got the same page right in the
+#:   same drive. Use `checkVisibility()` or text, never a rect, to ask whether
+#:   something is on screen.
 def run(headed: bool, live: bool) -> int:
     results = Results()
     created_id: str | None = None
@@ -1332,6 +1781,14 @@ def run(headed: bool, live: bool) -> int:
                     EXPLANATION_JS, {"aliases": TUNABLE_ALIASES, "floor": HELP_FLOOR}
                 ),
             )
+
+            # W15 before W16, and both before W10, which submits
+            # the form and takes the wizard off the page. W15 is the only one
+            # that leaves state behind -- a different persona and a notice on
+            # the tuning step -- and W16's first move is back to step 1, which
+            # is also the click that clears the notice.
+            evaluate_live_region(results, produce_reset_notice(page))
+            evaluate_sheet(results, measure_sheet(page))
 
             if live:
                 created_id = run_w10(results, page, agent_name)

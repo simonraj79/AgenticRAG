@@ -31,13 +31,12 @@
  * the sibling geometry below are shared verbatim, so a centred dialog cannot
  * drift away from behaviour the right-hand one has already had debugged.
  *
- * **Three regions, and the BODY is the scroll container, not the panel.** The
- * header (title, close) and the optional subheader (a step rail) are `shrink-0`
- * and never move; everything else scrolls inside the body. That is what stops a
- * long step scrolling away the only thing that says where you are and the only
- * way back. Read the comment on the body element before touching its margins:
- * they are load-bearing for the sticky footers two different children park at
- * its bottom edge.
+ * **Two regions, and the BODY is the scroll container, not the panel.** The
+ * header -- title and close -- is `shrink-0` and never moves; everything else
+ * scrolls inside the body, which is what stops a long step scrolling the way
+ * out off the top of the screen. Read the comment on the body element before
+ * touching its margins: they are load-bearing for the sticky footers two
+ * different children park at its bottom edge.
  */
 
 import { useId, useRef } from "react";
@@ -71,11 +70,29 @@ const WIDTH_CLASS = {
  * become one. The floor is the content's own intrinsic height, so the panel can
  * never be shorter than what is inside it; the cap only ever takes height away,
  * and the body's `min-h-0 flex-1 overflow-y-auto` absorbs the difference.
+ *
+ * **Below `sm` the centred panel is a full-bleed sheet, and that is what lets
+ * centring be a desktop-only change.** `05-ui-ux-overhaul.md` measured overlay
+ * against inline page and settled the phone case; moving this dialog to the
+ * middle of the screen was only ever allowed to alter the 1440px one. `h-fit`
+ * plus a radius plus a hairline renders a short step as a card floating in a
+ * dimmed 390px viewport -- a different layout from the one that was measured,
+ * arriving with no measurement of its own. So the cap, the radius and the
+ * border are `sm:`-only: below the breakpoint they do not exist at all rather
+ * than being overridden, which is the same "remove the conflict" move
+ * `CARD_INTERACTIVE_UNFILLED` makes in `lib/styles.ts`.
+ *
+ * Height is the one property that genuinely needs two spellings, and
+ * `h-full sm:h-fit` is safe where two UNPREFIXED utilities are not: Tailwind
+ * orders a base utility before its own responsive variants by construction, so
+ * there is no emitted-order coin flip to lose. `h-full` here is 100% of a
+ * `fixed inset-0` parent -- a percentage, never a measured complement, so it
+ * has no arithmetic in which to come out negative.
  */
 const PLACEMENT_CLASS = {
   right: "inset-y-0 right-0 h-full w-full border-l border-line transition-transform",
   center:
-    "inset-0 m-auto h-fit max-h-[min(56rem,90dvh)] w-full rounded-lg border border-line transition-[opacity,transform]",
+    "inset-0 m-auto h-full w-full transition-[opacity,transform] sm:h-fit sm:max-h-[min(56rem,90dvh)] sm:rounded-lg sm:border sm:border-line",
 } as const;
 
 /**
@@ -99,7 +116,6 @@ export function Drawer({
   open,
   onClose,
   title,
-  subheader,
   children,
   testId,
   width = "md",
@@ -109,13 +125,6 @@ export function Drawer({
   open: boolean;
   onClose: () => void;
   title: string;
-  /**
-   * An optional second fixed region under the title -- a step rail, a filter
-   * row. It is deliberately given no margin of its own: a region that imposed
-   * one would have to be fought with a negative margin by the first caller
-   * whose rail wants to sit flush under the heading.
-   */
-  subheader?: ReactNode;
   children: ReactNode;
   testId?: string;
   width?: "md" | "lg" | "xl";
@@ -253,20 +262,8 @@ export function Drawer({
           </button>
         </div>
 
-        {/* Region 2, also fixed, and rendered only when a caller has one -- so a
-            drawer without a rail keeps exactly the header-then-body rhythm it
-            had before this region existed. */}
-        {subheader && (
-          <div
-            data-testid={testId ? `${testId}-subheader` : "drawer-subheader"}
-            className="shrink-0"
-          >
-            {subheader}
-          </div>
-        )}
-
         {/*
-          Region 3, and the only one that scrolls.
+          Region 2, and the only one that scrolls.
 
           **The negative margins are load-bearing, and they are not spacing.**
           `sticky` resolves its offset against the SCROLL CONTAINER's padding

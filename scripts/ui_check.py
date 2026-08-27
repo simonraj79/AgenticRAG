@@ -383,10 +383,47 @@ def run(headed: bool) -> int:
         page = context.new_page()
 
         console_errors: list[str] = []
-        page.on(
-            "console",
-            lambda m: console_errors.append(m.text) if m.type == "error" else None,
-        )
+        #: Gateway failures on the Better Auth proxy, held apart from real ones.
+        #: `vite.config.ts` forwards `/api/auth/*` to the Node service on :3000 so
+        #: the session cookie is first-party in development the way it is in
+        #: production; with that process not running, Vite answers 502 and the
+        #: SPA's token probe logs it. Whether that probe fires inside this drive
+        #: is a matter of timing, which is why A10 has been seen both green and
+        #: red on unchanged code -- and an intermittent red is read as flakiness
+        #: and then ignored, so it costs more than no assertion would.
+        #:
+        #: Bucketed rather than filtered, and rather than failed. That is the
+        #: argument `agentic_check.py` makes by printing `[rate]` instead of
+        #: `[FAIL]` for an upstream refusal: a suite that goes red because a
+        #: service nobody started said no teaches its reader to ignore red.
+        #: Dropping the line would be worse than either -- it would hide a real
+        #: auth failure behind an environment note.
+        gateway: list[str] = []
+
+        def record(message) -> None:
+            if message.type != "error":
+                return
+            text = message.text
+            if "favicon" in text.lower() or "[vite]" in text.lower():
+                return
+            # The URL, not only the sentence, and that is the whole reason this
+            # is a function rather than the lambda it replaced. Chromium's
+            # message for a failed subresource is "Failed to load resource: the
+            # server responded with a status of 502" and names nothing, so the
+            # text alone cannot say WHICH request failed -- a row that sends its
+            # reader hunting through four files for a request it cannot identify
+            # is a row that gets ignored. The URL is also what keeps the
+            # exemption narrow: keyed on the text "502" alone, a gateway error
+            # from anywhere at all would be excused as this one absent service.
+            url = (message.location or {}).get("url") or ""
+            line = f"{text} <- {url}" if url else text
+            gateway_status = any(code in text for code in ("502", "503", "504"))
+            if "/api/auth/" in url and gateway_status:
+                gateway.append(line)
+            else:
+                console_errors.append(line)
+
+        page.on("console", record)
 
         print("\n== opening the first agent ==")
         if not open_agent(page):
@@ -402,6 +439,9 @@ def run(headed: bool) -> int:
         # hide a genuine 401 later; resetting by TIME hides only what happened
         # before the measurements began.
         console_errors.clear()
+        # Both buckets, or the row would report on a proxy that was only ever
+        # asked for a token by a screen this file does not test.
+        gateway.clear()
 
         # -- A1 / A3 -----------------------------------------------------------
         # The same fact from both directions. Keeping both means a regression
@@ -540,17 +580,31 @@ def run(headed: bool) -> int:
         # -- A10 ---------------------------------------------------------------
         # React key warnings arrive as console errors, so this covers both. The
         # dev server's HMR chatter is filtered rather than the whole check being
-        # abandoned as noisy -- a check nobody trusts is a check nobody reads.
+        # abandoned as noisy -- a check nobody trusts is a check nobody reads,
+        # which is the argument the gateway bucket above carries one step
+        # further: the exemptions are named and everything else is red.
         print("\n== console ==")
-        real = [
-            e
-            for e in console_errors
-            if "favicon" not in e.lower() and "[vite]" not in e.lower()
-        ]
+        # Deduplicated, because one broken subresource polled on a timer prints
+        # the same line twenty times and buries the second fault underneath it.
+        unique = list(dict.fromkeys(console_errors))
+        for line in unique:
+            print(f"         {line}")
+        if gateway:
+            results.unmeasured(
+                "A10 the Better Auth proxy answered",
+                f"{len(gateway)} gateway errors on /api/auth "
+                # Wide enough that the URL survives the slice. Chromium's
+                # sentence is 79 characters before the path begins, so the
+                # narrower cut used elsewhere truncates exactly the half this
+                # row exists to print.
+                f"({list(dict.fromkeys(gateway))[0][:170]}); "
+                "start the Node service on :3000 to measure this road",
+            )
         results.check(
             "A10 zero console errors across all four viewports",
-            len(real) == 0,
-            f"{len(real)} errors" + (f": {real[0][:90]}" if real else ""),
+            not console_errors,
+            f"{len(console_errors)} errors, {len(unique)} distinct"
+            + (f": {unique[0][:180]}" if unique else ""),
         )
 
         browser.close()
