@@ -166,10 +166,45 @@ export const TEXTAREA_MONO = `${TEXTAREA} font-mono text-xs leading-relaxed`;
  * that is a whole page section want different padding, and baking one in is how
  * `p-3`/`p-4`/`p-5`/`p-6` all ended up in use with no rule.
  */
-export const CARD = "rounded-lg border border-line bg-surface";
+const CARD_SHAPE = "rounded-lg border border-line";
+
+/** Radius and border WIDTH only -- no border colour and no background, so a
+ *  card that dresses its own selected state has nothing to fight. */
+const CARD_SHAPE_BARE = "rounded-lg border";
+
+export const CARD = `${CARD_SHAPE} bg-surface`;
 
 /** A card the user can click or focus as a whole. */
 export const CARD_INTERACTIVE = `${CARD} transition hover:border-line-strong`;
+
+/**
+ * The same card, MINUS its background, for the one case that needs to supply
+ * its own.
+ *
+ * This exists because `${CARD} border-accent bg-accent-soft` does not do what
+ * it reads like -- and it is BOTH declarations, which is why the card looked
+ * entirely unselected rather than half-dressed.
+ * Both are background utilities of equal specificity, so the winner is whichever
+ * Tailwind emitted later -- measured in `dist`: `.bg-accent-soft` at byte 18350
+ * and `.bg-surface` at 19770, so the shared one wins and the local one is
+ * silently discarded. The selected persona card had carried `bg-accent-soft`
+ * since it was written, under a comment describing "an accent border and an
+ * accent-soft fill". Neither had ever rendered. The fill was found by eye; the
+ * BORDER was found only because the regression case asserted both halves
+ * separately -- a single "does it look selected" assertion would have gone
+ * green on the half that was fixed first.
+ *
+ * The tempting fix is `bg-accent-soft!`. It wins today, is invisible in the
+ * class list, and is one refactor from reverting with nothing to warn the next
+ * reader that a tie exists. Removing the conflict is what `insights.md` 22c
+ * says to do, and this is the removal: a card that supplies its own background
+ * never inherits a competing one.
+ *
+ * `ROW_ACTIVE` does NOT need this -- the rows it dresses carry no background of
+ * their own, which is why the same pair works there and is what made the card
+ * look like it should.
+ */
+export const CARD_INTERACTIVE_UNFILLED = `${CARD_SHAPE_BARE} transition hover:border-line-strong`;
 
 /** The nothing-here-yet panel. Dashed, so emptiness reads as a state rather
  *  than as a container that failed to load. */
