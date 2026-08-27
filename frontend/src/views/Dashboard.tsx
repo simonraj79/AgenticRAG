@@ -178,7 +178,12 @@ export default function Dashboard({ onOpenAgent }: { onOpenAgent: (agentId: stri
         {!loading && agents.length === 0 && (
           <EmptyState
             title="No agents yet."
-            detail="Start with New agent: pick a teaching persona, name it, then upload the documents it should answer from."
+            // The order here is the wizard's order, and the wizard's order is
+            // deliberate: naming comes first because it is the one answer that
+            // stands on its own, where choosing a persona also writes the tuning
+            // defaults two steps later. This sentence used to promise the
+            // reverse, which is a small lie about the only flow on the page.
+            detail="Start with New agent: name it, pick a teaching persona, then upload the documents it should answer from."
           />
         )}
 
@@ -188,7 +193,18 @@ export default function Dashboard({ onOpenAgent }: { onOpenAgent: (agentId: stri
               key={agent.id}
               data-testid="agent-card"
               data-agent-id={agent.id}
-              className={`${CARD_INTERACTIVE} flex flex-col gap-3 p-5`}
+              // `min-w-0` is the whole of a 3px horizontal overflow at 320px,
+              // and it is worth the sentence because the number does not point
+              // at the card. A grid item's automatic minimum size is its
+              // MIN-CONTENT, so a single unbreakable token anywhere inside --
+              // a path in a description, a long persona role -- floors the
+              // TRACK above what the container can hold: measured here as a
+              // 307.234px track inside a 288px `ul`, which the document then
+              // reports as 3px of scroll. Nothing was clipping, so nothing
+              // looked wrong. With `min-w-0` the track resolves to 288px and
+              // both cards report zero internal overflow -- the content could
+              // always shrink; the track was never letting it.
+              className={`${CARD_INTERACTIVE} flex min-w-0 flex-col gap-3 p-5`}
             >
               <div className="flex items-start gap-3">
                 <PersonaIcon icon={agent.icon} fallback={agent.name} />
@@ -270,7 +286,16 @@ export default function Dashboard({ onOpenAgent }: { onOpenAgent: (agentId: stri
         onClose={closeCreate}
         title="Create a new agent"
         testId="create-agent-panel"
-        width="lg"
+        // Centred and 60rem rather than the 34rem right-hand sheet this used to
+        // be. The sheet gave the wizard 511px of content on a 1440px monitor --
+        // and the same 511px on a 2560px one, because a right-edge panel's width
+        // is fixed and the viewport breakpoints inside it were answering a
+        // question about the WINDOW. Four steps of persona cards and parameter
+        // sliders is a task, not an inspector, and a task gets the middle of the
+        // screen. `AgentSettingsSheet` is untouched and keeps `lg` on the right,
+        // which is the layout its single column was measured against.
+        width="xl"
+        placement="center"
         initialFocusRef={wizardNameRef}
       >
         <CreateAgentWizard
