@@ -472,6 +472,88 @@ more protection than any change to the allowlist could.
 to block `matplotlib.os` must not block `matplotlib.pyplot`. Without that case, the safe-looking
 response to any future scare is to keep adding names until the tool quietly stops working.
 
+### 22b. A responsive rule keyed to the WINDOW is the wrong question inside a fixed-width box — and the DESKTOP is the case that breaks
+
+A component lived in a 544px panel and carried "three columns at >= 1024px" on a card grid. On
+every desktop that fired inside a **511px** content column: nine cards at **159px each**, most of
+their text clamped, a badge pushed outside its own border, and 40-49px of horizontal scroll **at
+1440px** against a hard requirement of zero at 320px.
+
+Three things generalise, and the second is the one that inverts a rule people already hold.
+
+- **The breakpoint answered a question nobody asked.** `min-width` media queries measure the
+  viewport; the constraint was the container. Container queries ask the right question — and their
+  scale is a *different set of numbers*, not the viewport names renamed, so a mechanical rename
+  produces a class that silently never fires.
+- **The phone layout was the correct one and the desktop layout was the degraded one.** The usual
+  warning is "a fix written for a phone must be checked at 1440". This is its mirror: a component
+  can be right at 375px and wrong at 1440px *for the same reason*. Check both directions.
+- **A bigger monitor revealed nothing** — 2560px produced exactly the same 511px. A defect that
+  does not respond to the obvious diagnostic gesture will survive every casual look.
+
+**So assert the RESOLVED track width in pixels, never the class.** The class list was correct and
+the box was wrong, so a className assertion and a viewport-only assertion are both blind to it.
+
+### 22c. When two styling rules tie on specificity, the winner is emitted order — so restructure instead of out-ranking
+
+A shared field style carried "full width"; a call site added "6rem wide". Both are width utilities
+of equal specificity, so the winner was whichever the framework emitted later — and it was the
+shared one. The input rendered **242px instead of 96px** and hung 152px past its column, which is
+what put a value on top of its neighbour's label in a shipped build.
+
+**The tempting fix is a more specific selector, and it is the wrong one**: it wins today, is
+invisible in the class list, and is one refactor from silently reverting with no way for the next
+reader to know a tie exists. Remove the conflict instead — inside a 6rem wrapper, "full width" *is*
+6rem.
+
+The same mechanism had already been recorded in this codebase for two `display` utilities. **A trap
+that recurs on a second CSS property is a property of the tool, not an incident** — treat any
+shared-string-plus-local-override of the same property as a coin flip until one of them is gone.
+
+### 22d. `overflow: hidden` clips AND creates a scrollport — and the second half will move your dialog
+
+`overflow: hidden` boxes are unscrollable by the *user* and fully scrollable by *script*, including
+the script every browser runs to reveal a focused element. A centred dialog's ancestor accumulated
+2,012px of scrollable overflow, reached `scrollTop: 70`, and dragged an 810px panel to **top -25
+with its own title clipped off the screen**. Nothing threw and nothing logged.
+
+**The trigger is ordinary keyboard use.** Moving focus to a control low in a tall panel does it,
+because the browser scrolls every ancestor scrollport to reveal the focused element.
+
+**And clipping the inner box fixed the outer one while MOVING the bug one level down** — the panel
+then accepted a scroll and slid its own heading out of view. `overflow: clip` clips *without*
+establishing a scroll container, so there is nothing left to scroll at either level.
+
+Two transferable pieces. **A fix that relocates a defect one level in is indistinguishable from a
+fix, until you re-measure at the new level.** And **assert the outcome, never the property**: a case
+asserting `overflow-clip` passes a refactor that keeps the property and loses the behaviour, and
+fails one that reaches the same outcome another way. Ask instead whether the heading moved and
+whether the close button is still reachable.
+
+### 22e. A label that names the implementation is a label only its author can read — and two of them were lying
+
+Ten controls were named after their database columns. Renaming them to plain English is the obvious
+half. Three less obvious things came out of doing it:
+
+- **Keep the technical name beside the plain one, quietly.** If the system's own logs, traces and
+  docs use `retrieve_k`, replacing it with "Shortlist size" hands the reader two vocabularies and
+  tells them about one. The tag is the join. This matters most in a product whose purpose is to
+  *teach* the domain.
+- **Explanations belong on the surface people LAND on.** The good help text existed — behind an
+  "advanced" mode nobody had to open. The default view had a value and a column name and nothing
+  else, so the one surface everybody read was the one surface with nothing to read.
+- **Two labels described behaviour no code performed.** Both parameters reached exactly one
+  consumer: a log payload. A label a user can act on that does nothing is *worse* than an opaque
+  one, because they believe they changed the system. Neither control was deleted — one of them is
+  printed in the trace every turn, so hiding it would leave the reader meeting the number there
+  with no explanation at all. They were relabelled honestly and grouped under "recorded, but
+  changes nothing today".
+
+**Group by WHEN a setting takes effect.** Ten controls in one flat list assert that all ten are the
+same kind of thing. Three did nothing until the next upload, two did nothing at all, and the rest
+were read on the next request — which is the most useful thing anyone learns from the screen, and
+the flat list hid it.
+
 ### 23. A count written in prose goes stale. Grep the mechanism instead
 
 A note read "two things run off the request thread", then three, then **four** — and the fourth had
