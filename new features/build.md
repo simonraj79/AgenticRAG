@@ -249,8 +249,8 @@ Then the step that is not a command:
 > ### Read one real output by eye. This is a phase, not advice.
 
 **"Do not stop until everything is implemented and tested" is the single most expensive
-sentence you can carry into this repo**, because a green suite here has been wrong **nine**
-separate times, in nine different modules:
+sentence you can carry into this repo**, because a green suite here has been wrong **eleven**
+separate times, in eleven different modules:
 
 | What was green | What was actually true |
 |---|---|
@@ -262,7 +262,28 @@ separate times, in nine different modules:
 | `sandbox_check` S3 + `agentic_check` S8 | A **zero-slide** deck and 28 bytes of junk both passed `PK` + `>= 10_000 bytes`. Nothing between `prs.save()` and a download had opened the file |
 | `metering_check.py`, all ten cases | `"goldenset"` was in `CALL_KINDS` with **no `meter_as` setting it** — the drafter's spend was logged and never written. Every case opened its *own* scope and asserted attribution survived, so the harness only tested call sites it wrote itself |
 | `admin_check.py`, every case | `GET /api/admin/spend` returned **500 on every request** — `date_trunc` with a bound parameter cannot satisfy `GROUP BY`. An offline harness reads source and introspects routes; it cannot execute SQL, so a query that COMPILES and does not RUN is invisible to it. In the browser it surfaced as a **CORS error**, naming the wrong subsystem entirely |
+| `agent_loop_check.py`, all 12 cases | An **offline** harness made a real, billed OpenRouter call and returned a fluent answer. The code under test narrowed with `isinstance(model, OurConcreteClass)`, so a scripted base-class stub failed the check, was **discarded**, and a live model was built in its place. Nothing raised. Caught only because one case asserted the EXACT scripted string and the stub's call count — "an answer was produced" and "no exception" both passed |
+| `agent_metrics_check.py`, every case, for two change sets | The trajectory rubric **had never produced a row**: `eval_results.trajectory IS NOT NULL` = 0 of 50, `expected_tool_use` NULL on 30 of 30, and 0 of 50 evaluated turns had ever exercised the feature being graded. Every case tested a fixture the harness itself wrote. Switching it on would have rendered four numbers that were WRONG — a failed call reading as a success, a decision the *code* made scored against the agent, and two populations pooled into one rate that could not move |
 | `agentic_check.py` S35, a LIVE scenario | The eval job wrote its new summary block with `{**run.summary, "trajectory": …}`. `eval_runs.summary` is JSONB, `RunSummary` is its only schema, and pydantic's default `extra="ignore"` **silently dropped the key when the API read it back** — stored in the column, absent from every response, no error at either end. S35 went green because a live scenario reads the COLUMN, which is the one place the defect is invisible. Found by reading the model definition |
+
+**The tenth and eleventh both arrived with the agent-evaluation work (2026-08-28) and each names a
+gap the first nine did not.**
+
+**The tenth: a test double can be SILENTLY REJECTED, and an offline harness then goes to the
+network.** A substitution point narrowed on a concrete class rather than the seam's own
+abstraction, so the stub was thrown away and production code ran in its place — billing real
+money to prove nothing. The lesson generalises to every seam that accepts an injected
+dependency: **widen the check to the abstraction, and have at least one case assert the double
+was USED** — a call count, or an exact scripted string. A harness that can quietly fall through
+to production is worse than no harness.
+
+**The eleventh: green fixtures and having-been-used are INDEPENDENT properties.** An instrument
+can be built, reviewed, harnessed and shipped with every case green, and still never have run
+against real data — at which point its cases prove the code executes, not that the number means
+anything. Before trusting any measurement apparatus, ask *how many real rows has this produced?*
+Zero is an answer, and it is the one that should stop you. The corollary is the cheap part: an
+instrument is far cheaper to repair **before** anyone has acted on a number it produced, because
+afterwards the fix means retracting a conclusion as well as a line of code.
 
 **The ninth is a variety the first eight did not cover, and it is worth naming: a WRITE and a READ that disagree about a schema, where the storage layer enforces nothing and both sides succeed.** JSONB has no shape, so the model class is the only schema there is — and a serialisation library whose default is to ignore unknown keys will discard yours without a word. The tell is that the data is provably in the database and provably absent from the API, with nothing in between raising. Anywhere a schemaless column is written through one model and read through another, the assertion has to be a ROUND TRIP; checking that the key is in the dict you just built proves nothing about what comes back.
 
@@ -407,7 +428,7 @@ feature in a numbered folder, each carrying acceptance criteria that **name a ha
 rather than describing one, plus the thing that must keep working. Write those cases and watch
 them fail before writing the feature. Build one feature per session, lowest layer first,
 handing model-decided features to [loop-prompt.md](loop-prompt.md). Verify low to high, and
-then — because a green suite in this repo has been wrong nine times in nine modules — open the
+then — because a green suite in this repo has been wrong eleven times in eleven modules — open the
 page and read one real answer. Ship with the migration already applied, then move the durable
 half into CLAUDE.md, PRD.md, EVAL.md and loop.md, so the folder you just wrote can safely
 become archive.
