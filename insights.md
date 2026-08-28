@@ -367,6 +367,64 @@ The same conflation in reverse: a provider 429 surfaced as a job stuck at `faile
 throwing — indistinguishable, on the console, from a code defect. It has happened three times here,
 and each time made a working system look broken.
 
+### 33. An instrument that has never produced a row has never been tested
+
+A trajectory-evaluation rubric had been built, reviewed, harnessed with offline
+fixtures and shipped. Every one of its cases was green. Then four database queries:
+`trajectory IS NOT NULL` = 0 of 50, `summary ? 'trajectory'` = 0 of 5, the column the
+counted half grades = NULL on 30 of 30, and 0 of 50 evaluated turns had ever exercised the
+feature being graded. **The instrument had never once run on real data.**
+
+Switching it on would have rendered four numbers that were WRONG rather than merely
+incomplete — a failed call reading as a success, a decision the *code* made scored against
+the agent, and two populations pooled into one rate that could not move.
+
+The generalisation is not "write more tests"; the fixtures were fine and they tested what
+they were handed. It is that **green fixtures and having-been-used are independent
+properties**, and only the second one exercises the join between your instrument and the
+system it measures. So: before trusting any measurement apparatus, ask *how many real rows
+has this produced?* If the answer is zero, the cases prove the code runs, not that the
+number means anything.
+
+The corollary is the cheap part: **an instrument is far cheaper to repair before anyone has
+acted on a number it produced.** Once a figure is in a report, fixing it means retracting a
+conclusion as well as a line of code.
+
+### 34. Equalise every variable, and expect the one you forget to be the decisive one
+
+Two arms of a natural experiment shared a corpus byte for byte and differed in the single
+flag under test. The obvious confounders were equalised — retrieval width, rerank depth,
+chunk size. The result: the treatment cost 72% more and ran 31% slower.
+
+The arms also had different **system prompts**. One carried a persona; the other did not.
+With that equalised too, the same question flipped from treatment-slower to
+treatment-faster. The entire headline number had been the persona.
+
+Three things follow. **Enumerate confounders from the schema, not from intuition** — the
+forgotten field was one column along from the ones that were remembered. **Assert the
+equalisation over the live objects after assigning it**, so a field added later that your
+list does not know about fails loudly instead of becoming a silently uncontrolled variable.
+And **the confounder you miss is selected for being non-obvious**, which is exactly the
+property that makes it plausible as an explanation — so a clean-looking causal story from an
+under-controlled experiment is not weak evidence, it is *misleading* evidence.
+
+### 35. A claim can be disproven by the measurement it was written to justify — withdraw it, do not soften it
+
+A module's docstring named its metric's "sharpest use": a particular proposition that no
+other metric could express. Measuring it directly, three times in each direction, showed the
+metric returns the identical verdict whether or not the proposition holds. It was not
+weakly supported. It was **inexpressible**, for a structural reason — the judge discarded
+the half of the input the claim depended on.
+
+The tempting repair is to hedge the sentence. Do not: a hedged claim still reads as a
+capability to anyone scanning, and the next person builds on it. Delete the claim, state
+plainly that it was measured false and why, and — the part that makes it stick — **add a
+case asserting the withdrawal**, so the sentence cannot quietly return in a later edit.
+
+Where possible, replace judgement with arithmetic. Here the proposition the judge could not
+express was answerable by counting rows that were already being stored, needing no model at
+all. **A claim that survives only as prose is a claim nobody can check.**
+
 ---
 
 ## III. Detectors, prompts, and getting a model to act

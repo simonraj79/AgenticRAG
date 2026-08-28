@@ -247,16 +247,34 @@ async def main() -> int:
         # `retrieve_k` 20 vs 24 and `rerank_top_n` 3 vs 5 mean the two arms read
         # different amounts of context and the comparison measures retrieval
         # width as much as the agent loop.
+        # **The SYSTEM PROMPT is equalised too, and leaving it out was a real
+        # defect in the first version of this harness.** The treatment agent
+        # carries a "Teaching orchestrator" persona with 876 characters of
+        # adaptive-instruction pedagogy; the control has none and 670. So the
+        # arms differed in TWO variables and every cost, latency and
+        # goal-accuracy delta was partly the persona.
+        #
+        # CLAUDE.md measures persona verbosity as the single biggest lever on
+        # latency -- a persona turn ran 4.5x a bare one -- and records
+        # faithfulness structurally punishing a teaching persona for the analogy
+        # and comprehension check it exists to produce. Either alone would have
+        # been enough to misattribute the result to the agent loop.
         equalised = {"retrieve_k": control.retrieve_k,
                      "rerank_top_n": control.rerank_top_n,
-                     "chunk_size": control.chunk_size}
+                     "chunk_size": control.chunk_size,
+                     "system_prompt": control.system_prompt,
+                     "persona_role": control.persona_role,
+                     "pedagogy": control.pedagogy,
+                     "generation_model": control.generation_model,
+                     "self_check_enabled": control.self_check_enabled}
         before = {k: getattr(treatment, k) for k in equalised}
+        _differed = sorted(k for k in equalised if before[k] != equalised[k])
         for key, value in equalised.items():
             setattr(treatment, key, value)
 
         print(f"  control    {control.name!r} tools={control.tools_enabled}")
-        print(f"  treatment  {treatment.name!r} tools={treatment.tools_enabled}"
-              f"  (equalised {before} -> {equalised})")
+        print(f"  treatment  {treatment.name!r} tools={treatment.tools_enabled}")
+        print(f"  equalised  {_differed or 'nothing -- the arms already matched'}")
         print(f"  questions  {len(questions)} from the control's golden set")
         print("")
 
@@ -264,6 +282,18 @@ async def main() -> int:
             "the two arms share a corpus and differ only in tools_enabled",
             control.tools_enabled is False and treatment.tools_enabled is True,
             f"control={control.tools_enabled} treatment={treatment.tools_enabled}",
+            always=True,
+        )
+        # Asserted AFTER the assignment, over the live objects, so a field added
+        # to `agents` later that this list forgets shows up as a failure rather
+        # than as a silently uncontrolled variable.
+        _still_differ = sorted(
+            k for k in equalised if getattr(treatment, k) != getattr(control, k)
+        )
+        check(
+            "every confounding field is equalised in memory before either arm runs",
+            not _still_differ,
+            f"still differ: {_still_differ}",
             always=True,
         )
 
