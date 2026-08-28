@@ -1102,6 +1102,46 @@ async def run_agent_loop(
                     tool_ms += invocation.duration_ms
                     invocations.append(invocation)
                     messages.append(message)
+
+                # **EVERY call the forced response emitted must be answered,
+                # including the malformed ones.**
+                #
+                # `_invalid_call_message`'s own docstring states the
+                # consequence: langchain-openai serialises BOTH `tool_calls`
+                # and `invalid_tool_calls` back into the next request, so an
+                # unanswered invalid call leaves the conversation malformed and
+                # the next `ainvoke` raises -- out of this function, i.e. a 500
+                # rather than a degraded answer.
+                #
+                # The main loop has always answered both lists. This branch read
+                # only `forced.tool_calls`, and the gap is reachable whenever a
+                # forced response carries one valid and one invalid call, which
+                # is an ordinary provider outcome on a route where a named
+                # `tool_choice` is honoured about one time in three.
+                # `scripts/agent_loop_check.py` case 15.
+                for position, bad in enumerate(
+                    list(getattr(forced, "invalid_tool_calls", None) or [])
+                ):
+                    invocation, message = _invalid_call_message(
+                        bad, step=step, fallback_id=f"gap_invalid_{step}_{position}"
+                    )
+                    if emit is not None:
+                        await emit(
+                            events.TOOL_CALL,
+                            {
+                                "step": step,
+                                "tool": invocation.tool,
+                                "call_id": invocation.call_id,
+                                "trigger": "gap_detected",
+                            },
+                        )
+                        await _emit_tool_outcome(emit, invocation)
+                    invocation.args = {**invocation.args, "trigger": "gap_detected"}
+                    invocation.detail = {**invocation.detail, "trigger": "gap_detected"}
+                    invocation.assistant_text = _message_text(ai)
+                    invocations.append(invocation)
+                    messages.append(message)
+
                 if forced_calls:
                     # Counted HERE, not when the trigger fired. A forced call
                     # the model declines is a real state on this route --
@@ -1131,7 +1171,21 @@ async def run_agent_loop(
                 stopped_reason=None,
             )
 
-        steps = step
+        # **`steps` is assigned only when there is a VALID call to execute, and
+        # the guard is the same invariant cases 1 and 2 defend, breached through
+        # a different door.**
+        #
+        # The early exit above fires on `not calls and not invalid`. A reply
+        # carrying ONLY `invalid_tool_calls` -- a hallucinated tool name, or
+        # arguments that fail schema validation -- falls through it and used to
+        # assign `steps = step` before running a loop body that executes nothing.
+        # The turn then reported a step in which no tool ran, which is precisely
+        # what this field exists to make impossible: it is what distinguishes
+        # "tools were on and the model chose not to use them" from "tools were
+        # off". It also corrupted the `calls_per_step` denominator the trajectory
+        # rubric reports. `scripts/agent_loop_check.py` case 14.
+        if calls:
+            steps = step
         # Tools stamp the artifacts they produce with the step that produced
         # them, and a closure has no other way to know which step it is running
         # in. Set before execution, never read after.
