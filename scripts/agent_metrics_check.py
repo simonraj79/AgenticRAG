@@ -596,6 +596,199 @@ else:
     print("  (20-23 not run: pass --live for two real judge calls)")
 
 
+
+# --------------------------------------------------------------------------
+section("54-59. INSTRUMENT REPAIRS -- numbers the rubric would render WRONG")
+# --------------------------------------------------------------------------
+# These cases were written BEFORE their fixes and watched failing. None is a new
+# feature: each pins a number the trajectory rubric renders TODAY that would be
+# confidently wrong on a real scorecard -- the failure mode this repository has
+# now recorded eleven times.
+#
+# The scorecard has never rendered any of them: `eval_results.trajectory IS NOT
+# NULL` is 0 of 50 and `eval_runs.summary ? 'trajectory'` is 0 of 5. That is
+# exactly why now is the moment. An instrument is cheapest to repair before
+# anyone has acted on a number it produced.
+
+# --- 54: a FAILED search must not read as "it searched" ---------------------
+#
+# `tool_use_verdict` filtered on TOOL_CALL alone, and `ask.run_turn` records a
+# TOOL_CALL for a call that FAILED, deliberately. So a turn in which every search
+# raised reported `searched=True, tool_use_ok=True`. The loop's own gate is
+# stricter and requires `invocation.ok` -- the rubric was the looser of the two,
+# and unfired in production only because there are zero TOOL_ERROR rows there.
+failed_only = tool_events(ok=False, content="ConnectionError: pinecone unreachable")
+verdict_failed = tool_use_verdict(
+    [*failed_only, generate_event(tool_steps=1, tool_calls=1)], expected="search"
+)
+check(
+    "54a. a turn whose only search FAILED does not report searched=True",
+    verdict_failed["searched"] is False,
+    f"searched={verdict_failed['searched']}",
+)
+check(
+    "54a. and it is not graded as satisfying expected_tool_use='search'",
+    verdict_failed["tool_use_ok"] is False,
+    f"tool_use_ok={verdict_failed['tool_use_ok']}",
+)
+# THE PAIR. An assertion that a feature does NOT fire is also passed by a feature
+# that has been deleted, so it is only ever written beside one asserting it DOES.
+verdict_ok = tool_use_verdict(
+    [*tool_events(ok=True), generate_event(tool_steps=1, tool_calls=1)],
+    expected="search",
+)
+check(
+    "54b. a turn whose search SUCCEEDED still reports searched=True",
+    verdict_ok["searched"] is True and verdict_ok["tool_use_ok"] is True,
+    f"searched={verdict_ok['searched']} ok={verdict_ok['tool_use_ok']}",
+)
+
+# --- 55: a gap-FORCED call is a code decision, not an agent decision --------
+#
+# `expected_tool_use="none"` asserts "the agent showed no reflex tool use". The
+# gap trigger re-invokes with a NAMED tool, so the CODE compelled that call.
+# Scoring it against the agent is the same category error as `refusal_pass`
+# blaming the agent for a marker list.
+forced_events = tool_events(args={"query": "vendor", "trigger": "gap_detected"})
+verdict_forced = tool_use_verdict(
+    [*forced_events, generate_event(tool_steps=1, tool_calls=1)], expected="none"
+)
+check(
+    "55a. a gap-FORCED call does not fail expected_tool_use='none'",
+    verdict_forced["tool_use_ok"] is True,
+    f"tool_use_ok={verdict_forced['tool_use_ok']} "
+    f"gap_forced={verdict_forced['gap_forced']}",
+)
+verdict_chosen = tool_use_verdict(
+    [*tool_events(), generate_event(tool_steps=1, tool_calls=1)], expected="none"
+)
+check(
+    "55b. but a MODEL-CHOSEN call still does (the pair)",
+    verdict_chosen["tool_use_ok"] is False,
+    f"tool_use_ok={verdict_chosen['tool_use_ok']}",
+)
+
+# --- 56: crashed turns must stay in the denominator -------------------------
+#
+# EVAL.md's misleading-way #1, reproduced inside the new block: each metric's
+# mean has its own denominator and the footnote does not. A turn that crashed has
+# no trajectory, and dropping it from `total` reports "8 of 8 achieved" on a
+# ten-question run.
+mixed_rows = [
+    {"goal_accuracy": 1.0, "tool_use_ok": True, "calls_per_step": 2.0},
+    {"goal_accuracy": 0.0, "tool_use_ok": False, "calls_per_step": 1.0},
+    {"error": "judge timed out"},
+    {},
+]
+summary_mixed = summarise_trajectory(mixed_rows)
+check(
+    "56. total counts EVERY row, including those that scored nothing",
+    summary_mixed["goal_accuracy"]["total"] == 4
+    and summary_mixed["goal_accuracy"]["measured"] == 2,
+    f"measured={summary_mixed['goal_accuracy']['measured']} "
+    f"total={summary_mixed['goal_accuracy']['total']}",
+)
+
+# --- 57: refusal rows must not be pooled with answerable ones ---------------
+#
+# `summarise()` separates refusals from the four RAG metrics in twenty lines of
+# comment, because a correct refusal retrieves nothing and its metrics are
+# meaningless. The trajectory block pooled them into one rate -- and refusals
+# score 1.0 near-constantly, so on a ten-question set 20% of the denominator is a
+# near-constant pass that damps any real movement.
+split_rows = [
+    {"goal_accuracy": 1.0, "expected_behaviour": "answer"},
+    {"goal_accuracy": 0.0, "expected_behaviour": "answer"},
+    {"goal_accuracy": 1.0, "expected_behaviour": "refuse"},
+    {"goal_accuracy": 1.0, "expected_behaviour": "refuse"},
+]
+summary_split = summarise_trajectory(split_rows)
+check(
+    "57a. goal accuracy is split by behaviour class",
+    "goal_accuracy_answer" in summary_split
+    and "goal_accuracy_refuse" in summary_split,
+    f"keys={sorted(k for k in summary_split if k.startswith('goal_accuracy'))}",
+)
+check(
+    "57b. and the two carry SEPARATE denominators",
+    (summary_split.get("goal_accuracy_answer") or {}).get("total") == 2
+    and (summary_split.get("goal_accuracy_refuse") or {}).get("total") == 2,
+    f"answer={summary_split.get('goal_accuracy_answer')} "
+    f"refuse={summary_split.get('goal_accuracy_refuse')}",
+)
+
+# --- 58: the counted efficiency signals ------------------------------------
+#
+# `loop.md` section 1 applied literally: a number decides it, so write the
+# branch. No model, no threshold, no new instrument of unknown validity.
+# `new_chunks` is already computed by `corpus.py` and stored on every TOOL_RESULT
+# payload -- and 8 of 22 of the model's own searches in production returned zero
+# new chunks while nothing aggregated it.
+wasteful = [
+    *tool_events(call_id="a", content="x"),
+    *tool_events(call_id="b", content="y"),
+    generate_event(tool_steps=1, tool_calls=2),
+]
+wasteful[1].payload["new_chunks"] = 2
+wasteful[3].payload["new_chunks"] = 0
+v_waste = tool_use_verdict(wasteful, expected="search")
+check(
+    "58a. a search returning zero NEW chunks is counted redundant",
+    v_waste.get("redundant_searches") == 1,
+    f"redundant_searches={v_waste.get('redundant_searches')}",
+)
+check(
+    "58b. and both searches are counted in the denominator",
+    v_waste.get("searches") == 2,
+    f"searches={v_waste.get('searches')}",
+)
+v_forced_only = tool_use_verdict(
+    [*forced_events, generate_event()], expected="search"
+)
+check(
+    "58c. self_initiated separates a model decision from a forced one",
+    v_waste.get("self_initiated") is True
+    and v_forced_only.get("self_initiated") is False,
+    f"chosen={v_waste.get('self_initiated')} forced={v_forced_only.get('self_initiated')}",
+)
+agg = summarise_trajectory(
+    [
+        {"redundant_searches": 1, "searches": 2, "self_initiated": True},
+        {"redundant_searches": 0, "searches": 1, "self_initiated": False},
+    ]
+)
+check(
+    "58d. the aggregate reports a wasted-search RATE with its denominator",
+    agg.get("redundant_searches") == 1
+    and agg.get("searches") == 3
+    and abs((agg.get("wasted_search_rate") or 0) - (1.0 / 3.0)) < 1e-9,
+    f"redundant={agg.get('redundant_searches')} searches={agg.get('searches')} "
+    f"rate={agg.get('wasted_search_rate')}",
+)
+
+# --- 59: the refusal claim this module makes is MEASURED to be false -------
+#
+# `trajectory_metrics` documented goal accuracy's "sharpest use" as the refusal
+# question -- "did it search, find nothing, and decline". Measured 3/3 each: a
+# refusal that searched and a refusal that never searched BOTH score 1.0, because
+# ragas discards the inferred goal and compares only `end_state` to the
+# reference, and every stored refusal reference is a CONTENT statement rather
+# than a process one.
+#
+# The honest repair is to withdraw the claim and report `searched` beside the
+# verdict, which 58c makes available. This case asserts the withdrawal, so the
+# claim cannot quietly return.
+_TM_SRC = (ROOT / "backend" / "app" / "eval" / "trajectory_metrics.py").read_text(
+    encoding="utf-8"
+)
+check(
+    "59. the 'searched, found nothing, declined' claim is withdrawn in source",
+    "MEASURED TO BE FALSE" in _TM_SRC,
+    "replaced by self_initiated + searches, which need no judge"
+    if "MEASURED TO BE FALSE" in _TM_SRC
+    else "the docstring still asserts a proposition measured to be inexpressible",
+)
+
 print()
 if failures:
     print(f"FAILED: {len(failures)} check(s):")
