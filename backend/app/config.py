@@ -27,6 +27,15 @@ EMBEDDING_ROUTES = ("openrouter", "google")
 # rollback on a typo is the failure this subsystem cannot report.
 STORAGE_ROUTES = ("r2", "postgres")
 
+# The only two agent runtimes `app/rag/runtime.select_runtime` implements.
+# "langchain" is `app/rag/agent_loop.run_agent_loop`, the hand-rolled loop that
+# shipped; "adk" is `app/adk/loop.run_agent_loop_adk`, a Google ADK Runner behind
+# the identical signature. Same shape and same reasoning as the two tuples above:
+# a route that falls through to a default on a typo is the failure this subsystem
+# cannot report, because BOTH runtimes answer questions correctly and the only
+# visible difference is which one did.
+AGENT_RUNTIMES = ("langchain", "adk")
+
 # The four values `storage_route == "r2"` cannot work without. Named here so the
 # validator and `scripts/create_r2_bucket.py` check one list rather than two.
 R2_REQUIRED_FIELDS = (
@@ -686,6 +695,50 @@ class Settings(BaseSettings):
     # The loop always returns an answer when it runs out; `stopped_reason`
     # records that it did.
     agent_max_tool_steps: int = 3
+
+    # --- Which agent runtime executes the generation step (change set 18) ---
+    #
+    # "langchain" -> `app/rag/agent_loop.run_agent_loop`, the loop that shipped.
+    # "adk"       -> `app/adk/loop.run_agent_loop_adk`, a Google ADK Runner.
+    #
+    # **The default stays on the measured path, and that is the whole point of a
+    # ROUTE setting.** Every number in EVAL.md was measured under the langchain
+    # loop, and the ADK runtime changes one behaviour deliberately: a fired gap
+    # trigger now ALWAYS executes its search, where `tool_choice="search_corpus"`
+    # is honoured by the provider roughly one time in three. That is more correct
+    # and it is not the same system, so flipping this is a separate, deliberate
+    # act with its own re-baseline -- never a side effect of merging the runtime.
+    #
+    # Same rollback shape as `embedding_route` and `storage_route`: one line,
+    # reversible, and with the flag on "langchain" nothing in `app/adk/` is ever
+    # imported (asserted by `scripts/adk_model_check.py` A11).
+    agent_runtime: str = "langchain"
+
+    @field_validator("agent_runtime")
+    @classmethod
+    def _validate_agent_runtime(cls, value: str) -> str:
+        """Reject a runtime this code does not implement, at load.
+
+        Exactly the argument `_validate_embedding_route` makes one screen up. A
+        free-text route read as `== "adk"` with an ELSE falling through to the
+        langchain loop means every misspelling -- `AGENT_RUNTIME=ADK`, `adk `,
+        an empty string -- silently runs the OTHER runtime while the operator
+        believes the flag took. And the failure is invisible by construction:
+        both runtimes answer the question, cite correctly, and write the same
+        trace rows. There is no error to find, only a scorecard attributed to
+        the wrong engine.
+
+        Raising here costs a startup failure that names the mistake, which is
+        the cheapest possible place to discover it.
+        """
+        cleaned = (value or "").strip()
+        if cleaned not in AGENT_RUNTIMES:
+            raise ValueError(
+                "agent_runtime must be exactly "
+                f"{' or '.join(repr(runtime) for runtime in AGENT_RUNTIMES)}, "
+                f"got {value!r}"
+            )
+        return cleaned
 
     # --- Code interpreter sandbox ---
     #

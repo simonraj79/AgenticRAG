@@ -750,10 +750,27 @@ _scoped = {
     if any("meter_as" in _callee_names(n) for _, n in ns)
 }
 
-# Fixpoint. `build_chat_model` is the seed because it is the single chokepoint
-# every chat call passes through -- the same property that let one callback meter
-# eight call sites is what makes one seed enough here.
-_unmetered = {n for n in _defs if "build_chat_model" in _calls[n]} - _scoped
+# Fixpoint. `build_chat_model` WAS the whole seed because it was the single
+# chokepoint every chat call passes through -- the same property that let one
+# callback meter eight call sites is what made one seed enough.
+#
+# **CHANGE SET 18 BROKE THAT PROPERTY, AND THE BREAK IS INVISIBLE HERE BY
+# CONSTRUCTION.** The ADK runtime reaches `build_chat_model` from
+# `OpenRouterAdkLlm._chat`, which is called by `generate_content_async`, which
+# NOTHING IN THIS REPOSITORY CALLS -- ADK's `Runner` does. So the call graph this
+# walk builds from our own source stops dead one edge short, `run_agent_loop_adk`
+# is never marked as reaching the chokepoint, `_leaks` stays empty, and this case
+# prints green over a runtime it never examined.
+#
+# That is the eighth green-suite failure repeating exactly: a harness cannot prove
+# instrumentation is COMPLETE, only that the instrumentation it was handed works.
+#
+# The seed is therefore a SET, and `build_adk_model` is in it because it is the
+# one function our source DOES call on the way into the ADK runtime. Case 12c
+# below asserts the set is complete against the source rather than trusting this
+# comment.
+_SEED = {"build_chat_model", "build_adk_model"}
+_unmetered = {n for n in _defs if _SEED & _calls[n]} - _scoped
 while True:
     grown = {
         n
@@ -786,9 +803,48 @@ _leaks = sorted(
 )
 
 check(
-    "12. no entry point reaches build_chat_model outside a meter_as scope (R4)",
+    "12. no entry point reaches a model builder outside a meter_as scope (R4)",
     not _leaks,
     f"unmetered: {_leaks}" if _leaks else f"{len(_scoped)} scoped functions cover the graph",
+)
+
+# --- 12b: the ADK builder is actually IN the graph this walk covers -----------
+#
+# Without this, `_SEED` could name a function that does not exist -- a typo, or a
+# rename -- and case 12 would go green for the same reason it went green before
+# the name was added: nothing reaches a seed that is not there.
+check(
+    "12b. build_adk_model is a real function this walk found",
+    "build_adk_model" in _defs,
+    f"defs={'build_adk_model' in _defs}",
+)
+check(
+    "12b. the ADK loop reaches a seeded model builder",
+    "build_adk_model" in _calls.get("run_agent_loop_adk", set()),
+    f"callees={sorted(_calls.get('run_agent_loop_adk', set()) & _SEED)}",
+)
+
+# --- 12c: the seed set is DERIVED from source, never handed in ---------------
+#
+# The rule this closes is the one case 12 was written for and did not itself
+# obey: coverage is a property of the application's call graph, so a case
+# asserting it must READ the application's source rather than a list a human
+# maintains. A third runtime added tomorrow with its own client construction
+# would otherwise sit outside every seed with nothing to say so.
+_CLIENT_CTORS = {"ChatOpenAI", "MeteredChatOpenAI", "OpenRouterAdkLlm"}
+_constructors = {
+    name
+    for name, callees in _calls.items()
+    if _CLIENT_CTORS & callees
+}
+# `build_chat_model` constructs ChatOpenAI/MeteredChatOpenAI; `build_adk_model`
+# constructs OpenRouterAdkLlm. Anything ELSE that constructs a client directly is
+# a chokepoint nobody seeded.
+_unseeded = sorted(_constructors - _SEED - {"_chat", "_runnable"})
+check(
+    "12c. no function constructs a chat client outside the seeded builders",
+    not _unseeded,
+    f"unseeded constructors: {_unseeded}" if _unseeded else f"seed={sorted(_SEED)}",
 )
 
 # ---------------------------------------------------------------------------

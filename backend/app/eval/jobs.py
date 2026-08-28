@@ -460,6 +460,11 @@ async def _run_one_question(
                 expected_tool_use=question.expected_tool_use,
                 events=events,
             )
+            # Carried onto the rubric row so `summarise_trajectory` can split
+            # goal accuracy by behaviour class. Without it every row buckets as
+            # "answer" and the refusal rows -- which score a near-constant 1.0 --
+            # silently damp the rate the operator reads.
+            trajectory_row["expected_behaviour"] = question.expected_behaviour
         except Exception as exc:  # noqa: BLE001 - never costs the RAG scores
             log.warning(
                 "Trajectory scoring failed for question %s: %s", question.id, exc

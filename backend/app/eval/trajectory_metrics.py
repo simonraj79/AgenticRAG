@@ -24,11 +24,26 @@ leaving a stale note in a plan file. Full record in
 `new features/16-agent-evaluation/PLAN.md` §2.4.
 
 **Goal accuracy scores OUTCOME, not path**, which is exactly why it survives where
-they do not: this agent's path legitimately varies. Its sharpest use is the
+they do not: this agent's path legitimately varies.
+
+**THE "SHARPEST USE" CLAIM THIS DOCSTRING USED TO MAKE IS MEASURED TO BE FALSE,
+and it is withdrawn rather than softened.** It read: *its sharpest use is the
 refusal question -- "did it search, find nothing, and decline" is a proposition
-`faithfulness` structurally cannot express, and it reaches that verdict without
-consulting the marker list in `app/rag/refusal.py`, which CLAUDE.md records being
-wrong five times in five different ways.
+faithfulness structurally cannot express.* Measured 3 of 3 each way: a refusal
+that searched and a refusal that never searched **both score 1.0**. Ragas
+discards the inferred `user_goal` and compares only `end_state` against the
+reference (`_goal_accuracy.py:138-144`), and every stored refusal reference is a
+CONTENT statement -- *"The passages do not provide information regarding..."* --
+never a process statement. There is nothing in the comparison for the search to
+change.
+
+So the proposition is not expressible as this system authors its references, and
+a card that claimed it would be asserting something it never measured. What
+replaces it is arithmetic, not judgement: `self_initiated` and `searches` are
+reported beside the verdict, so "did it search before declining" is answered by a
+counted signal that needs no judge at all. `scripts/agent_metrics_check.py` case
+59 asserts this withdrawal so the claim cannot quietly return, and case 24 is the
+live pair that would have to pass before it could.
 
 **It is BINARY.** It returns 1 or 0. Aggregated it is a pass rate over n, never a
 mean, and nothing may render it in the same visual grammar as faithfulness.
@@ -46,7 +61,9 @@ from ragas.dataset_schema import MultiTurnSample
 
 from app.config import settings
 from app.eval.ragas_runner import METRIC_TIMEOUT_S, get_judge
-from app.rag.trace import GENERATE, TOOL_CALL
+# TOOL_RESULT is imported BY NAME because `searched` is now read off a
+# successful RESULT rather than off a CALL -- see `tool_use_verdict`.
+from app.rag.trace import GENERATE, TOOL_CALL, TOOL_RESULT
 
 with warnings.catch_warnings():
     # Same scoped suppression `ragas_runner.py` uses, and for the same reason:
@@ -86,16 +103,77 @@ def tool_use_verdict(
     """
     rows = list(events)
 
+    # ------------------------------------------------------------------
+    # THREE SEPARATE FACTS, and collapsing any two of them renders a wrong
+    # number. Each was a real defect, pinned by cases 54, 55 and 58.
+    #
+    #   tools_called   -- a call was ISSUED. Includes failures, includes
+    #                     gap-forced calls. This is the "no reflex tool use"
+    #                     population and nothing else.
+    #   model_chosen   -- the MODEL decided to call. Excludes gap-forced calls,
+    #                     because the gap trigger re-invokes with a NAMED tool:
+    #                     the code compelled that call, and grading it against
+    #                     the agent is the same category error as `refusal_pass`
+    #                     blaming the agent for a marker list.
+    #   succeeded      -- a call RETURNED something usable. `ask.run_turn`
+    #                     records a TOOL_CALL for a call that FAILED,
+    #                     deliberately, so reading `searched` off TOOL_CALL
+    #                     reports "it searched" for a turn where every search
+    #                     raised. The loop's own gate is stricter than the
+    #                     rubric was.
+    # ------------------------------------------------------------------
     tools_called: list[str] = []
+    model_chosen: list[str] = []
+    succeeded: list[str] = []
+    forced_ids: set[str] = set()
     gap_forced = False
+    searches = 0
+    redundant_searches = 0
+
     for row in rows:
         payload = getattr(row, "payload", None) or {}
-        if getattr(row, "event_type", None) != TOOL_CALL:
+        event_type = getattr(row, "event_type", None)
+        tool = str(payload.get("tool") or "unknown")
+        call_id = str(payload.get("call_id") or "")
+
+        if event_type == TOOL_CALL:
+            tools_called.append(tool)
+            args = payload.get("args")
+            forced = (
+                isinstance(args, dict) and args.get("trigger") == "gap_detected"
+            ) or payload.get("trigger") == "gap_detected"
+            if forced:
+                gap_forced = True
+                if call_id:
+                    forced_ids.add(call_id)
+            else:
+                model_chosen.append(tool)
             continue
-        tools_called.append(str(payload.get("tool") or "unknown"))
-        args = payload.get("args")
-        if isinstance(args, dict) and args.get("trigger") == "gap_detected":
-            gap_forced = True
+
+        if event_type != TOOL_RESULT:
+            # TOOL_ERROR lands here and is deliberately NOT a success.
+            continue
+
+        # `ok` is written by `ask.run_turn` from `ToolOutcome.ok`. Absent on a
+        # row that predates the field, in which case the row's EXISTENCE as a
+        # TOOL_RESULT (rather than a TOOL_ERROR) is the signal -- the same
+        # `.get`-as-migration the rest of this module uses.
+        if payload.get("ok") is False:
+            continue
+        succeeded.append(tool)
+
+        if tool != SEARCH_TOOL:
+            continue
+        searches += 1
+        # **Already computed and stored, and never once read.** `corpus.py`
+        # counts the markers this search assigned that the ledger did not
+        # already hold, so `new_chunks == 0` means the model paid an embedding, a
+        # Pinecone query and a rerank for text it already had. Measured at 8 of
+        # 22 real searches in production -- the clearest efficiency signal
+        # available, discarded. `loop.md` section 1: a number decides it, so
+        # write the branch. No model, no threshold.
+        if payload.get("new_chunks") == 0:
+            redundant_searches += 1
 
     generate = next(
         (r for r in rows if getattr(r, "event_type", None) == GENERATE), None
@@ -106,15 +184,18 @@ def tool_use_verdict(
     tool_steps = int(gen_payload.get("tool_steps") or 0)
     tool_calls = int(gen_payload.get("tool_calls") or len(tools_called))
 
-    searched = SEARCH_TOOL in tools_called
-    ran_python = PYTHON_TOOL in tools_called
+    # Off SUCCEEDED, never off tools_called. See the block above (case 54).
+    searched = SEARCH_TOOL in succeeded
+    ran_python = PYTHON_TOOL in succeeded
 
     if expected is None:
         tool_use_ok: bool | None = None
     elif expected == "search":
         tool_use_ok = searched
     elif expected == "none":
-        tool_use_ok = not tools_called
+        # MODEL-CHOSEN calls only. A gap-forced call is the loop insisting, not
+        # the agent reaching for a tool it did not need (case 55).
+        tool_use_ok = not model_chosen
     elif expected == "python":
         tool_use_ok = ran_python
     else:
@@ -140,6 +221,14 @@ def tool_use_verdict(
         # band that overlaps.
         "calls_per_step": (tool_calls / tool_steps) if tool_steps > 0 else None,
         "gap_forced": gap_forced,
+        # Did the MODEL initiate a search on its own judgement? CLAUDE.md's
+        # central architectural finding is that Gemma self-initiates 0/6 and
+        # DeepSeek 6/6 -- a model swap inverts this whole design, and until now
+        # nothing recorded which side of that inversion a run was measured on.
+        "self_initiated": SEARCH_TOOL in model_chosen,
+        # Counted, with its denominator beside it. Never a bare rate.
+        "searches": searches,
+        "redundant_searches": redundant_searches,
         "stopped_reason": gen_payload.get("stopped_reason"),
     }
 
@@ -238,7 +327,47 @@ def summarise_trajectory(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
     graded = [r["tool_use_ok"] for r in rows if r.get("tool_use_ok") is not None]
     per_step = [r["calls_per_step"] for r in rows if r.get("calls_per_step") is not None]
 
+    # **SPLIT BY BEHAVIOUR CLASS, with separate denominators.** `summarise()`
+    # spends twenty lines explaining why refusal rows are excluded from the four
+    # RAG means; this block pooled them into one rate and undid it.
+    #
+    # It matters more here than there, because goal accuracy on a refusal row is
+    # a near-constant pass: measured 1.0 in 9 of 9 attempts across three
+    # variants, including one that never searched at all. On a ten-question set
+    # that is 20% of the denominator pinned at 1.0, damping any real movement in
+    # the eight rows that can actually move.
+    #
+    # A row with no `expected_behaviour` buckets as "answer": that is the schema
+    # default (`golden_questions.expected_behaviour`), and mislabelling a refusal
+    # as answerable is the conservative direction -- it can only make the answer
+    # rate look worse, never better.
+    def _by_class(name: str) -> list[float]:
+        return [
+            float(r["goal_accuracy"])
+            for r in rows
+            if r.get("goal_accuracy") is not None
+            and (r.get("expected_behaviour") or "answer") == name
+        ]
+
+    def _class_total(name: str) -> int:
+        return sum(
+            1 for r in rows if (r.get("expected_behaviour") or "answer") == name
+        )
+
+    searches = sum(int(r.get("searches") or 0) for r in rows)
+    redundant = sum(int(r.get("redundant_searches") or 0) for r in rows)
+
     return {
+        # Split first, so a reader meets the honest numbers before the pooled one.
+        "goal_accuracy_answer": _measured(_by_class("answer"), _class_total("answer")),
+        "goal_accuracy_refuse": _measured(_by_class("refuse"), _class_total("refuse")),
+        # The counted efficiency half. `searches` is the denominator and is
+        # rendered beside the rate always -- 0 redundant of 0 searches and
+        # 0 redundant of 40 are different facts that collapse to the same 0.0.
+        "searches": searches,
+        "redundant_searches": redundant,
+        "wasted_search_rate": (redundant / searches) if searches else None,
+        "self_initiated": sum(1 for r in rows if r.get("self_initiated")),
         # A PASS RATE over n, not a mean of a continuous score. The metric returns
         # 1 or 0 per turn; the UI renders "7 / 9 achieved" and never "0.78".
         "goal_accuracy": _measured([float(v) for v in goal], total),

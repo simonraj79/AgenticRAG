@@ -245,6 +245,42 @@ Three properties worth copying:
 - **Verify by counting, before and after.** A cleanup that silently failed is invisible any other
   way.
 
+### 30. A stub silently replaced by the real thing is an offline test that goes to the network
+
+An offline harness handed a scripted model to the code under test. The code narrowed with
+`isinstance(model, OurConcreteClass)` and, finding a plain base-class stub, **discarded it and
+built a live client instead**. The harness made a real, billed API call, got a fluent answer
+back, and nothing raised.
+
+It was caught by one assertion and would have been invisible to the obvious ones. *"An answer was
+produced"* passed. *"No exception"* passed. What failed was **"the answer is the exact string I
+scripted"** and **"the stub was called exactly once"** — assertions about the outcome wanted,
+never about the absence of an error.
+
+So: **a substitution point is a place a test double can be silently rejected.** Widen the type
+check to the seam's own abstraction, and have at least one case assert the double was *used* —
+a call count, or an exact scripted string. A harness that can quietly fall through to production
+is worse than no harness, because it bills you for the privilege of testing nothing.
+
+### 31. A gate can be masked by another gate, so mutating it changes nothing
+
+Mutation testing is supposed to answer *"would this suite notice if I deleted the line?"*. On a
+guard with four conditions, the honest answer can be **no, and the guard is still correct** —
+because a second condition suppresses the same behaviour on the path the test happens to drive.
+
+Deleting a once-per-turn flag changed no end-to-end outcome twice running: the first scenario was
+masked by a *different* gate downstream, and the second by the **loop structure itself**, which
+entered the guarded block once per turn regardless. Two rewrites of the same case, both green,
+both proving nothing about the line they named.
+
+Three things follow. **A green mutation is a finding, not a failure of the tooling** — it says the
+line is unreachable-as-tested, which is worth knowing before someone deletes it as dead. **Assert
+at the level where the property is decidable**: driving the callback directly turned the mutation
+red immediately, where no end-to-end scenario could. And **say in the harness which mechanism
+actually guarantees the behaviour**, because "the gate does it" and "the structure does it, the
+gate is defence in depth" are different facts, and only one of them survives a refactor of the
+structure.
+
 ---
 
 ## II. Instruments, and the ways a measurement lies
@@ -330,6 +366,64 @@ unmeasured, never as passing.**
 The same conflation in reverse: a provider 429 surfaced as a job stuck at `failed` and a scenario
 throwing — indistinguishable, on the console, from a code defect. It has happened three times here,
 and each time made a working system look broken.
+
+### 33. An instrument that has never produced a row has never been tested
+
+A trajectory-evaluation rubric had been built, reviewed, harnessed with offline
+fixtures and shipped. Every one of its cases was green. Then four database queries:
+`trajectory IS NOT NULL` = 0 of 50, `summary ? 'trajectory'` = 0 of 5, the column the
+counted half grades = NULL on 30 of 30, and 0 of 50 evaluated turns had ever exercised the
+feature being graded. **The instrument had never once run on real data.**
+
+Switching it on would have rendered four numbers that were WRONG rather than merely
+incomplete — a failed call reading as a success, a decision the *code* made scored against
+the agent, and two populations pooled into one rate that could not move.
+
+The generalisation is not "write more tests"; the fixtures were fine and they tested what
+they were handed. It is that **green fixtures and having-been-used are independent
+properties**, and only the second one exercises the join between your instrument and the
+system it measures. So: before trusting any measurement apparatus, ask *how many real rows
+has this produced?* If the answer is zero, the cases prove the code runs, not that the
+number means anything.
+
+The corollary is the cheap part: **an instrument is far cheaper to repair before anyone has
+acted on a number it produced.** Once a figure is in a report, fixing it means retracting a
+conclusion as well as a line of code.
+
+### 34. Equalise every variable, and expect the one you forget to be the decisive one
+
+Two arms of a natural experiment shared a corpus byte for byte and differed in the single
+flag under test. The obvious confounders were equalised — retrieval width, rerank depth,
+chunk size. The result: the treatment cost 72% more and ran 31% slower.
+
+The arms also had different **system prompts**. One carried a persona; the other did not.
+With that equalised too, the same question flipped from treatment-slower to
+treatment-faster. The entire headline number had been the persona.
+
+Three things follow. **Enumerate confounders from the schema, not from intuition** — the
+forgotten field was one column along from the ones that were remembered. **Assert the
+equalisation over the live objects after assigning it**, so a field added later that your
+list does not know about fails loudly instead of becoming a silently uncontrolled variable.
+And **the confounder you miss is selected for being non-obvious**, which is exactly the
+property that makes it plausible as an explanation — so a clean-looking causal story from an
+under-controlled experiment is not weak evidence, it is *misleading* evidence.
+
+### 35. A claim can be disproven by the measurement it was written to justify — withdraw it, do not soften it
+
+A module's docstring named its metric's "sharpest use": a particular proposition that no
+other metric could express. Measuring it directly, three times in each direction, showed the
+metric returns the identical verdict whether or not the proposition holds. It was not
+weakly supported. It was **inexpressible**, for a structural reason — the judge discarded
+the half of the input the claim depended on.
+
+The tempting repair is to hedge the sentence. Do not: a hedged claim still reads as a
+capability to anyone scanning, and the next person builds on it. Delete the claim, state
+plainly that it was measured false and why, and — the part that makes it stick — **add a
+case asserting the withdrawal**, so the sentence cannot quietly return in a later edit.
+
+Where possible, replace judgement with arithmetic. Here the proposition the judge could not
+express was answerable by counting rows that were already being stored, needing no model at
+all. **A claim that survives only as prose is a claim nobody can check.**
 
 ---
 
@@ -675,6 +769,26 @@ which is right. The cost, unrecorded for months: between the apply and the merge
 claims a revision the deployed code does not contain, so the start command exits non-zero. **Any
 restart inside that window crash-loops the service**, and the platform restarts on its own
 schedule. See §I.1 for why nothing noticed.
+
+### 32. The documented path is not always the correct one — spike before you plan
+
+A twelve-agent research pass, every one of them reading the installed package source rather than
+recalling documentation, unanimously recommended the framework's *documented* adapter for
+reaching a third-party model provider. It was the right answer to "what is supported" and the
+wrong answer to "what should this codebase do".
+
+A forty-line spike, run before any planning, found the alternative: implement the framework's own
+one-method model interface and delegate to the chokepoint the project already had. That erased
+**five of the eight risks** the research had identified — three of which failed silently — and
+removed a dependency entirely. None of it was discoverable by reading: every fact came from
+running the thing and printing what came out.
+
+The rule is not "don't research". The research produced the audit that made the spike's result
+legible, and it named the five risks that were then measured away. The rule is about ORDER:
+**docs tell you the supported path; running code tells you the correct one, and it costs less
+than the plan you would otherwise write against the wrong one.** Spike the riskiest integration
+before the plan hardens around it — the same argument as writing the harness case first, applied
+one level up, to the architecture.
 
 ---
 

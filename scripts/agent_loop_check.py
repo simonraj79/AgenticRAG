@@ -328,6 +328,140 @@ finally:
     # setting would silently truncate every later case in this file.
     settings.trajectory_max_tool_content_chars = _original_limit
 
+
+# --------------------------------------------------------------------------
+# 14. A response carrying ONLY invalid tool calls must not count as a step
+# --------------------------------------------------------------------------
+# `LoopResult.steps` is documented as "steps in which at least one tool actually
+# ran", and cases 1 and 2 defend that invariant against the gap trigger. This is
+# the same invariant breached through a DIFFERENT door.
+#
+# The early-exit branch fires on `not calls and not invalid`. So a reply carrying
+# only `invalid_tool_calls` -- a hallucinated tool name, or arguments that fail
+# schema validation -- falls THROUGH it, assigns `steps = step`, and then runs a
+# loop body that executes nothing. The turn reports a step in which no tool ran,
+# which is exactly what `steps` exists to make impossible, and it corrupts the
+# `calls_per_step` denominator the trajectory rubric now reports.
+
+
+class _InvalidOnlyModel(ScriptedModel):
+    """Emits one invalid tool call, then answers when tools are withheld."""
+
+    def respond(self, tool_choice):  # noqa: ANN001
+        self.calls.append(str(tool_choice))
+        if tool_choice == "none":
+            return AIMessage(content=FINAL_ANSWER)
+        message = AIMessage(content="")
+        # `invalid_tool_calls` is the langchain field for a call the provider
+        # emitted that could not be parsed into the bound schema.
+        message.invalid_tool_calls = [
+            {"name": "search_corpuss", "args": None, "id": "bad-1",
+             "error": "unknown tool"}
+        ]
+        return message
+
+
+_invalid_model = _InvalidOnlyModel(forced_returns_a_call=False)
+result14 = asyncio.run(
+    run_agent_loop(
+        agent=SimpleNamespace(id="agent-under-test"),
+        question="How many battery modules?",
+        ledger=ContextLedger(),
+        system_prompt="You are a test.",
+        model=_invalid_model,
+        max_steps=2,
+    )
+)
+check(
+    "14. a reply with ONLY invalid tool calls reports steps == 0",
+    result14.steps == 0,
+    f"steps={result14.steps} -- a step in which no tool ran",
+)
+check(
+    "14. and the turn still produces an answer",
+    bool(result14.text),
+    f"text={result14.text!r}",
+)
+check(
+    "14. and records no successful invocation",
+    all(not i.ok for i in result14.tool_calls),
+    f"ok flags={[i.ok for i in result14.tool_calls]}",
+)
+
+
+# --------------------------------------------------------------------------
+# 15. The gap branch must answer EVERY call the forced response emitted
+# --------------------------------------------------------------------------
+# `_invalid_call_message`'s own docstring states the consequence: langchain-openai
+# serialises BOTH `tool_calls` and `invalid_tool_calls` back into the next
+# request, so an unanswered invalid call leaves the conversation malformed and
+# the NEXT `ainvoke` raises -- out of `run_agent_loop`, by design, i.e. a 500
+# rather than a degraded answer.
+#
+# The main loop answers both lists. The gap branch reads only `forced.tool_calls`.
+# Reachable whenever a forced response carries one valid and one invalid call,
+# which is an ordinary provider outcome on a route where a named tool_choice is
+# honoured intermittently.
+
+
+class _MixedForcedModel(ScriptedModel):
+    """The forced call returns one valid AND one invalid call."""
+
+    def respond(self, tool_choice):  # noqa: ANN001
+        self.calls.append(str(tool_choice))
+        if tool_choice == SEARCH_CORPUS:
+            message = AIMessage(
+                content="",
+                tool_calls=[
+                    {"name": "search_corpus",
+                     "args": {"query": "science instrument storage"},
+                     "id": "good-1"}
+                ],
+            )
+            message.invalid_tool_calls = [
+                {"name": "search_corpus", "args": None, "id": "bad-1",
+                 "error": "could not parse arguments"}
+            ]
+            return message
+        if tool_choice == "none":
+            return AIMessage(content=FINAL_ANSWER)
+        return AIMessage(content=GAP_ANSWER)
+
+
+_mixed = _MixedForcedModel(forced_returns_a_call=True)
+try:
+    result15 = asyncio.run(
+        run_agent_loop(
+            agent=SimpleNamespace(id="agent-under-test"),
+            question="How many battery modules, and what is the science instrument storage?",
+            ledger=ContextLedger(),
+            system_prompt="You are a test.",
+            model=_mixed,
+            max_steps=2,
+        )
+    )
+    _raised = None
+except Exception as exc:  # noqa: BLE001 -- the defect IS an escaping exception
+    result15, _raised = None, exc
+
+check(
+    "15. a forced response with one valid + one invalid call does not raise",
+    _raised is None,
+    f"{type(_raised).__name__}: {_raised}" if _raised else "",
+)
+if result15 is not None:
+    answered = {i.call_id for i in result15.tool_calls}
+    check(
+        "15. and BOTH calls are answered, so the conversation stays well-formed",
+        {"good-1", "bad-1"} <= answered,
+        f"answered={sorted(answered)}",
+    )
+    check(
+        "15. the invalid one is recorded as a failure, not silently dropped",
+        any(i.call_id == "bad-1" and not i.ok for i in result15.tool_calls),
+        f"invocations={[(i.call_id, i.ok) for i in result15.tool_calls]}",
+    )
+
 print("\n" + "=" * 74)
 if failures:
     print(f"{len(failures)} FAILED:")
