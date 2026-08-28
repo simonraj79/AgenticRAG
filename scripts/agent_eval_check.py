@@ -171,21 +171,31 @@ async def ask(agent, question: str) -> dict:
 def card(name: str, summary: dict, runs: list[dict]) -> None:
     print(f"--- {name.upper()} " + "-" * max(0, 56 - len(name)))
 
-    def measured(key: str) -> str:
+    def measured(key: str, *, binary: bool = True) -> str:
+        """NUMERATOR / DENOMINATOR, never a bare rate.
+
+        A value of 0.0 over `measured=0` and 0.0 over `measured=400` render
+        identically once the denominator is dropped.
+
+        **`binary` is not decoration, and the first version of this function did
+        not have it.** It rendered every metric as "n/m achieved", which is right
+        for a pass rate and nonsense for a mean: `calls_per_step` printed
+        `1.400 (7/5 achieved, of 10)`. Seven of five. Found by reading the card,
+        which is the one step in this repo's verification ladder that is not a
+        command.
+        """
         block = summary.get(key) or {}
         value, m, t = block.get("value"), block.get("measured"), block.get("total")
-        # NUMERATOR / DENOMINATOR, never a bare rate. A value of 0.0 over
-        # measured=0 and 0.0 over measured=400 render identically once the
-        # denominator is dropped, and goal accuracy is binary so a rate over
-        # n<20 is not a number anyone should read as one.
         if value is None:
             return f"  n/a   (measured {m} of {t})"
+        if not binary:
+            return f"{value:0.3f}   (mean over {m}, of {t} turns)"
         return f"{value:0.3f}   ({int(round(value * (m or 0)))}/{m} achieved, of {t})"
 
     print(f"  goal_accuracy answer  {measured('goal_accuracy_answer')}")
     print(f"  goal_accuracy refuse  {measured('goal_accuracy_refuse')}")
     print(f"  tool_use_ok           {measured('tool_use_ok')}")
-    print(f"  calls_per_step        {measured('calls_per_step')}")
+    print(f"  calls_per_step        {measured('calls_per_step', binary=False)}")
     searches = summary.get("searches") or 0
     redundant = summary.get("redundant_searches") or 0
     rate = summary.get("wasted_search_rate")
@@ -312,13 +322,24 @@ async def main() -> int:
                 row = await score_trajectory(
                     sample,
                     reference=gq.reference_answer,
-                    # AUTHORED HERE rather than read from the column, which is
-                    # NULL on all 30 rows. A refusal question expects a search
-                    # (find nothing, then decline); an answerable one does too,
-                    # since every question in this set is corpus-grounded. This
-                    # is an assumption and it is stated rather than hidden --
-                    # authoring the column properly is a separate change.
-                    expected_tool_use="search",
+                    # **READ FROM THE COLUMN, and the column is NULL on all 30
+                    # rows -- so `tool_use_ok` reports NOT MEASURED, which is the
+                    # truth.**
+                    #
+                    # An earlier version hardcoded "search" here. That invented
+                    # an expectation the data does not carry, and it was wrong on
+                    # its own terms: every question in this set is a single-fact
+                    # lookup the unconditional first retrieval already answers, so
+                    # "search" grades the agent down for correctly NOT searching.
+                    # It is precisely the "new instrument of unknown validity"
+                    # PRD open item 23 warns against, built by accident inside the
+                    # harness meant to avoid it.
+                    #
+                    # The counted signals -- `searches`, `redundant_searches`,
+                    # `self_initiated` -- need no expectation at all and carry the
+                    # whole tool-use story here. Authoring `expected_tool_use`
+                    # properly is a separate change with its own drafter work.
+                    expected_tool_use=gq.expected_tool_use,
                     events=run["events"],
                 )
                 row["expected_behaviour"] = gq.expected_behaviour
@@ -358,7 +379,7 @@ async def main() -> int:
             row = await score_trajectory(
                 pilot_sample,
                 reference=pilot_q.reference_answer,
-                expected_tool_use="search",
+                expected_tool_use=pilot_q.expected_tool_use,
                 events=pilot_run["events"],
             )
             verdicts.append(row.get("goal_accuracy"))

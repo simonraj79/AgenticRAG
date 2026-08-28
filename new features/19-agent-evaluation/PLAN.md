@@ -172,9 +172,86 @@ becoming a silently uncontrolled variable.
 
 ---
 
-## 7. Measured
+## 7. Measured — 2026-08-28, controlled, `--n 10 --noise 5`
 
-*(filled in from the controlled `--n 10 --noise 5` run — see §7.1)*
+`Topic 1` (tools off) against `prompt engineering` (tools on), same 37 chunks,
+same 10 questions, judge `google/gemini-3.7-flash`, generation
+`deepseek/deepseek-v4-flash-0731`. Five confounders equalised in memory.
+**All 11 harness assertions passed.**
+
+| | control (tools off) | treatment (tools on) |
+|---|---|---|
+| goal accuracy — **answerable** | 1.000 (8/8) | 1.000 (8/8) |
+| goal accuracy — **refusal** | **0.500 (1/2)** | **1.000 (2/2)** |
+| searches | 0 | 8 |
+| redundant searches | 0 | 1 (**12.5%** of 8) |
+| self-initiated turns | 0 | **4** |
+| gap-forced turns | 0 | **1** |
+| calls per step | n/a | 1.400 (mean over 5) |
+| budget exhausted / tool errors | 0 / 0 | 0 / 0 |
+| generation calls | 10 | **17** |
+| wall clock | 94.3 s | **161.0 s (+71%)** |
+| cost | $0.00114668 | **$0.00485384 (+323%, 4.2x)** |
+| **judge noise floor** | — | **0.00** (5 of 5 unanimous on one fixed trajectory) |
+
+### What this does and does not establish
+
+**It does establish that the agent loop works as designed.** 4 of 10 turns
+self-initiated a search, the gap trigger fired once, no turn exhausted its budget,
+no tool errored, and 7 of 8 searches returned new material. Nothing is broken.
+
+**The only metric that moved is the refusal pair: 1/2 -> 2/2.** That is exactly the
+behaviour the architecture exists to buy — CLAUDE.md: *"I searched and it is not
+there" beats "it was not in the chunk I happened to be given"*. The gap trigger
+firing once on a two-question refusal set is the mechanism visibly doing its job.
+
+**And it is n=2. One question. It cannot support a claim**, and this document will
+not make one from it.
+
+**On the 8 answerable questions the instrument is SATURATED: 8/8 in both arms.**
+Goal accuracy cannot see a difference here, and that is a property of the question
+set, not a finding about the agent. Every one of these questions is a single-fact
+lookup the unconditional first retrieval already answers — the corpus is 37 chunks
+of a prompt-engineering playbook and the questions ask what CO-STAR stands for.
+**No question in this golden set REQUIRES a second search**, so the loop cannot
+demonstrate its value and can only demonstrate its cost.
+
+**The cost is real and it is large: 4.2x the money and 1.7x the latency**, for
+8 searches and 7 extra generation calls.
+
+### Two numbers on that card that must be discounted
+
+- **`tool_use_ok` is an artefact of this run and is not a measurement.** It was
+  produced by a version that hardcoded `expected_tool_use="search"`, inventing an
+  expectation the data does not carry — and inventing it *wrongly*, since these
+  questions do not need a search, so it grades the agent down for correctly not
+  searching. Precisely the "new instrument of unknown validity" PRD open item 23
+  warns against, built by accident inside the harness meant to avoid it. Now read
+  from the column, which is NULL on all 30 rows, so it correctly reports NOT
+  MEASURED.
+- **`calls_per_step` rendered as `1.400 (7/5 achieved, of 10)`** — seven of five.
+  The card formatter rendered every metric as a pass rate, which is right for a
+  binary metric and nonsense for a mean. Found by reading the card, which is the
+  one step in this repo's ladder that is not a command.
+
+### The conclusion, stated as narrowly as the evidence allows
+
+**The evaluation does not justify a behavioural change to the agent loop**, and
+inventing one would repeat the mistake EVAL.md already documents — acting on a
+weakest-metric pointer that advised deleting the pedagogy. What it justifies is:
+
+1. The correctness fixes shipped in this change set (four instrument repairs, two
+   loop defects), none of which alters an answer.
+2. A recorded fact: **this golden set cannot discriminate an agentic architecture
+   from a non-agentic one.** Goal accuracy is saturated at 8/8 on the answerable
+   rows and n=2 on the refusals.
+3. The next step, which is DATA and not code: **two-topic questions** of the form
+   *"X, and separately, Y"* over semantically distant sections, where one topic is
+   reachable from the first retrieval and the other only by a second search. That
+   is the only question class on which the loop can be shown to earn its 4.2x, and
+   `agentic_check.py` already documents the construction as the reliable forcing
+   function. Until such questions exist, any claim that the loop helps or does not
+   help on this corpus is unfalsifiable.
 
 ---
 
