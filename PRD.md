@@ -790,6 +790,19 @@ substantially faster, but only resolves from a service in the same region. On Re
 `DATABASE_URL` to the internal value. Both were written into `.env` by
 `scripts/create_render_db.py`.
 
+**`AGENT_RUNTIME` selects the agent engine, and its default is the measured one.**
+`"langchain"` (default) is `app/rag/agent_loop.run_agent_loop`, the hand-rolled loop every
+number in EVAL.md was measured against. `"adk"` is `app/adk/loop.run_agent_loop_adk`, a
+Google ADK `Runner` behind the identical signature. Validated at load: a misspelling raises
+rather than falling through, because **both runtimes answer correctly and the only visible
+difference is which one did** — the same argument `EMBEDDING_ROUTE` makes one row up.
+
+Flipping it is a deliberate act with its own re-baseline, never a side effect of a deploy:
+under ADK a fired gap trigger **always** executes its search, where `tool_choice=
+"search_corpus"` is honoured by the provider roughly one time in three. That is more
+correct and it is not the same system. Set explicitly to `langchain` on the API service
+2026-08-28 so the value does not rest on a code default.
+
 **Pin `OAUTH_REDIRECT_URI` rather than deriving it.** Behind Render's TLS-terminating
 proxy, `request.url_for()` returns the internal `http://` URL, so Authlib would send a
 redirect URI that does not match the one registered with Google, producing
@@ -1145,11 +1158,21 @@ AgenticRAG/
 │   │   │   ├── pipeline.py      Stage 1 chain + history-aware rewrite
 │   │   │   ├── delete.py        Vectors before rows (§7)
 │   │   │   ├── jobs.py          Background ingest — own DB session
-│   │   │   └── trace.py         Decision logging
+│   │   │   ├── trace.py         Decision logging
+│   │   │   ├── runtime.py       WHICH agent engine runs. One function, one `if`
+│   │   │   └── textguard.py     The U+FF5C leaked-markup guard, owned once
+│   │   ├── adk/                 The Google ADK runtime. NOTHING outside imports google.adk
+│   │   │   ├── model.py         BaseLlm -> build_chat_model. No litellm
+│   │   │   ├── tools.py         Hand-declared schemas; the tenancy boundary
+│   │   │   ├── plugins.py       Gap trigger, text guard, step budget
+│   │   │   ├── context.py       Turn-scoped state
+│   │   │   └── loop.py          run_agent_loop_adk — identical signature
 │   │   └── eval/
 │   │       ├── generate.py      LLM-suggested golden questions (§3.6.1)
 │   │       ├── ragas_runner.py  The four metrics, judge + embeddings
 │   │       ├── metrics_guide.py Weakest metric → next investment (§3.6.3)
+│   │       ├── trajectory.py    Trace rows -> a ragas MultiTurnSample
+│   │       ├── trajectory_metrics.py  Goal accuracy + the COUNTED rubric
 │   │       └── jobs.py          Background eval run — own DB session
 │   ├── alembic/                 Migrations
 │   └── requirements.txt
@@ -1607,6 +1630,57 @@ cases (AC1-AC10) pin the client's behaviour against a scripted transport; nothin
 that the server actually rolls the row back. This is the same gap `build.md` §7 records as
 "a layer-1 harness cannot prove a query runs, only that it was written", arriving on the
 frontend side of the seam.
+
+### Opened 2026-08-28 by the ADK runtime and agent-evaluation change sets
+
+Full records in [new features/18-adk-runtime/PLAN.md](new%20features/18-adk-runtime/PLAN.md)
+and [new features/19-agent-evaluation/PLAN.md](new%20features/19-agent-evaluation/PLAN.md).
+
+**56. The golden sets cannot discriminate an agentic architecture from a non-agentic one,
+and this is now measured rather than suspected.** Run 2026-08-28, `Topic 1` (tools off)
+against `prompt engineering` (tools on) over a **byte-identical** 37-chunk corpus: goal
+accuracy **8/8 in both arms** on the answerable questions. Every question in every golden set
+here is a single-fact lookup the unconditional first retrieval already answers, so **no
+question requires a second search** and the loop can only demonstrate its cost — measured at
+4.2x the money and 1.7x the latency. The fix is DATA, not code: two-topic questions of the
+form *"X, and separately, Y"* over semantically distant sections, one topic reachable from
+the first retrieval and the other only by a second search. Until they exist, any claim that
+the agent loop earns its cost is unfalsifiable. **This blocks item 23 from being read as
+answered.**
+
+**57. `expected_tool_use` is NULL on 30 of 30 golden questions, and the drafter cannot emit
+it.** `generate.py`'s schema has no such field and `GoldenSetEditor.tsx` has no control, so
+the counted half of the trajectory rubric reports NOT MEASURED forever. Authoring it needs
+the same two-part fix `reference_answer` needed — the field description **and** a
+system-prompt bullet — because §3.6.1 records that a field description alone measured as an
+improvement that fails.
+
+**58. Nothing records WHICH RUNTIME produced a scorecard.** `eval_runs` has no column and the
+`GENERATE` payload has no key, so an ADK run and a LangChain run are byte-indistinguishable
+in the database. Harmless while `AGENT_RUNTIME` is pinned to one value; the moment anyone
+A/Bs the two, every stored number becomes unattributable retroactively. One column, one key.
+
+**59. `AgentGoalAccuracyWithReference` cannot express "it searched, found nothing, and
+declined", and the claim that it could has been withdrawn.** Measured 3/3 each way: a refusal
+that searched and one that never searched **both score 1.0**, because ragas discards the
+inferred goal and compares only `end_state` against the reference — and every reference this
+system authors is a CONTENT statement, never a process one. Either references for refusal
+questions become process statements (a data migration that breaks comparability of every
+stored refusal row), or the proposition is answered by the counted signals instead, which is
+what shipped. **Recorded so the claim cannot return**; `agent_metrics_check` case 59 asserts
+the withdrawal.
+
+**60. The full agentic suite has never been run under the ADK runtime.**
+`agentic_check.py --runtime adk` is criterion 32 of change set 18 and is still open. ADK is
+verified by 109 offline assertions and 22 live ones, and it produced correct grounded answers
+in a live parity check — but it has not been through the 39 scenarios that guard the
+LangChain path. That is precisely why it ships behind a flag that is off.
+
+**61. The trajectory rubric's `total` and the admin console's `total` are still two
+populations under one key name.** `jobs.py` filters `if row.get("trajectory")`, dropping
+crashed turns; `admin.py` counts all rows. `summarise_trajectory` was repaired (case 56) and
+the job-level filter was not. The same `{value, measured, total}` shape carries two different
+denominators on two different cards — EVAL.md's misleading-way #1, one storey up.
 
 ---
 
