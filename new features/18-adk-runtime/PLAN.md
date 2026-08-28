@@ -90,10 +90,11 @@ Three things, and they are the justification — the shim is not smaller than `a
    `_get_declaration()` has no code path that could introspect the closed-over `Agent` into
    the schema — where `FunctionTool` derives the schema from the signature and pushes hard
    toward `def search_corpus(query, agent_id)`.
-3. **The streaming path finally acquires a harness.** `agent_loop_check` runs entirely with
-   `emit=None`, so chunk accumulation, the tool-step token suppression, the DSML latch and
-   the `steps+1` final numbering have **zero coverage today**. `adk_stream_check.py` is a
-   deliverable in its own right.
+3. **The streaming path finally acquires a harness. DELIVERED: `scripts/adk_stream_check.py`,
+   27 checks.** `agent_loop_check` runs entirely with `emit=None`, so chunk accumulation, the
+   tool-step token suppression, the DSML latch and the empty-stream fallback had **zero
+   coverage in either runtime**. S5 reproduces the split-sentinel case and its mutation puts
+   the real markup back on screen -- the defect this project shipped, now with a test.
 
 Behaviour change to record rather than gloss: **a fired gap trigger now always searches.**
 That is more correct and it is not the same system, so EVAL baselines are re-measured under
@@ -226,6 +227,8 @@ which is not `"langchain"`.**
 | `agent_loop_check` | all pass -- the langchain runtime is byte-unchanged |
 | **`tenancy_check`** (new) | **14 checks**, and mutation-verified: adding `agent_id` to the ADK declaration turns T3/T4 red |
 | **`adk_loop_check`** (new) | **36 checks**, three mutations verified red |
+| **`adk_stream_check`** (new) | **27 checks** -- the streaming path's FIRST harness in either runtime |
+| **`adk_model_check`** (new) | **46 checks** -- the request body, per model family |
 | `metering_check` (+12b, 12c) | all pass |
 | `npm test` | 79 / 79 |
 | **`adk_parity_check`** (new, live) | **15 checks** |
@@ -239,6 +242,7 @@ which is not `"langchain"`.**
 | the `gap_fired` gate | `adk_loop_check` 16c |
 | `config.tools = []` on budget exhaustion (the "obvious ADK move") | `adk_loop_check` 15 |
 | `agent_id` added to the ADK declaration | `tenancy_check` T3/T4 |
+| `_emit_until_markup` checking the PIECE instead of the JOIN | `adk_stream_check` S5 -- and the mutation puts the literal string `<`+U+FF5C+`DSML`+U+FF5C+`tool_calls invoke name=search_corpus` back on the user's screen, which is the defect this project actually shipped |
 
 **Ragas A/B**, `Kestrel Feynman`, **all 10 golden questions**, judge `google/gemini-3.7-flash`,
 generation `deepseek/deepseek-v4-flash-0731`, golden set drafted by `minimax/minimax-m3`, so
