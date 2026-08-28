@@ -245,6 +245,42 @@ Three properties worth copying:
 - **Verify by counting, before and after.** A cleanup that silently failed is invisible any other
   way.
 
+### 30. A stub silently replaced by the real thing is an offline test that goes to the network
+
+An offline harness handed a scripted model to the code under test. The code narrowed with
+`isinstance(model, OurConcreteClass)` and, finding a plain base-class stub, **discarded it and
+built a live client instead**. The harness made a real, billed API call, got a fluent answer
+back, and nothing raised.
+
+It was caught by one assertion and would have been invisible to the obvious ones. *"An answer was
+produced"* passed. *"No exception"* passed. What failed was **"the answer is the exact string I
+scripted"** and **"the stub was called exactly once"** — assertions about the outcome wanted,
+never about the absence of an error.
+
+So: **a substitution point is a place a test double can be silently rejected.** Widen the type
+check to the seam's own abstraction, and have at least one case assert the double was *used* —
+a call count, or an exact scripted string. A harness that can quietly fall through to production
+is worse than no harness, because it bills you for the privilege of testing nothing.
+
+### 31. A gate can be masked by another gate, so mutating it changes nothing
+
+Mutation testing is supposed to answer *"would this suite notice if I deleted the line?"*. On a
+guard with four conditions, the honest answer can be **no, and the guard is still correct** —
+because a second condition suppresses the same behaviour on the path the test happens to drive.
+
+Deleting a once-per-turn flag changed no end-to-end outcome twice running: the first scenario was
+masked by a *different* gate downstream, and the second by the **loop structure itself**, which
+entered the guarded block once per turn regardless. Two rewrites of the same case, both green,
+both proving nothing about the line they named.
+
+Three things follow. **A green mutation is a finding, not a failure of the tooling** — it says the
+line is unreachable-as-tested, which is worth knowing before someone deletes it as dead. **Assert
+at the level where the property is decidable**: driving the callback directly turned the mutation
+red immediately, where no end-to-end scenario could. And **say in the harness which mechanism
+actually guarantees the behaviour**, because "the gate does it" and "the structure does it, the
+gate is defence in depth" are different facts, and only one of them survives a refactor of the
+structure.
+
 ---
 
 ## II. Instruments, and the ways a measurement lies
@@ -675,6 +711,26 @@ which is right. The cost, unrecorded for months: between the apply and the merge
 claims a revision the deployed code does not contain, so the start command exits non-zero. **Any
 restart inside that window crash-loops the service**, and the platform restarts on its own
 schedule. See §I.1 for why nothing noticed.
+
+### 32. The documented path is not always the correct one — spike before you plan
+
+A twelve-agent research pass, every one of them reading the installed package source rather than
+recalling documentation, unanimously recommended the framework's *documented* adapter for
+reaching a third-party model provider. It was the right answer to "what is supported" and the
+wrong answer to "what should this codebase do".
+
+A forty-line spike, run before any planning, found the alternative: implement the framework's own
+one-method model interface and delegate to the chokepoint the project already had. That erased
+**five of the eight risks** the research had identified — three of which failed silently — and
+removed a dependency entirely. None of it was discoverable by reading: every fact came from
+running the thing and printing what came out.
+
+The rule is not "don't research". The research produced the audit that made the spike's result
+legible, and it named the five risks that were then measured away. The rule is about ORDER:
+**docs tell you the supported path; running code tells you the correct one, and it costs less
+than the plan you would otherwise write against the wrong one.** Spike the riskiest integration
+before the plan hardens around it — the same argument as writing the harness case first, applied
+one level up, to the architecture.
 
 ---
 

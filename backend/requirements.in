@@ -138,3 +138,19 @@ langchain-community<0.4
 # own for objects -- the S3 protocol IS Cloudflare's interface -- so this is the
 # client, not a choice of vendor.
 boto3
+
+# The Google ADK agent runtime (change set 18), selected by AGENT_RUNTIME.
+#
+# **`litellm` is deliberately NOT here, and that is the whole design.** ADK's
+# documented road to a non-Gemini provider is `google.adk.models.lite_llm.LiteLlm`,
+# and this project does not take it: `app/adk/model.py` is a ~30-line `BaseLlm`
+# that delegates to `app/rag/llm.build_chat_model`, so every measured OpenRouter
+# workaround AND the metering attachment are inherited rather than re-derived.
+# Taking the litellm road would have re-introduced `max_completion_tokens` (a
+# guaranteed 404 here), an unremovable deprecated `stream_options`, and an
+# unmetered call site that `metering_check` case 12 would have printed green over.
+#
+# Measured cost of this line: 8 new distributions and ONE version bump
+# (google-genai 2.18.1 -> 2.20.0). It does not disturb langchain 1.x, the
+# `langchain-community<0.4` pin ragas needs, or pinecone.
+google-adk

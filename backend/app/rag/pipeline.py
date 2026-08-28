@@ -76,7 +76,8 @@ from app.config import settings
 from app.db.models import Agent
 from app.db.specialists import Specialist, roster
 from app.rag import events
-from app.rag.agent_loop import ContextLedger, ToolInvocation, run_agent_loop
+from app.rag.agent_loop import ContextLedger, ToolInvocation, run_agent_loop  # noqa: F401
+from app.rag.runtime import select_runtime
 from app.rag.llm import build_chat_model
 from app.rag.retriever import (
     META_CHUNK_INDEX,
@@ -1144,7 +1145,14 @@ async def answer_question(
             if agent.max_tool_steps is not None
             else settings.agent_max_tool_steps
         )
-        loop = await run_agent_loop(
+        # **The entire migration surface.** `select_runtime` returns either
+        # `agent_loop.run_agent_loop` or `adk.loop.run_agent_loop_adk`; the two
+        # have the identical signature and return the identical `LoopResult`, so
+        # everything below this line is unchanged and cannot regress. With
+        # `AGENT_RUNTIME=langchain` (the default) `google.adk` is never imported
+        # into the process at all -- see `app/rag/runtime.py`.
+        loop_fn = select_runtime()
+        loop = await loop_fn(
             agent=agent,
             question=search_query,
             ledger=ledger,
@@ -1380,7 +1388,7 @@ async def answer_question(
                     # `tool_choice="any"` is silently ignored on this route. A
                     # second, thinner loop here would drift from that one on the
                     # first change to either.
-                    redraft = await run_agent_loop(
+                    redraft = await select_runtime()(
                         agent=agent,
                         question=search_query,
                         ledger=ledger,
