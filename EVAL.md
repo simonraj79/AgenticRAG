@@ -650,6 +650,10 @@ verbatim from its context, scored **0.000** by Gemma and **1.000** by Flash.
 | — | The rewrite is stored only in the REWRITE trace payload, so a rewritten question cannot be read back from `queries` | Open — the reason eval turns skip the rewriter entirely (§4.6) rather than rewriting and recording |
 | **29** | **A run on an orchestrator averages across teaching methods, and the scorecard cannot say so.** `eval_runs` records the judge and generation models but not the roster or the per-question route | **Open** — §5. Evaluate a single-persona agent, or read the `ROUTE` trace rows |
 | **30** | **Self-check must not be scored with faithfulness, and the reason is that they disagree by design** | **Open** — see below |
+| **31** | **The trajectory rubric had never produced a row, and four of its numbers were wrong.** `eval_results.trajectory IS NOT NULL` = 0 of 50; `summary ? 'trajectory'` = 0 of 5; `expected_tool_use` NULL on 30 of 30; 0 of 50 eval turns ever made a tool call | **Repaired 2026-08-28** — `agent_metrics_check` 54-59. See §12 |
+| **32** | **No golden set here can discriminate an agentic architecture from a non-agentic one.** Measured: goal accuracy 8/8 in BOTH arms over a byte-identical corpus. Every question is a single-fact lookup the first retrieval already answers | **Open** — PRD item 56. Needs two-topic questions, not code |
+| **33** | **`expected_tool_use` is unauthorable.** The drafter's schema has no field and the editor has no control, so the counted half reports NOT MEASURED forever | **Open** — PRD item 57 |
+| **34** | **Nothing records which RUNTIME produced a scorecard.** An ADK run and a LangChain run are byte-indistinguishable in the database | **Open** — PRD item 58. Harmless only while `AGENT_RUNTIME` is pinned |
 
 **On #30, and it is the sharpest instrument problem in this file.** The self-check's critic
 prompt *explicitly exempts* labelled analogies, questions put to the learner, and "the
@@ -685,3 +689,92 @@ unsupported statement by construction.
 **So faithfulness is not yet a valid measure for a persona that invents explanatory
 material.** Either exempt clearly-marked pedagogy, or measure faithfulness on the plain
 `lecture-qa` template — still never tested here.
+
+
+---
+
+## 12. The agent rubric — what it says, and what it cannot
+
+Added 2026-08-23 (change set 16), **repaired 2026-08-28** (change set 19). Full record in
+[new features/19-agent-evaluation/PLAN.md](new%20features/19-agent-evaluation/PLAN.md).
+
+The four metrics in §3 score an ANSWER. This block scores the TURN — did the agent achieve
+the goal, and what did it spend getting there. It renders beside the four metrics and never
+inside them: the judged half is BINARY and must not be shown in the same visual grammar as a
+continuous score.
+
+### The judged half — one metric, and only one
+
+`AgentGoalAccuracyWithReference`. It scores **outcome, not path**, which is why it survives
+here where the tool metrics do not: this agent rewrites its search query on every turn at
+temperature 1.0, so any metric comparing tool arguments is measuring a string designed never
+to repeat.
+
+**Rejected, re-verified against ragas 0.4.3's installed source on 2026-08-28:**
+
+| Metric | Why it stays closed |
+|---|---|
+| `ToolCallAccuracy` | Byte-exact argument comparison is **fixable** — a perfect comparator in the legacy `arg_comparison_metric` seam raises the reworded-query case from 0.0 to **1.0**. What survives any comparator is `if not refs: return 0.0` and the **multiplicative sequence gate** (2 calls vs 1 reference = 0.0, strict *and* loose). At 1.50-2.00 calls per step the gate zeroes essentially every real turn. **Lead with the gate, not the rewrite** |
+| `ToolCallF1` | Worse: hashes `(name, args)` into a set. No comparator field at all |
+| `AgentGoalAccuracyWithoutReference` | Self-judged by construction, and collides on the metric name with the variant in use |
+| `TopicAdherenceScore` | No topics authored; eval is single-turn; costs `2 + N` sequential judged calls |
+
+**`ragas.metrics.collections` is reachable and is still not adopted.** `llm_factory(...,
+provider="openai", client=AsyncOpenAI(base_url=openrouter))` builds an `InstructorLLM` the
+collections metrics accept — the blocker was always `LangchainLLMWrapper`, never the gateway.
+Migrating costs the markdown-fence stripping that wrapper provides, and
+`collections.ToolCallAccuracy` has **no comparator seam at all**, so the move makes the tool
+metrics worse. `ragas.metrics` now emits a real v1.0 removal notice; the scoped suppression
+in `ragas_runner.py` is hiding it.
+
+### The counted half — arithmetic, no model, no threshold
+
+| Key | Meaning |
+|---|---|
+| `searches` / `redundant_searches` | A redundant search returned **zero new chunks** — the model paid an embedding, a Pinecone query and a rerank for text it already had. Measured at **8 of 22** real production searches |
+| `wasted_search_rate` | The rate, always rendered with `searches` beside it |
+| `self_initiated` | Did the MODEL choose to search, as opposed to the gap trigger forcing it. Load-bearing: Gemma self-initiates 0/6 and DeepSeek 6/6, so a model swap inverts the architecture and nothing else records which side a run was on |
+| `gap_forced` / `budget_exhausted` / `tool_error` | Turn counts |
+| `calls_per_step` | **Reported, never graded.** Nobody has authored a threshold, and `score_threshold` is the standing precedent for grading a number against a band that overlaps |
+
+### Four ways this block used to lie, all repaired 2026-08-28
+
+Each was written as a failing case first; 10 of 13 went red.
+
+1. **A FAILED search read as "it searched"** (`agent_metrics_check` 54). The verdict filtered
+   on `TOOL_CALL`, and `ask.run_turn` records one for a failed call *deliberately*. Now read
+   off a successful `TOOL_RESULT`.
+2. **A gap-FORCED call was scored against the agent** (55). `expected_tool_use="none"` means
+   *no reflex tool use*; the trigger re-invokes with a NAMED tool, so the CODE compelled it.
+3. **Refusals were pooled with answerable turns** (57). A refusal scores goal accuracy **1.0
+   in 9 of 9** measured attempts — including one that never searched — so 20% of a
+   ten-question denominator sat pinned at 1.0. Now split, with separate denominators.
+4. **"It searched, found nothing, and declined" was measured FALSE** (59). 3/3 each way.
+   Withdrawn from `trajectory_metrics.py` rather than softened, and replaced with
+   `self_initiated` + `searches`, which need no judge.
+
+### Reading it without being misled
+
+- **Goal accuracy is BINARY.** Render `n/m achieved`, never a rate, below n=20. Wilson 95% CI
+  on 7/8 is [0.53, 0.98].
+- **Measure the judge's noise floor before believing a delta.** `agent_eval_check --noise k`
+  re-scores ONE fixed trajectory k times and prints the flip rate. It is
+  `agent_metrics_check` case 22's missing sibling: case 22 asserts a good and a bad
+  trajectory **differ**; this asserts the **same one does not**. Measured 0.00 on 2026-08-28,
+  and 3-in-8 on a borderline turn in an earlier probe — so it is not always zero.
+- **The counted signals are the decision metrics.** They need no judge, so their only
+  variance is generation variance.
+- **Never read a delta off two runs.** Every run re-asks at temperature 1.0. This file
+  already records that mistake once, on faithfulness (`0.628 -> 0.769`, §10).
+
+### Running it
+
+```bash
+backend/.venv/Scripts/python.exe scripts/agent_eval_check.py --n 10 --noise 5
+```
+
+Writes **nothing** — it answers through `pipeline.answer_question` and builds the trajectory
+in memory, so a comparison run cannot pollute this file's run history or look like a
+regression on an operator's card. It equalises every confounding agent field in memory and
+asserts the equalisation, because the first version forgot `system_prompt` and reported a
+persona's cost as the agent loop's.

@@ -50,11 +50,11 @@ it is the one everybody trusts.
 
 → [loop.md §3 T2](new%20features/loop.md), [build.md §7](new%20features/build.md)
 
-### 2. A green suite is not evidence. This one has been wrong nine times, in nine modules
+### 2. A green suite is not evidence. This one has been wrong eleven times, in eleven modules
 
-Not nine instances of one bug — nine different subsystems, nine different mechanisms. The full
-list is in [build.md §7](new%20features/build.md) and is worth reading before trusting any suite.
-Three that generalise hardest:
+Not eleven instances of one bug — eleven different subsystems, eleven different mechanisms. The
+full list is in [build.md §7](new%20features/build.md) and is worth reading before trusting any
+suite. Three that generalise hardest:
 
 - **A zero-slide deck and 28 bytes of junk both passed** `starts with PK` + `>= 10,000 bytes`.
   Nothing between `prs.save()` and the download had ever *opened* the file. → **Assert the
@@ -76,7 +76,7 @@ passing assertion.** So verification ends with a step that is not a command: *op
 read one real output by eye.*
 
 **Corollary: "do not stop until everything is tested" is a failure mode, not a goal.** It
-optimises for the suite being green, which is the state that has been wrong nine times.
+optimises for the suite being green, which is the state that has been wrong eleven times.
 
 ### 3. Then mutate. A passing suite tells you nothing about what it would let through
 

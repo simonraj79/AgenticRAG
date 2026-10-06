@@ -67,9 +67,10 @@ passage. There is no way to address another agent's documents, by design.
 | Embeddings | `gemini-embedding-2` @ 768 dims |
 | Generation | `deepseek/deepseek-v4-flash-0731` via OpenRouter |
 | Question rewrite · routing · self-check | `google/gemma-4-31b-it` via OpenRouter |
+| Agent runtime | LangChain loop (`AGENT_RUNTIME=langchain`, the default) · Google ADK 2.8.0 available behind the same flag |
 | Agent tools | `search_corpus` · `run_python` (sandboxed) |
 | Reranker | Cohere `rerank-v3.5` |
-| Evaluation | Ragas, judged by `google/gemini-3.7-flash` |
+| Evaluation | Ragas 0.4.3 — four RAG metrics + an agent rubric, judged by `google/gemini-3.7-flash` |
 | Auth | Google OAuth 2.0 |
 
 ## Getting started
@@ -170,9 +171,9 @@ that work first time, and then the model declines to call it.
 Both assume [insights.md](insights.md), which is the shortest useful thing to read here.
 Its first rule is the one that generalises furthest — **trigger on the absence of the
 outcome you wanted, never on the presence of an error** — and its second is the reason this
-repo has the harnesses it does: a green suite here has been wrong eight times, in eight
-different modules, and every one was found by reading an answer or opening a page rather
-than by a passing assertion.
+repo has the harnesses it does: a green suite here has been wrong eleven times, in eleven
+different modules, and every one was found by reading an answer, opening a page or asking how
+many real rows an instrument had ever produced — never by a passing assertion.
 
 ## Deploying
 
@@ -215,10 +216,12 @@ scripts/            Provisioning and end-to-end checks
 |---|---|
 | [PRD.md](PRD.md) | The specification: architecture, schema, deployment |
 | [EVAL.md](EVAL.md) | How to run an evaluation and read a scorecard |
-| [insights.md](insights.md) | **What this project learned that outlives it** — ~29 rules with the incident behind each. Trigger on the absence of the outcome, never the presence of an error; a green suite here has been wrong eight times; mutate, because a passing suite says nothing about what it would let through. Read before starting work, not after something breaks |
+| [insights.md](insights.md) | **What this project learned that outlives it** — ~35 rules with the incident behind each. Trigger on the absence of the outcome, never the presence of an error; a green suite here has been wrong eleven times; mutate, because a passing suite says nothing about what it would let through; an instrument that has never produced a row has never been tested. Read before starting work, not after something breaks |
 | [new features/](new%20features/) | Design notes for each major change. **Un-numbered files are living references; numbered ones record a change that shipped** |
 | [new features/build.md](new%20features/build.md) | **Start here for a new feature bigger than one prompt** — audit, plan, one file per feature, harness-first, verify, ship |
 | [new features/loop.md](new%20features/loop.md) | The design pattern for anything the **model** decides — read before adding a tool, a retry or a detector |
+| [new features/18-adk-runtime/PLAN.md](new%20features/18-adk-runtime/PLAN.md) | The Google ADK runtime, why it is a `BaseLlm` over `build_chat_model` rather than `LiteLlm`, and why it ships switched off |
+| [new features/19-agent-evaluation/PLAN.md](new%20features/19-agent-evaluation/PLAN.md) | Evaluating the agent architecture — and the four numbers the rubric would have rendered wrong before anyone read one |
 
 Each of those two has a `-prompt.md` companion holding the session structure.
 [PRD.md §10](PRD.md) is the authoritative tracker for what is still open.
