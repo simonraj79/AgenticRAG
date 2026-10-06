@@ -141,6 +141,25 @@ export const auth = betterAuth({
     // http://localhost development, and browsers treat localhost as a
     // trustworthy origin regardless.
     useSecureCookies: process.env.NODE_ENV === "production",
+
+    // THE RATE LIMITER KEYS ON THIS, AND WITHOUT IT EVERY USER SHARES ONE BUCKET.
+    // Better Auth's default is `x-forwarded-for`, and it trusts that header only
+    // when it holds a SINGLE address -- the leftmost entry of a chain is
+    // whatever the client chose to send. Render's proxy APPENDS rather than
+    // replaces, so the header arrives as `<client-supplied>, <client>,
+    // <cloudflare>, <10.x>`, no IP resolves, and the limiter falls back to one
+    // per-path bucket for everyone. Nothing errors: it logs one WARN on the
+    // first request and then a busy room locks itself out of sign-in.
+    //
+    // `true-client-ip` is set by Cloudflare at Render's edge and OVERWRITES a
+    // forged one, so it is the only header here a client cannot choose. It is
+    // listed ALONE on purpose: falling back to `x-forwarded-for` would hand a
+    // client who strips the trusted header a way to pick its own bucket.
+    // Locally neither header exists and Better Auth falls back to 127.0.0.1 in
+    // development, so this changes nothing on `npm run dev`.
+    ipAddress: {
+      ipAddressHeaders: ["true-client-ip"],
+    },
   },
 
   session: {
